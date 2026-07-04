@@ -1,0 +1,512 @@
+---
+title: "Garbage Collection"
+chapter: 52
+stage: "Stage 9"
+stageName: "JVM Deep Dive"
+order: 2
+description: "Deep dive into GC principles: reachability analysis and GC Roots, four reference types, GC algorithms (mark-sweep/copying/mark-compact/generational), collector evolution (Serial→G1→ZGC→Shenandoah), G1 and ZGC in detail, GC logs and tuning"
+pubDate: 2026-07-03
+tags: ["Java", "JVM", "GC", "G1", "ZGC", "Shenandoah", "可达性分析"]
+---
+
+# Garbage Collection
+
+The previous chapter covered the JVM memory model — we know the heap is "where objects live." This chapter covers — how objects on the heap are cleaned up after they "die." This is **GC (Garbage Collection)** — one of Java's biggest advantages over C/C++: no manual `free`/`delete`; the JVM automatically finds garbage and reclaims memory.
+
+But "automatic" doesn't mean "free" — GC has overhead, and misconfiguration can cause application pauses, OOM, and CPU spikes. Understanding GC is the core of Java performance tuning. This chapter thoroughly covers GC from principles to practice.
+
+## 1. Determining Object Liveness: Reachability Analysis
+
+### 1.1 Reference Counting (Deprecated)
+
+The most intuitive way to determine whether an object is "dead" — **Reference Counting**: each object has a counter; +1 when referenced, -1 when a reference disappears, and reclaimed when it hits zero.
+
+**Problem**: circular references. A references B, B references A, both counts are 1, but nothing outside references them — they should be reclaimed, but counts never reach zero.
+
+Early Python used reference counting, rescued by "periodic GC." The JVM **does not** use reference counting — it uses **reachability analysis**.
+
+### 1.2 Reachability Analysis
+
+The JVM uses **reachability analysis** to determine object liveness:
+
+1. Select a set of **GC Roots (root objects)** as starting points.
+2. From the GC Roots, traverse the reference chain.
+3. Objects reached are "reachable" — alive.
+4. Objects not reached are "unreachable" — garbage, can be reclaimed.
+
+```
+GC Root A ──→ B ──→ C
+                     │
+                     └──→ D (reachable)
+
+GC Root X (standalone object, no references)
+Y ──→ Z (mutually referencing, but no GC Root points to them, both unreachable, both reclaimed)
+```
+
+Circular references aren't a problem — as long as no GC Root can reach them, they're reclaimed. This is why Java doesn't need manual management of circular references.
+
+### 1.3 What Are GC Roots
+
+Which objects can be GC Roots? The JVM spec doesn't strictly define them, but HotSpot's implementation includes:
+
+1. **Local variables in the VM Stack** — objects referenced by method parameters and method-local variables.
+2. **Static variables in the Method Area** — objects referenced by `static` fields.
+3. **Constants in the Method Area** — objects referenced by `final static` constants.
+4. **JNI references in the Native Method Stack** — Java objects referenced by native methods.
+5. **Internal JVM references** — primitive exception objects, class loaders.
+6. **Objects held by synchronized monitors** — objects locked by `synchronized`.
+7. **JMXBean, JVMTI, and other internal JVM structures**.
+
+In short — **objects being used and referenced by key JVM structures are all GC Roots**. Objects "traceable" from them are alive.
+
+## 2. The Four Reference Types
+
+Since JDK 1.2, references are divided into four types, from strongest to weakest:
+
+### 2.1 Strong Reference (Strong Reference)
+
+The most common reference — `Object obj = new Object()`. **As long as the strong reference exists, GC never reclaims it** — even on OOM.
+
+```java
+Object obj = new Object();   // strong reference
+obj = null;                  // strong reference broken, object can be reclaimed
+```
+
+### 2.2 Soft Reference (SoftReference)
+
+**Reclaimed only when memory is insufficient**. Suitable for memory-sensitive caches.
+
+```java
+SoftReference<byte[]> cache = new SoftReference<>(new byte[1024*1024]);
+byte[] data = cache.get();   // may return null (reclaimed when memory low)
+```
+
+The JVM guarantees that all soft-reference objects are reclaimed before throwing OOM. So soft-reference objects don't cause OOM — but may trigger frequent GC.
+
+### 2.3 Weak Reference (WeakReference)
+
+**Reclaimed on the next GC** (regardless of memory sufficiency). `ThreadLocal`'s Entry and `WeakHashMap`'s keys are weak references.
+
+```java
+WeakReference<Object> weak = new WeakReference<>(new Object());
+System.gc();
+weak.get();   // very likely null
+```
+
+### 2.4 Phantom Reference (PhantomReference)
+
+**The weakest reference** — virtually nonexistent; **`get()` always returns null**. The only purpose — receiving a notification when the object is reclaimed (via ReferenceQueue), used to track object destruction.
+
+```java
+ReferenceQueue<Object> queue = new ReferenceQueue<>();
+PhantomReference<Object> phantom = new PhantomReference<>(new Object(), queue);
+phantom.get();   // always null
+// After the object is reclaimed, phantom is placed in queue; checking queue senses the reclamation
+```
+
+DirectByteBuffer's release relies on phantom references + the Cleaner mechanism — when the object is GC'd, the Cleaner is triggered to clean up off-heap memory.
+
+| Reference | Reclamation timing | Use |
+| --- | --- | --- |
+| Strong | Never (unless actively broken) | Ordinary objects |
+| Soft | When memory is insufficient | Caches (e.g., image cache) |
+| Weak | Next GC | ThreadLocal, WeakHashMap |
+| Phantom | Anytime | Tracking object destruction (DirectByteBuffer) |
+
+## 3. GC Algorithms
+
+### 3.1 Mark-Sweep
+
+The most basic GC algorithm:
+
+1. **Mark** — traverse from GC Roots, marking all reachable objects.
+2. **Sweep** — traverse the heap, reclaiming unmarked objects.
+
+**Problems**:
+
+- **Memory fragmentation** — reclaimed memory spaces are non-contiguous; allocating large objects can't find contiguous space, triggering GC prematurely.
+- **Long pauses** — both mark and sweep traverse the entire heap.
+
+### 3.2 Copying
+
+Split memory into two halves, use only one at a time. During GC, **copy** surviving objects to the other half, then clear the original half entirely.
+
+```
+[Live1][Live2][Garbage][Live3][Garbage]  →  [Live1][Live2][Live3][          ]
+   Block A                                Block B (cleared)
+```
+
+**Advantages**:
+
+- **No fragmentation** — memory is compact after copying.
+- **Fast** — efficient when few survivors (only live objects copied).
+
+**Disadvantages**:
+
+- **Wastes half the memory** — usable memory halved.
+
+The young generation uses copying — because young-gen objects "die young," with few survivors, copying is cheap. The Eden + S0 + S1 design is an optimized copying algorithm (Eden : S : S = 8:1:1, only 10% wasted).
+
+### 3.3 Mark-Compact
+
+Mark-Sweep + compaction: after marking, **move** surviving objects to one end, then clear the memory beyond the boundary.
+
+```
+[Live1][Live2][Garbage][Live3][Garbage]  →  [Live1][Live2][Live3][          ]
+                                              ← compacted to one end
+```
+
+**Advantages**: no fragmentation, no memory waste.
+**Disadvantages**: moving objects is expensive (must update all references), long pauses.
+
+The old generation uses mark-compact — old-gen has many survivors, copying is costly, but tolerates compaction pauses.
+
+### 3.4 Generational Collection
+
+Real JVMs don't use a single algorithm — they use **generational collection** — different algorithms for different generations:
+
+- **Young generation**: copying — few survivors, fast copy.
+- **Old generation**: mark-sweep or mark-compact — many survivors, can't copy.
+
+The basis for generations is the **Weak Generational Hypothesis**:
+
+1. The vast majority of objects die young.
+2. Objects surviving more GC cycles are harder to kill.
+
+These two hypotheses hold in the vast majority of Java applications, so generational collection is very effective.
+
+## 4. Garbage Collector Evolution
+
+JVM garbage collectors (Garbage Collector) have evolved over 20+ years, from single-threaded to parallel, from generational to Region-based, from STW to concurrent:
+
+| Collector | Era | Characteristics | Algorithm | STW |
+| --- | --- | --- | --- | --- |
+| Serial / Serial Old | 1999 | Single-threaded | Copying / Compact | Full STW |
+| ParNew / Parallel Scavenge | 2002 | Multi-threaded | Copying / Compact | STW, throughput-first |
+| CMS (Concurrent Mark Sweep) | 2004 | Concurrent mark-sweep | Mark-Sweep | Partial STW, low latency |
+| G1 (Garbage First) | 2012 (JDK 9 default) | Region-based generational | Mark-Compact + Copying | Partial STW |
+| ZGC | 2017 (JDK 11 preview, 15 final) | Colored pointers | Colored pointer + read barrier | ＜10ms |
+| Shenandoah | 2018 (JDK 12, Red Hat) | Concurrent compaction | Brooks forwarding pointer | ＜10ms |
+
+### 4.1 Serial / Serial Old
+
+Single-threaded GC — during GC, only one thread works, **all application threads pause (STW)**. Still used in client mode and small-memory applications.
+
+```bash
+-XX:+UseSerialGC   # enable Serial + Serial Old
+```
+
+### 4.2 Parallel Scavenge / Parallel Old
+
+Multi-threaded Serial — during GC, multiple threads work in parallel, throughput-first (low GC time as a fraction of total). JDK 8 default.
+
+```bash
+-XX:+UseParallelGC   # JDK 8 default
+-XX:MaxGCPauseMillis=200   # target max GC pause 200ms
+-XX:GCTimeRatio=99         # GC time not exceeding 1/(1+99)=1%
+```
+
+### 4.3 CMS (Concurrent Mark Sweep)
+
+**The first concurrent GC** — most phases run concurrently with application threads, pursuing low latency.
+
+Four phases:
+
+1. **Initial Mark** — STW, mark GC Roots' directly referenced objects, fast.
+2. **Concurrent Mark** — concurrent with application, traverse from GC Roots.
+3. **Remark** — STW, fix up objects changed by the application during concurrent marking.
+4. **Concurrent Sweep** — concurrent with application, sweep garbage.
+
+**Problems**:
+
+- **Memory fragmentation** — mark-sweep doesn't compact, severe fragmentation.
+- **Concurrent Mode Failure** — old gen fills during concurrent collection, degrades to Serial Old full compact — long STW.
+- **Floating garbage** — new garbage generated during concurrent sweep can't be collected this round.
+
+Deprecated in JDK 9, removed in JDK 14 — replaced by G1.
+
+### 4.4 G1 (Garbage First)
+
+**Default GC since JDK 9**. Design philosophy — slice the heap into multiple **Regions**, each time reclaiming only a subset (the "most garbage" first), with controllable pause times.
+
+#### Region-Based Layout
+
+```
+Heap sliced into ~2048 Regions (1-32MB each)
+┌────┬────┬────┬────┬────┬────┬────┬────┐
+│ E  │ E  │ S  │ O  │ O  │ H  │ O  │ E  │  E=Eden, S=Survivor, O=Old, H=Humongous
+└────┴────┴────┴────┴────┴────┴────┴────┘
+```
+
+- **Region** — the heap is no longer physically generational; each Region dynamically takes a role (Eden/Survivor/Old).
+- **Humongous Region** — stores large objects (>half a Region).
+- **CSet (Collection Set)** — the set of Regions to reclaim this GC.
+- **Remembered Set (RSet)** — records "who referenced me," avoiding full-heap scans.
+
+#### GC Flow
+
+1. **Young GC** — reclaim all Eden + Survivor Regions, copy survivors to new Survivor / Old. STW, but only part of the heap.
+2. **Concurrent marking** — mark surviving objects in Old Regions, concurrent with application.
+3. **Mixed GC** — reclaim all Young + some Old (the most garbage first, hence "Garbage First").
+
+#### Parameters
+
+```bash
+-XX:+UseG1GC
+-XX:MaxGCPauseMillis=200   # target pause 200ms
+-XX:G1HeapRegionSize=16m   # Region size
+-XX:InitiatingHeapOccupancyPercent=45   # trigger concurrent marking at 45% old gen occupancy
+```
+
+G1's "target pause" is a soft goal — best effort, not guaranteed. Region-based lets G1 "pick and choose," a compromise between low latency and large heaps.
+
+### 4.5 ZGC (Z Garbage Collector)
+
+**Oracle's ultra-low-latency GC** — target pause ＜10ms (even ＜1ms), independent of heap size.
+
+#### Core Technology: Colored Pointers
+
+ZGC packs GC info (color bits) into the **high bits** of 64-bit pointers:
+
+```
+64-bit pointer:
+[unused 16 bits][color 4 bits][object address 44 bits]
+                ^^^^^^^^^^
+                Finalizable/Marked1/Marked0/Remapped
+```
+
+Different GC phases give object pointers different "colors." GC marks object state by changing pointer color, **without modifying the object header** — dramatically reducing memory writes.
+
+#### Load Barrier
+
+Every time a reference is read from the heap, the JVM inserts a "load barrier" code snippet — checks the pointer color, and if stale, **fixes it on the spot** (updates the pointer after moving the object).
+
+This lets ZGC **move objects while the application runs** — concurrent compaction. The cost is load-barrier overhead, but JIT-optimized overhead is ＜5%.
+
+#### Characteristics
+
+- Pause ＜10ms (from Java 16, ＜1ms; from JDK 21, generational ZGC further optimizes).
+- Pause time doesn't grow with heap size — TB-scale heaps also ＜10ms.
+- Supports NUMA, colored pointers, concurrent compaction.
+
+```bash
+-XX:+UseZGC                  # JDK 15+ finalized
+-XX:+UseZGC -XX:+ZGenerational   # JDK 21 generational ZGC
+```
+
+### 4.6 Shenandoah
+
+Red Hat's low-latency GC, similar goal to ZGC — pause ＜10ms.
+
+Different technical approach — uses **Brooks Forwarding Pointer** instead of colored pointers. Each object has an extra "forwarding pointer" field pointing to "the real location" (updated after moving).
+
+```bash
+-XX:+UseShenandoahGC   # JDK 12+ (OpenJDK)
+```
+
+ZGC and Shenandoah are the next-gen GC representatives — trading load barriers/forwarding pointers for "almost no STW." Suited for large-heap + strict low-latency scenarios.
+
+## 5. GC Logs and Tuning
+
+### 5.1 Enabling GC Logs
+
+```bash
+# JDK 8
+-XX:+PrintGCDetails -XX:+PrintGCDateStamps -Xloggc:gc.log
+
+# JDK 9+ (unified logging)
+-Xlog:gc*:file=gc.log:time,uptime,level,tags
+```
+
+### 5.2 Key Parameters
+
+| Parameter | Effect |
+| --- | --- |
+| `-Xms4g -Xmx4g` | Heap size (recommend same, avoid dynamic expansion) |
+| `-Xmn1g` | Young gen size |
+| `-XX:MetaspaceSize=256m` | Metaspace initial |
+| `-XX:MaxMetaspaceSize=512m` | Metaspace max |
+| `-XX:SurvivorRatio=8` | Eden : Survivor = 8:1 |
+| `-XX:MaxTenuringThreshold=15` | Promotion age |
+| `-XX:+UseG1GC` | Use G1 |
+| `-XX:MaxGCPauseMillis=200` | G1/ZGC target pause |
+| `-XX:+UseZGC` | Use ZGC |
+| `-XX:+HeapDumpOnOutOfMemoryError` | Auto heap dump on OOM |
+| `-XX:HeapDumpPath=/var/dumps` | Dump path |
+
+### 5.3 Common Tuning Scenarios
+
+- **Frequent Minor GC** — young gen too small, increase `-Xmn` or adjust `-XX:NewRatio`.
+- **Frequent Full GC** — old gen too small, increase `-Xmx`; or memory leak, check heap dump.
+- **Long GC pauses** — switch to G1/ZGC, tune `-XX:MaxGCPauseMillis`.
+- **Metaspace OOM** — increase `-XX:MaxMetaspaceSize`, or investigate CGLIB dynamic class generation.
+- **Direct memory OOM** — check Netty/NIO DirectByteBuffer leaks.
+
+## 6. Practice: Observing GC and References
+
+The following example demonstrates triggering GC in code, observing soft/weak/phantom reference behavior, and viewing GC stats.
+
+<CodeRunner code={`import java.lang.ref.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== GC Garbage Collection Demo ===\\n");
+
+        // 1. View current GC
+        System.out.println("--- 1. Current Garbage Collector ---");
+        for (java.lang.management.GarbageCollectorMXBean gc :
+             java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+            System.out.println("  GC: " + gc.getName()
+                + " (count=" + gc.getCollectionCount()
+                + ", time=" + gc.getCollectionTime() + "ms)");
+        }
+        // Determine via JVM args
+        String gcName = System.getProperty("java.vm.name");
+        System.out.println("  JVM: " + gcName + " "
+            + System.getProperty("java.version"));
+
+        // 2. Trigger GC and observe
+        System.out.println("\\n--- 2. Triggering GC ---");
+        Runtime rt = Runtime.getRuntime();
+        long MB = 1024 * 1024;
+        System.out.println("Free memory before GC: " + rt.freeMemory() / MB + " MB");
+
+        // Create many objects, then discard
+        List<byte[]> junk = new ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            junk.add(new byte[1024 * 100]);   // 100KB each
+        }
+        System.out.println("After creating 1000 100KB objects: " + rt.freeMemory() / MB + " MB");
+
+        junk.clear();   // release references, objects become garbage
+        junk = null;
+        System.gc();   // suggest GC (no immediate execution guarantee)
+        Thread.sleep(100);
+        System.out.println("After System.gc(): " + rt.freeMemory() / MB + " MB");
+
+        // 3. Soft reference - reclaimed only when memory low
+        System.out.println("\\n--- 3. Soft Reference (SoftReference) ---");
+        SoftReference<byte[]> softRef = new SoftReference<>(new byte[5 * 1024 * 1024]);   // 5MB
+        System.out.println("Created 5MB soft ref: get() = " + (softRef.get() != null ? "present" : "null"));
+        System.gc();
+        Thread.sleep(100);
+        System.out.println("After System.gc() (memory still sufficient): get() = "
+            + (softRef.get() != null ? "present (soft refs not reclaimed just by GC)" : "null"));
+
+        // 4. Weak reference - reclaimed on next GC
+        System.out.println("\\n--- 4. Weak Reference (WeakReference) ---");
+        WeakReference<byte[]> weakRef = new WeakReference<>(new byte[5 * 1024 * 1024]);
+        System.out.println("Created 5MB weak ref: get() = " + (weakRef.get() != null ? "present" : "null"));
+        System.gc();
+        Thread.sleep(100);
+        System.out.println("After System.gc(): get() = "
+            + (weakRef.get() != null ? "present" : "null (weak ref reclaimed)"));
+
+        // 5. Phantom reference - track object destruction
+        System.out.println("\\n--- 5. Phantom Reference (PhantomReference) ---");
+        ReferenceQueue<byte[]> queue = new ReferenceQueue<>();
+        PhantomReference<byte[]> phantomRef = new PhantomReference<>(new byte[1024], queue);
+        System.out.println("Phantom ref get() = " + phantomRef.get() + " (always null)");
+        System.gc();
+        Thread.sleep(100);
+        Reference<?> ref = queue.poll();
+        System.out.println("After object reclamation, ReferenceQueue: "
+            + (ref != null ? "has Reference (object destroyed)" : "none (may not have triggered)"));
+
+        // 6. WeakHashMap - weak-reference keys
+        System.out.println("\\n--- 6. WeakHashMap ---");
+        WeakHashMap<Object, String> weakMap = new WeakHashMap<>();
+        Object key = new Object();
+        weakMap.put(key, "value");
+        System.out.println("After put, size: " + weakMap.size());
+        key = null;   // release strong reference
+        System.gc();
+        Thread.sleep(100);
+        System.out.println("After key=null + GC, size: " + weakMap.size() + " (key reclaimed)");
+
+        // 7. Simulate Minor GC - young gen pressure
+        System.out.println("\\n--- 7. Young Gen Allocation Pressure ---");
+        long start = System.currentTimeMillis();
+        long totalAllocated = 0;
+        for (int i = 0; i < 50000; i++) {
+            byte[] tmp = new byte[1024];   // 1KB
+            totalAllocated += 1024;
+            // tmp is discarded at loop end, mostly reclaimed in young gen
+        }
+        long elapsed = System.currentTimeMillis() - start;
+        System.out.println("Allocated " + (totalAllocated / MB) + " MB (1KB each), took " + elapsed + " ms");
+        System.out.println("(Short-lived objects allocated in Eden, Minor GC frequent but fast)");
+
+        // 8. Post-GC stats
+        System.out.println("\\n--- 8. Post-GC Stats ---");
+        for (java.lang.management.GarbageCollectorMXBean gc :
+             java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+            System.out.println("  GC: " + gc.getName()
+                + " (count=" + gc.getCollectionCount()
+                + ", total time=" + gc.getCollectionTime() + "ms)");
+        }
+
+        // 9. Memory pool usage - see generations
+        System.out.println("\\n--- 9. Memory Pool Usage (Generations) ---");
+        for (java.lang.management.MemoryPoolMXBean pool :
+             java.lang.management.ManagementFactory.getMemoryPoolMXBeans()) {
+            java.lang.management.MemoryUsage usage = pool.getUsage();
+            if (usage.getUsed() > 0) {
+                System.out.println("  " + pool.getName() + ": "
+                    + usage.getUsed() / MB + "/" + usage.getCommitted() / MB + " MB");
+            }
+        }
+
+        System.out.println("\\n=== Summary ===");
+        System.out.println("1. GC Roots are the start; reachability analysis determines liveness");
+        System.out.println("2. Four references: strong/soft/weak/phantom, descending reclamation strength");
+        System.out.println("3. Algorithms: copying (young) / mark-compact (old) / mark-sweep (CMS)");
+        System.out.println("4. Collectors: Serial→Parallel→CMS→G1→ZGC/Shenandoah");
+        System.out.println("5. G1: Region-based generational, controllable target pause");
+        System.out.println("6. ZGC: colored pointers + load barrier, <10ms pause, TB-scale heap");
+    }
+}`} />
+
+> **Key observations**:
+> - **Soft references**: with sufficient memory, `System.gc()` won't reclaim them — only when memory is low.
+> - **Weak references**: reclaimed immediately after `System.gc()` — next GC reclaims them.
+> - **Phantom reference `get()` is always null** — you can only sense object destruction via ReferenceQueue.
+> - **WeakHashMap**: once the key has no strong reference, the entire entry is cleared after GC.
+> - **Many short-lived objects**: allocated in Eden, Minor GC frequent but fast — the advantage of generational design.
+> - **`System.gc()` is only a suggestion** — the JVM doesn't guarantee immediate execution. Use `-XX:+DisableExplicitGC` to disable.
+
+## 7. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| Reachability analysis | Traverse from GC Roots; unreachable = reclaim |
+| GC Roots | Stack variables, static vars, constants, JNI refs, lock objects |
+| Strong reference | Never reclaimed |
+| Soft reference | Reclaimed when memory low, for caches |
+| Weak reference | Reclaimed on next GC, used by ThreadLocal |
+| Phantom reference | Track destruction, used by DirectByteBuffer |
+| Mark-Sweep | Simple but fragments |
+| Copying | No fragmentation but wastes memory, used in young gen |
+| Mark-Compact | No fragmentation, no waste, but slow, used in old gen |
+| Generational | Young copying + old compact |
+| G1 | Region-based generational, controllable target pause |
+| ZGC | Colored pointers + load barrier, ＜10ms |
+| Shenandoah | Forwarding pointer, ＜10ms |
+
+**Mnemonics**:
+
+- **Reachability analysis finds garbage** — walk from GC Roots; what you can't reach is garbage.
+- **GC Roots are the entrance** — stack variables, static vars, constants, JNI refs, lock objects.
+- **Strong never reclaimed, soft only when low, weak on next GC, phantom just notifies** — four references in descending strength.
+- **Copy young gen, compact old gen** — the core of generational algorithms.
+- **G1 is Region-based** — slice heap into ~2048 pieces, reclaim the most garbage first.
+- **ZGC is colored pointers** — pack GC info into pointers, load barrier fixes them.
+- **CMS is dead, G1 reigns, ZGC is the future** — the modern answer for choosing a GC.
+
+## Conclusion: GC Is Java's "Automatic Garbage Truck"
+
+GC lets Java programmers avoid the manual `malloc/free` of C/C++ — one of Java's biggest selling points. But "automatic" doesn't mean "transparent" — understanding GC is the only way to avoid OOM, pauses, and CPU spikes.
+
+This chapter covered GC's principles and evolution. The next chapter covers **Class Loading** — how the JVM loads `.class` files into memory, how the parent delegation model organizes class loaders, and how to "break" parent delegation (Tomcat, SPI, hot deployment). If GC is "object death," class loading is "object birth" — together they form the JVM's cycle. See you in the next chapter.

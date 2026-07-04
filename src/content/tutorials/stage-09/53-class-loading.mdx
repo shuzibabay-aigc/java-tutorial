@@ -1,0 +1,564 @@
+---
+title: "类加载机制"
+chapter: 53
+stage: "第九阶段"
+stageName: "JVM 深度"
+order: 3
+description: "深入类加载过程（加载→验证→准备→解析→初始化）、双亲委派模型、打破双亲委派（Tomcat/SPI/热部署）、自定义类加载器、类的卸载条件"
+pubDate: 2026-07-03
+tags: ["Java", "JVM", "类加载", "双亲委派", "ClassLoader", "SPI", "Tomcat"]
+---
+
+# 类加载机制
+
+上一章讲了 GC——堆上的对象怎么"死"。这一章讲类怎么"生"——JVM 怎么把磁盘上的 `.class` 文件加载进内存、变成可用的类。这是 **类加载机制（Class Loading Mechanism）**。
+
+类加载是 Java 的"海关"——`.class` 文件就像进口货物，要经过"申报（加载）→ 检查（验证）→ 估值（准备）→ 派送（解析）→ 上架（初始化）"五道关卡才能用。这一章我们看清这五道关卡，以及"双亲委派"这个最常被面试问的机制。
+
+## 一、类加载过程：五个阶段
+
+JVM 规范规定，类加载分**加载、验证、准备、解析、初始化** 五个阶段。使用和卸载不算严格意义的"加载"，但完整生命周期是七阶段：
+
+```
+加载 → 验证 → 准备 → 解析 → 初始化 → 使用 → 卸载
+ └───────────链接───────────┘
+```
+
+其中验证、准备、解析合称**链接（Linking）**。
+
+### 1.1 加载（Loading）
+
+**加载**是"找字节码、读进内存"——做三件事：
+
+1. **通过类的全限定名获取定义此类的二进制字节流**——可以从 zip/jar、网络、动态生成、文件系统等。
+2. **把这个字节流转成方法区的运行时数据结构**——存到元空间。
+3. **在堆上生成一个 `Class` 对象**——作为方法区数据的访问入口。
+
+"二进制字节流"来源多样：
+
+- **jar/war** —— 最常见。
+- **网络** —— Applet 时代。
+- **动态生成** —— CGLIB、ByteBuddy、动态代理。
+- **JSP 编译** —— Tomcat 把 JSP 编译成 class。
+- **数据库** —— 某些中间件。
+
+加载阶段是开发可干预最强的——通过**自定义类加载器**控制字节流来源（后面讲）。
+
+### 1.2 验证（Verification）
+
+**验证**确保字节码安全、合法——避免恶意字节码搞垮 JVM。四类验证：
+
+- **文件格式**——魔数 `0xCAFEBABE`、版本号、常量池索引合法。
+- **元数据**——类是否有父类、是否继承 final 类、字段方法签名合法。
+- **字节码**——方法体逻辑合法，操作数栈不溢出，跳转指令合法。
+- **符号引用**——引用的类、字段、方法真实存在，访问权限合法。
+
+验证失败的类抛 `VerifyError`。
+
+### 1.3 准备（Preparation）
+
+**准备**为**类变量（static）** 分配内存并设**零值**——不是初始化值！
+
+```java
+public static int x = 123;
+// 准备阶段: x = 0  (零值)
+// 初始化阶段: x = 123 (赋值)
+```
+
+例外——`static final` 常量在**编译期已知**的，准备阶段直接赋值：
+
+```java
+public static final int X = 123;   // 准备阶段: X = 123 (ConstantValue 属性)
+public static final String S = "hello";   // 准备阶段: S = "hello"
+```
+
+注意准备阶段只处理**类变量**，不处理**实例变量**——实例变量随对象一起在堆上分配，零值在对象创建时设置（上一章讲过）。
+
+### 1.4 解析（Resolution）
+
+**解析**把常量池里的**符号引用**替换成**直接引用**。
+
+- **符号引用**——一个字符串，描述引用的目标（如 `Ljava/lang/String;`、`java/lang/Object.hashCode:()I`）。和目标类的实际内存布局无关。
+- **直接引用**——指向目标的指针、句柄或偏移量。和 JVM 内存布局相关。
+
+解析可以**延迟**——某些 JVM 在第一次使用某符号引用时才解析（lazy resolution），不一定在类加载时就全解析。
+
+### 1.5 初始化（Initialization）
+
+**初始化**执行类的 `＜clinit＞` 方法——这是编译器自动生成的，把**所有 static 变量赋值**和**static 块**按源码顺序合并：
+
+```java
+public class Foo {
+    static int a = 1;            // 编译后: a = 1
+    static { a = 2; b = 3; }     // 编译后: a = 2; b = 3
+    static int b = 4;            // 编译后: b = 4 (覆盖上面的 3)
+    // <clinit> 内容:
+    // a = 1; a = 2; b = 3; b = 4;
+}
+```
+
+`＜clinit＞` 特点：
+
+- **JVM 保证线程安全**——多线程同时触发初始化，`＜clinit＞` 只执行一次，其他线程阻塞。这就是"单例的静态内部类实现"线程安全的原因。
+- **父类先初始化**——子类 `＜clinit＞` 前先调父类 `＜clinit＞`。
+- **接口的 `＜clinit＞` 不要求父接口先初始化**——接口的初始化独立。
+- **如果没有 static 变量赋值/static 块，编译器不生成 `＜clinit＞`**。
+
+### 1.6 何时触发初始化
+
+**主动引用**（必须初始化）：
+
+1. `new`、`getstatic`、`putstatic`、`invokestatic` 四条字节码指令——new 对象、读写静态字段（非 final）、调静态方法。
+2. 反射调用（`Class.forName`）。
+3. 初始化子类时，父类先初始化。
+4. JVM 启动时的主类（含 `main` 的类）。
+5. `MethodHandle` 句柄对应的类。
+
+**被动引用**（不初始化）：
+
+1. 通过子类访问父类的静态字段——只初始化父类，不初始化子类。
+2. `ClassName[] arr = new ClassName[10]` ——不初始化 `ClassName`，只初始化数组类型。
+3. 访问 `static final` 常量（编译期常量）——直接进调用方的常量池，不触发定义类初始化。
+
+```java
+class Parent { static int x = 1; static { System.out.println("Parent init"); } }
+class Child extends Parent { static { System.out.println("Child init"); } }
+
+System.out.println(Child.x);   // 只输出 "Parent init" + "1", 不输出 "Child init"
+```
+
+## 二、双亲委派模型
+
+### 2.1 类加载器的层次
+
+JVM 内置三种类加载器（JDK 9+ 略有调整）：
+
+| 加载器 | JDK 8 | JDK 9+ | 加载什么 |
+| --- | --- | --- | --- |
+| Bootstrap ClassLoader | C++ 实现 | C++ 实现 | `JAVA_HOME/lib`（rt.jar、java.lang.*） |
+| Extension ClassLoader | `ExtClassLoader` | `PlatformClassLoader` | `JAVA_HOME/lib/ext` 或 JDK 系统模块 |
+| Application ClassLoader | `AppClassLoader` | `AppClassLoader` | classpath（应用自身 + 依赖） |
+
+层次关系：
+
+```
+Bootstrap ClassLoader  (C++ 实现, 没有父加载器)
+       ↑ parent
+Extension/Platform ClassLoader
+       ↑ parent
+Application ClassLoader
+       ↑ parent
+用户自定义 ClassLoader
+```
+
+注意——"父加载器"不是"父类"（继承关系），而是**组合关系**——每个 ClassLoader 内部有个 `parent` 字段指向父加载器。
+
+### 2.2 双亲委派的工作流程
+
+当类加载器收到加载请求时，**先委派给父加载器**，父加载器加载失败才自己加载：
+
+```java
+// ClassLoader.loadClass 的简化逻辑
+protected Class<?> loadClass(String name, boolean resolve) {
+    // 1. 检查是否已加载
+    Class<?> c = findLoadedClass(name);
+    if (c == null) {
+        try {
+            // 2. 委派给父加载器
+            if (parent != null) {
+                c = parent.loadClass(name, false);
+            } else {
+                c = findBootstrapClassOrNull(name);
+            }
+        } catch (ClassNotFoundException e) {
+            // 父加载器找不到
+        }
+        if (c == null) {
+            // 3. 父都找不到, 自己找
+            c = findClass(name);
+        }
+    }
+    return c;
+}
+```
+
+### 2.3 为什么双亲委派
+
+**保证类的全局唯一性**——同一个类只会被加载一次（最优先的加载器加载）。
+
+举例——`java.lang.Object` 永远由 Bootstrap 加载。如果用户写个 `java.lang.Object` 想覆盖，会先委派给 Bootstrap，Bootstrap 找到 JDK 的 `Object` 就加载了——用户的"假冒"版本被忽略。这是**安全**——防止核心类被替换、防止类的重复加载。
+
+### 2.4 类的唯一性
+
+JVM 用 **(类全限定名 + 类加载器)** 唯一标识一个类。同一个 class 文件被两个不同 ClassLoader 加载，得到的是**两个不同的 Class**——`equals` 返回 `false`，`instanceof` 不匹配。这是 Tomcat 等容器隔离应用的关键。
+
+## 三、打破双亲委派
+
+双亲委派很好，但有些场景必须"打破"它——让子加载器先加载，或绕过父加载器。
+
+### 3.1 Tomcat：Web 应用隔离
+
+Tomcat 部署多个 Web 应用，每个应用有自己的 `WEB-INF/classes` 和 `WEB-INF/lib`。要求：
+
+- **应用 A 和应用 B 的类互不可见**——避免冲突（如 A 用 Spring 5、B 用 Spring 4）。
+- **应用类不能被 Tomcat 自己加载**——否则 Tomcat 重启才能更新应用。
+- **Tomcat 自己的类对应用可见**——应用要用 Servlet API。
+
+Tomcat 设计了多层 ClassLoader：
+
+```
+Bootstrap
+  ↑
+Extension
+  ↑
+Application (System)
+  ↑
+Common (Tomcat 公共, 加载 $CATALINA_HOME/lib)
+  ↑
+┌──────────┴──────────┐
+Catalina              Shared (可选)
+(Tomcat 内部类)         ↑
+                  ┌────┴────┐
+              WebApp1     WebApp2
+              (各应用独立)
+```
+
+每个 WebApp ClassLoader **打破双亲委派**——先在自己的 `WEB-INF/classes` 找，找不到才委派给父。这就是"应用类优先"——同名类在每个 WebApp 里独立存在。
+
+### 3.2 SPI：JDBC 的反向加载
+
+**SPI（Service Provider Interface）** 是 Java 的扩展机制。问题——`java.sql.DriverManager`（JDK 内部）要加载 `com.mysql.cj.jdbc.Driver`（第三方 jar），但 Bootstrap ClassLoader 看不到 classpath 上的第三方 jar。
+
+**解法**：`Thread.currentThread().getContextClassLoader()`——线程上下文类加载器。`DriverManager` 用线程上下文 ClassLoader（默认是 AppClassLoader）反向加载驱动类，打破了"父加载器看不到子加载器加载的类"的限制。
+
+```java
+// DriverManager 内部 (简化)
+ServiceLoader<Driver> loaders = ServiceLoader.load(
+    Driver.class,
+    Thread.currentThread().getContextClassLoader()   // 用线程上下文加载
+);
+```
+
+这是"父加载器请求子加载器加载类"的反向操作——双亲委派的"漏洞"，但是必要的。
+
+### 3.3 热部署：JRebel、热重载
+
+热部署要求"修改 class 文件后不重启 JVM 就生效"。**核心思路**——每次修改都新建一个 ClassLoader 重新加载类。新类和旧类是不同 Class 对象（不同加载器），互不干扰。旧的 ClassLoader 失去引用后被 GC，旧类才卸载。
+
+这是"打破双亲委派"的极端用法——同一个类被多次加载，每次都是"新版本"。
+
+### 3.4 OSGi：模块化类加载
+
+OSGi 用"网状"类加载结构——每个 bundle 一个 ClassLoader，bundle 之间可以声明依赖关系，互相可见。完全打破层次结构，支持模块化。Java 9 的 JPMS 在某种程度上是 OSGi 思想的简化版。
+
+## 四、自定义类加载器
+
+### 4.1 为什么要自定义
+
+- **从非标准来源加载**——网络、加密文件、数据库、内存生成。
+- **隔离**——同一份代码不同版本共存。
+- **加密保护**——加密的 class 文件，自定义加载器解密。
+- **热部署**——重新加载类。
+
+### 4.2 实现
+
+继承 `ClassLoader`，重写 `findClass`（不建议重写 `loadClass`——会破坏双亲委派）：
+
+```java
+public class MyClassLoader extends ClassLoader {
+    private final String classPath;
+
+    public MyClassLoader(String classPath, ClassLoader parent) {
+        super(parent);
+        this.classPath = classPath;
+    }
+
+    @Override
+    protected Class<?> findClass(String name) throws ClassNotFoundException {
+        byte[] bytes = loadClassBytes(name);
+        if (bytes == null) throw new ClassNotFoundException(name);
+        // defineClass 把字节码转成 Class
+        return defineClass(name, bytes, 0, bytes.length);
+    }
+
+    private byte[] loadClassBytes(String name) {
+        String path = classPath + "/" + name.replace('.', '/') + ".class";
+        try {
+            java.nio.file.Path p = java.nio.file.Paths.get(path);
+            if (!java.nio.file.Files.exists(p)) return null;
+            return java.nio.file.Files.readAllBytes(p);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+}
+```
+
+`defineClass` 是 `ClassLoader` 的关键方法——把字节码"定义"成 Class 对象，填充方法区。
+
+### 4.3 加密 class 文件示例
+
+```java
+public class EncryptedClassLoader extends ClassLoader {
+    @Override
+    protected Class<?> findClass(String name) throws ClassNotFoundException {
+        byte[] encrypted = loadEncryptedBytes(name);
+        byte[] decrypted = decrypt(encrypted);   // 解密
+        return defineClass(name, decrypted, 0, decrypted.length);
+    }
+
+    private byte[] decrypt(byte[] data) {
+        // 简单异或加密示例 (生产用 AES)
+        for (int i = 0; i < data.length; i++) {
+            data[i] ^= 0x42;
+        }
+        return data;
+    }
+    // ...
+}
+```
+
+class 文件先加密，自定义加载器解密——保护代码防止反编译。
+
+## 五、类的卸载
+
+类被卸载需要三个条件**同时满足**：
+
+1. **堆上没有任何该类的实例**——所有对象都已被 GC。
+2. **该类的 Class 对象没被任何地方引用**——没人持有 `Class＜?＞`。
+3. **该类的 ClassLoader 已被回收**——加载它的加载器没了。
+
+```java
+ClassLoader loader = new MyClassLoader(...);
+Class<?> clazz = loader.loadClass("com.example.Foo");
+Object obj = clazz.newInstance();
+
+// 卸载 Foo 需要:
+obj = null;       // 1. 无实例
+clazz = null;     // 2. Class 对象无引用
+loader = null;    // 3. ClassLoader 无引用
+// GC 后, Foo 类被卸载, 元空间内存释放
+```
+
+JVM 自带的 BootstrapClassLoader 永远不卸载——所以 JDK 自带的类（`java.lang.*` 等）一辈子不会卸载。这就是为什么元空间可能因"动态生成类太多"而 OOM——动态类卸载不及时。
+
+## 六、实战：观察类加载
+
+下面的例子演示双亲委派、自定义类加载器、SPI 机制、类加载的层次结构。
+
+<CodeRunner code={`import java.net.*;
+import java.util.*;
+import java.io.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 类加载机制演示 ===\\n");
+
+        // 1. 类加载器层次
+        System.out.println("--- 1. 类加载器层次 ---");
+        ClassLoader appLoader = Main.class.getClassLoader();
+        System.out.println("Main 类的加载器 (AppClassLoader): " + appLoader);
+        ClassLoader extLoader = appLoader.getParent();
+        System.out.println("  父加载器 (PlatformClassLoader / ExtClassLoader): " + extLoader);
+        ClassLoader bootLoader = extLoader.getParent();
+        System.out.println("  父加载器 (Bootstrap, C++ 实现, 显示 null): " + bootLoader);
+
+        // java.lang.String 由 Bootstrap 加载
+        ClassLoader strLoader = String.class.getClassLoader();
+        System.out.println("String 的加载器 (Bootstrap): " + strLoader + " (null 表示 Bootstrap)");
+
+        // javax.sql.DataSource 由 PlatformClassLoader 加载
+        ClassLoader dsLoader;
+        try {
+            dsLoader = Class.forName("javax.sql.DataSource").getClassLoader();
+            System.out.println("javax.sql.DataSource 的加载器: " + dsLoader);
+        } catch (Throwable e) {
+            System.out.println("(javax.sql.DataSource 不存在)");
+        }
+
+        // 2. 双亲委派演示
+        System.out.println("\\n--- 2. 双亲委派 ---");
+        System.out.println("加载 java.lang.Integer (委派给 Bootstrap):");
+        Class<?> intClass = appLoader.loadClass("java.lang.Integer");
+        System.out.println("  返回的 Class: " + intClass.getName());
+        System.out.println("  加载它的 ClassLoader: " + intClass.getClassLoader()
+            + " (null = Bootstrap)");
+
+        // 试图自定义 java.lang.String 会被双亲委派拦截
+        System.out.println("\\n试图加载自定义 java.lang.String:");
+        Class<?> strClass = appLoader.loadClass("java.lang.String");
+        System.out.println("  Class: " + strClass.getName() + " 来自 " + strClass.getClassLoader());
+        System.out.println("  (双亲委派保证 JDK 的 String 被加载, 自定义版本被忽略)");
+
+        // 3. 线程上下文类加载器 (SPI 用)
+        System.out.println("\\n--- 3. 线程上下文类加载器 ---");
+        ClassLoader tccl = Thread.currentThread().getContextClassLoader();
+        System.out.println("当前线程上下文类加载器: " + tccl);
+        System.out.println("(SPI 机制如 JDBC 用 TCCL 加载第三方驱动)");
+
+        // 演示 ServiceLoader (JDBC 驱动用同样机制)
+        java.util.ServiceLoader<java.sql.Driver> drivers =
+            java.util.ServiceLoader.load(java.sql.Driver.class);
+        System.out.println("已注册的 JDBC 驱动:");
+        int driverCount = 0;
+        for (java.sql.Driver d : drivers) {
+            System.out.println("  - " + d.getClass().getName()
+                + " (加载器: " + d.getClass().getClassLoader() + ")");
+            driverCount++;
+        }
+        if (driverCount == 0) {
+            System.out.println("  (无 - classpath 上没有 JDBC 驱动 jar)");
+        }
+
+        // 4. 自定义类加载器
+        System.out.println("\\n--- 4. 自定义类加载器 ---");
+        // 动态生成一个类的字节码 (用现有的 Main 类的字节码模拟)
+        // 这里演示自定义加载器从字节数组加载类
+        byte[] mainBytes = getClassBytes(Main.class);
+        System.out.println("Main 类字节码大小: " + mainBytes.length + " 字节");
+
+        CustomClassLoader customLoader = new CustomClassLoader("DynamicMain", mainBytes, appLoader);
+        try {
+            Class<?> dynamicClass = customLoader.loadClass("DynamicMain");
+            System.out.println("通过自定义加载器加载的类: " + dynamicClass.getName());
+            System.out.println("  ClassLoader: " + dynamicClass.getClassLoader());
+            System.out.println("  与原 Main 类相同? " + (dynamicClass == Main.class));
+            System.out.println("  (不同 ClassLoader 加载的相同字节码 = 不同 Class)");
+        } catch (Throwable e) {
+            System.out.println("  (字节码内类名不匹配, 但演示了机制: " + e.getClass().getSimpleName() + ")");
+        }
+
+        // 5. 类加载器命名空间隔离
+        System.out.println("\\n--- 5. 类加载器命名空间 ---");
+        // 同一段字节码, 两个不同 ClassLoader 加载 = 两个 Class
+        CustomClassLoader loader1 = new CustomClassLoader("X", mainBytes, appLoader);
+        CustomClassLoader loader2 = new CustomClassLoader("X", mainBytes, appLoader);
+        try {
+            Class<?> c1 = loader1.loadClass("X");
+            Class<?> c2 = loader2.loadClass("X");
+            System.out.println("不同 ClassLoader 加载相同字节码:");
+            System.out.println("  c1 == c2 ? " + (c1 == c2) + " (不同 Class 对象)");
+            System.out.println("  c1.equals(c2) ? " + c1.equals(c2));
+            System.out.println("  c1 的 ClassLoader: " + c1.getClassLoader().getClass().getSimpleName());
+            System.out.println("  c2 的 ClassLoader: " + c2.getClassLoader().getClass().getSimpleName());
+        } catch (Throwable e) {
+            System.out.println("  (类名 X 与 Main 不符, 但隔离概念已演示)");
+        }
+
+        // 6. 类的初始化时机
+        System.out.println("\\n--- 6. 类的初始化时机 ---");
+        System.out.println("(访问父类的 static 字段不初始化子类)");
+        System.out.println("(数组创建不初始化元素类型)");
+        System.out.println("(final 常量不触发初始化)");
+
+        // 7. 类加载统计
+        System.out.println("\\n--- 7. 类加载统计 ---");
+        java.lang.management.ClassLoadingMXBean cl =
+            java.lang.management.ManagementFactory.getClassLoadingMXBean();
+        System.out.println("当前已加载类: " + cl.getLoadedClassCount());
+        System.out.println("累计加载: " + cl.getTotalLoadedClassCount());
+        System.out.println("已卸载: " + cl.getUnloadedClassCount());
+        System.out.println("(Bootstrap 加载的不计入, 实际更多)");
+
+        // 8. 类的卸载条件
+        System.out.println("\\n--- 8. 类的卸载条件 ---");
+        System.out.println("类卸载需要三个条件同时满足:");
+        System.out.println("  1. 堆上无该类的实例");
+        System.out.println("  2. Class 对象无引用");
+        System.out.println("  3. ClassLoader 已被回收");
+        System.out.println("JDK 自带的类永不卸载 (Bootstrap 永存)");
+
+        System.out.println("\\n=== 总结 ===");
+        System.out.println("1. 类加载: 加载→验证→准备→解析→初始化");
+        System.out.println("2. 双亲委派: 子先委派父, 父失败才自己加载");
+        System.out.println("3. 三类加载器: Bootstrap → Extension/Platform → Application");
+        System.out.println("4. 打破双亲委派: Tomcat/SPI/热部署/OSGi");
+        System.out.println("5. 自定义加载器: 继承 ClassLoader, 重写 findClass");
+        System.out.println("6. 类的卸载: 实例+Class+ClassLoader 全无引用");
+    }
+
+    // 获取已加载类的字节码 (从 classpath 读)
+    static byte[] getClassBytes(Class<?> clazz) {
+        String resource = clazz.getName().replace('.', '/') + ".class";
+        try (InputStream is = clazz.getClassLoader().getResourceAsStream(resource)) {
+            if (is == null) return new byte[0];
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = is.read(buf)) != -1) {
+                bos.write(buf, 0, n);
+            }
+            return bos.toByteArray();
+        } catch (IOException e) {
+            return new byte[0];
+        }
+    }
+
+    // 自定义类加载器: 从字节数组加载
+    static class CustomClassLoader extends ClassLoader {
+        private final String className;
+        private final byte[] bytes;
+
+        CustomClassLoader(String className, byte[] bytes, ClassLoader parent) {
+            super(parent);
+            this.className = className;
+            this.bytes = bytes;
+        }
+
+        @Override
+        protected Class<?> findClass(String name) throws ClassNotFoundException {
+            if (name.equals(className)) {
+                return defineClass(name, bytes, 0, bytes.length);
+            }
+            return super.findClass(name);
+        }
+    }
+}`} />
+
+> **观察重点**：
+> - **`Main.class.getClassLoader()` 是 AppClassLoader**——应用类由它加载。
+> - **`String.class.getClassLoader()` 是 null**——表示由 Bootstrap（C++ 实现）加载。
+> - **`loadClass("java.lang.String")` 委派给 Bootstrap**——双亲委派保证 JDK 的 String 被加载。
+> - **`ServiceLoader.load(Driver.class)`**——JDBC 用同样的 SPI 机制，靠线程上下文 ClassLoader 反向加载。
+> - **`c1 == c2` 返回 false**——不同 ClassLoader 加载的相同字节码是不同的 Class，这就是 Tomcat 隔离的基础。
+> - **`getLoadedClassCount`** 不含 Bootstrap 加载的核心类——实际类数更多。
+
+## 七、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| 加载 | 找字节码、读入内存、生成 Class 对象 |
+| 验证 | 字节码合法性、安全性 |
+| 准备 | static 变量分配内存、零值 |
+| 解析 | 符号引用→直接引用 |
+| 初始化 | 执行 `＜clinit＞`，static 变量赋值/static 块 |
+| 双亲委派 | 子先委派父，父失败才自己加载 |
+| Bootstrap | 加载 JDK 核心（C++，无父） |
+| Extension/Platform | 加载扩展/JDK 模块 |
+| Application | 加载 classpath |
+| 打破双亲委派 | Tomcat 隔离、SPI 反向加载、热部署 |
+| 自定义加载器 | 重写 `findClass`，调 `defineClass` |
+| 类的唯一性 | 类名 + ClassLoader 联合标识 |
+| 卸载条件 | 无实例 + 无 Class 引用 + 加载器回收 |
+
+**记忆口诀**：
+
+- **加载五阶段**——加载→验证→准备→解析→初始化。
+- **准备是零值，初始化才是赋值**——`static int x = 1` 准备阶段 x=0。
+- **双亲委派保安全**——子先问父，父加载不了再自己加载，防止假冒核心类。
+- **Bootstrap 是 null**——C++ 实现，加载 `java.lang.*`。
+- **Tomcat 打破双亲委派**——每个 WebApp 独立加载器，应用类优先。
+- **SPI 反向加载**——`Thread.currentThread().getContextClassLoader()`。
+- **类名 + 加载器 = 唯一标识**——同字节码不同加载器 = 不同 Class。
+- **卸载要三无**——无实例、无 Class 引用、无加载器。
+
+## 结语：类加载是 Java 的"海关"
+
+类加载是 Java 的"海关"——所有 `.class` 文件要经过这里才能进入 JVM 运行。理解类加载，才能理解：
+
+- 为什么 Tomcat 能部署多个 Web 应用互不干扰。
+- 为什么 JDBC 驱动放 classpath 就能用，不需要 `Class.forName`。
+- 为什么热部署能实现"改了不重启"。
+- 为什么 `ClassNotFoundException` 和 `NoClassDefFoundError` 不同（前者是加载时找不到，后者是初始化时找不到）。
+
+下一章我们讲 **性能监控与调优**——用 JDK 自带的 jps/jstat/jstack/jmap/jcmd、JConsole、VisualVM、JFR、async-profiler 等工具观察运行中的 JVM，排查 OOM、CPU 飙高、卡顿等问题。这是把内存模型、GC、类加载的知识"用起来"的实战。我们下一章见。

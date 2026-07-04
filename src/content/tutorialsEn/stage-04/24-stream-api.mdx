@@ -1,0 +1,571 @@
+---
+title: "Stream API"
+chapter: 24
+stage: "Stage 4"
+stageName: "Collections Framework"
+order: 7
+description: "A systematic guide to Stream creation, intermediate operations, terminal operations, Collectors, numeric streams, and parallel streams for declarative collection data processing"
+pubDate: 2026-07-03
+tags: ["Java", "Stream", "Stream API", "Collectors", "并行流", "函数式编程", "声明式"]
+---
+
+# Stream API
+
+If the earlier collections are "warehouses," then `Stream` is the "assembly line" flowing through the warehouse—it treats data as products on an assembly line, passing through processes (filtering, transforming, sorting, collecting) to ultimately produce a result. The Stream API, introduced in Java 8, is a revolution for the collections framework: it lifts you from the imperative mindset of "how to iterate" to the declarative mindset of "what you want."
+
+This chapter is the finale of Stage 4. We'll see how Stream compresses a dozen-odd lines of for loops into a single elegant chained call.
+
+## 1. Why We Need Stream
+
+Consider a requirement: from a group of students, find the names of the top 3 female students with scores above 80, sorted by score in descending order.
+
+**Imperative approach** (traditional for loops):
+
+```java
+List<Student> filtered = new ArrayList<>();
+for (Student s : students) {
+    if (s.getScore() > 80 && s.getGender() == Gender.FEMALE) {
+        filtered.add(s);
+    }
+}
+filtered.sort((a, b) -> b.getScore() - a.getScore());
+List<String> result = new ArrayList<>();
+for (int i = 0; i < Math.min(3, filtered.size()); i++) {
+    result.add(filtered.get(i).getName());
+}
+```
+
+**Declarative approach** (Stream):
+
+```java
+List<String> result = students.stream()
+    .filter(s -> s.getScore() > 80)
+    .filter(s -> s.getGender() == Gender.FEMALE)
+    .sorted(Comparator.comparingInt(Student::getScore).reversed())
+    .limit(3)
+    .map(Student::getName)
+    .collect(Collectors.toList());
+```
+
+Both have 7 logical steps, but Stream compresses them into a single "pipeline"—each process is clear at a glance, with no intermediate variables, no indices, no loop boilerplate. This is the charm of declarative programming: **describe "what to do," not "how to do it."**
+
+## 2. What Is a Stream
+
+First, let's correct a common misconception: **Stream is not a data structure.** It does not store data; it describes "a sequence of operations on data."
+
+Key characteristics of Stream:
+
+1. **Does not store data**: it originates from a collection/array/generator and holds no data itself.
+2. **Does not modify the source**: operating on a Stream does not change the original collection.
+3. **Lazy evaluation**: intermediate operations (filter/map, etc.) are not executed immediately—only triggered by a terminal operation.
+4. **One-time use**: a Stream can only be consumed once; use it and discard it.
+5. **Potentially infinite**: a Stream can represent an infinite sequence (e.g., `Stream.iterate`), truncated by `limit`.
+
+```java
+List<Integer> nums = List.of(1, 2, 3, 4, 5);
+Stream<Integer> s = nums.stream();    // create a stream
+// nums is unchanged; s doesn't "hold" anything—it just describes "operations on nums"
+```
+
+## 3. Creating a Stream
+
+### 3.1 From a Collection
+
+```java
+List<Integer> list = List.of(1, 2, 3);
+Stream<Integer> s1 = list.stream();          // sequential stream
+Stream<Integer> s2 = list.parallelStream();  // parallel stream
+```
+
+### 3.2 From an Array
+
+```java
+String[] arr = {"A", "B", "C"};
+Stream<String> s = Arrays.stream(arr);
+```
+
+### 3.3 Static Factory Methods
+
+```java
+Stream<Integer> s1 = Stream.of(1, 2, 3);
+Stream<Integer> s2 = Stream.ofNullable(null);   // Java 9+, 0 or 1 element
+Stream<Double> s3 = Stream.generate(Math::random);   // infinite stream
+Stream<Integer> s4 = Stream.iterate(1, n -> n + 1);  // infinite stream 1,2,3,...
+
+// Java 9+ iterate with a termination condition
+Stream<Integer> s5 = Stream.iterate(1, n -> n <= 100, n -> n + 1);   // 1..100
+```
+
+### 3.4 Other Sources
+
+```java
+// Character stream of a string
+IntStream chars = "hello".chars();   // 104, 101, 108, 108, 111
+
+// File lines
+Stream<String> lines = Files.lines(Path.of("file.txt"));
+
+// Numeric stream ranges
+IntStream.range(1, 5);       // 1,2,3,4
+IntStream.rangeClosed(1, 5); // 1,2,3,4,5
+```
+
+## 4. Intermediate Operations
+
+Intermediate operations return a Stream and can be chained. They are **lazy**—they don't execute immediately.
+
+### 4.1 filter: Filtering
+
+```java
+Stream<Integer> s = Stream.of(1, 2, 3, 4, 5).filter(n -> n > 2);   // 3,4,5
+```
+
+### 4.2 map: Mapping
+
+```java
+Stream<String> s = Stream.of(1, 2, 3).map(n -> "No." + n);   // No.1,No.2,No.3
+```
+
+`map` is a one-to-one transformation. If the transformation function itself returns a Stream, use `flatMap` to flatten it.
+
+### 4.3 flatMap: Flattening
+
+```java
+List<List<Integer>> nested = List.of(List.of(1, 2), List.of(3, 4), List.of(5));
+// Using map would give Stream<Stream<Integer>>, which is awkward
+// flatMap flattens it into Stream<Integer>
+Stream<Integer> flat = nested.stream().flatMap(List::stream);   // 1,2,3,4,5
+```
+
+`flatMap` merges "a stream of streams" into a single stream—like "dumping the contents of multiple drawers onto a table."
+
+Classic application: flattening after word splitting.
+
+```java
+List<String> sentences = List.of("hello world", "java stream");
+List<String> words = sentences.stream()
+    .flatMap(s -> Arrays.stream(s.split(" ")))
+    .collect(Collectors.toList());   // [hello, world, java, stream]
+```
+
+### 4.4 sorted: Sorting
+
+```java
+Stream<Integer> s = Stream.of(3, 1, 2).sorted();                                  // 1,2,3
+Stream<Integer> s2 = Stream.of(3, 1, 2).sorted(Comparator.reverseOrder());        // 3,2,1
+```
+
+### 4.5 distinct: Deduplication
+
+```java
+Stream<Integer> s = Stream.of(1, 2, 2, 3, 3, 3).distinct();   // 1,2,3
+```
+
+`distinct` uses `equals` for equality—essentially "a stream version of HashSet."
+
+### 4.6 peek: Peeking
+
+```java
+Stream<Integer> s = Stream.of(1, 2, 3)
+    .peek(n -> System.out.println("processing: " + n));   // for debugging, doesn't change elements
+```
+
+`peek` is mainly for debugging—inserting a "peek" action in the middle of the pipeline to see the state of elements as they flow by.
+
+### 4.7 limit / skip
+
+```java
+Stream<Integer> s = Stream.of(1, 2, 3, 4, 5).limit(3);   // 1,2,3 (take first 3)
+Stream<Integer> s2 = Stream.of(1, 2, 3, 4, 5).skip(2);   // 3,4,5 (skip first 2)
+Stream<Integer> s3 = Stream.of(1, 2, 3, 4, 5).skip(1).limit(2);   // 2,3
+```
+
+`limit` is especially useful on infinite streams—`Stream.iterate(1, n -＞ n+1).limit(10)` takes the first 10.
+
+### 4.8 takeWhile / dropWhile (Java 9+)
+
+```java
+Stream<Integer> s1 = Stream.of(1, 2, 3, 4, 5).takeWhile(n -> n < 4);   // 1,2,3
+Stream<Integer> s2 = Stream.of(1, 2, 3, 4, 5).dropWhile(n -> n < 4);   // 4,5
+```
+
+`takeWhile` stops when the condition becomes false; `dropWhile` starts when the condition becomes false. They differ from `filter`—`filter` traverses all elements, while `takeWhile`/`dropWhile` "stop at the first element that doesn't match."
+
+## 5. Terminal Operations
+
+Terminal operations trigger pipeline execution and produce the final result. **Without a terminal operation, intermediate operations won't execute.**
+
+### 5.1 forEach
+
+```java
+Stream.of(1, 2, 3).forEach(System.out::println);
+```
+
+### 5.2 collect: Collecting
+
+The most powerful terminal operation, collecting stream elements into various results:
+
+```java
+List<Integer> list = stream.collect(Collectors.toList());
+Set<Integer> set = stream.collect(Collectors.toSet());
+Map<String, Integer> map = stream.collect(Collectors.toMap(Object::toString, n -> n));
+String joined = Stream.of("A", "B", "C").collect(Collectors.joining(", ", "[", "]"));   // [A, B, C]
+```
+
+See the Collectors section below for details.
+
+### 5.3 reduce: Reduction
+
+Repeatedly combines stream elements into a single value:
+
+```java
+// Sum
+int sum = Stream.of(1, 2, 3, 4, 5).reduce(0, Integer::sum);   // 15
+
+// Product
+int product = Stream.of(1, 2, 3, 4).reduce(1, (a, b) -> a * b);   // 24
+
+// No initial value, returns Optional
+Optional<Integer> max = Stream.of(3, 1, 4, 1, 5).reduce(Integer::max);   // Optional[5]
+```
+
+The process of `reduce(identity, accumulator)`: `identity op e1 op e2 op e3 ...`. `identity` is the initial value (an "identity element" satisfying `identity op x == x`).
+
+### 5.4 count / min / max
+
+```java
+long count = Stream.of(1, 2, 3).count();   // 3
+Optional<Integer> min = Stream.of(3, 1, 2).min(Comparator.naturalOrder());   // Optional[1]
+Optional<Integer> max = Stream.of(3, 1, 2).max(Comparator.naturalOrder());   // Optional[3]
+```
+
+`min`/`max` return `Optional`—an empty stream returns `Optional.empty()`.
+
+### 5.5 Matching: anyMatch / allMatch / noneMatch
+
+```java
+boolean hasEven = Stream.of(1, 2, 3).anyMatch(n -> n % 2 == 0);   // true
+boolean allEven = Stream.of(2, 4, 6).allMatch(n -> n % 2 == 0);    // true
+boolean noEven = Stream.of(1, 3, 5).noneMatch(n -> n % 2 == 0);    // true
+```
+
+They are all **short-circuiting**—`anyMatch` stops at the first true, `allMatch` stops at the first false.
+
+### 5.6 Finding: findFirst / findAny
+
+```java
+Optional<Integer> first = Stream.of(1, 2, 3).findFirst();   // Optional[1]
+Optional<Integer> any = Stream.of(1, 2, 3).findAny();        // any one (faster on parallel streams)
+```
+
+## 6. Collectors: The Collector Catalog
+
+`Collectors` is `collect`'s "recipe book," providing various collection methods.
+
+### 6.1 toList / toSet / toCollection
+
+```java
+stream.collect(Collectors.toList());                    // to a List
+stream.collect(Collectors.toSet());                     // to a Set
+stream.collect(Collectors.toCollection(LinkedList::new));   // specify the collection type
+```
+
+> 💡 Note that `Collectors.toList()` returns an `ArrayList`, but this isn't guaranteed for future versions. To ensure the type, use `toCollection(ArrayList::new)`.
+
+### 6.2 toMap
+
+```java
+Map<String, Integer> map = students.stream()
+    .collect(Collectors.toMap(Student::getName, Student::getScore));
+```
+
+**Pitfall**: if there are duplicate keys, it throws `IllegalStateException`. To handle this, pass a third parameter (a merge function):
+
+```java
+Map<String, Integer> map = students.stream()
+    .collect(Collectors.toMap(
+        Student::getName,
+        Student::getScore,
+        (oldV, newV) -> newV   // take the new value on duplicate
+    ));
+```
+
+### 6.3 groupingBy: Grouping
+
+Group by some attribute; the result is `Map＜Key, List＜Element＞＞`:
+
+```java
+Map<Gender, List<Student>> byGender = students.stream()
+    .collect(Collectors.groupingBy(Student::getGender));
+// {FEMALE=[...], MALE=[...]}
+```
+
+Two-level grouping:
+
+```java
+Map<Gender, Map<Integer, List<Student>>> byGenderAndScore = students.stream()
+    .collect(Collectors.groupingBy(Student::getGender,
+             Collectors.groupingBy(s -> s.getScore() / 10)));
+```
+
+Downstream collection after grouping (not just toList):
+
+```java
+Map<Gender, Long> countByGender = students.stream()
+    .collect(Collectors.groupingBy(Student::getGender, Collectors.counting()));
+
+Map<Gender, Double> avgScoreByGender = students.stream()
+    .collect(Collectors.groupingBy(Student::getGender,
+             Collectors.averagingInt(Student::getScore)));
+
+Map<Gender, Optional<Student>> topByGender = students.stream()
+    .collect(Collectors.groupingBy(Student::getGender,
+             Collectors.maxBy(Comparator.comparingInt(Student::getScore))));
+```
+
+### 6.4 partitioningBy: Partitioning
+
+Partition into two groups by a boolean condition (`true` group and `false` group):
+
+```java
+Map<Boolean, List<Student>> byPass = students.stream()
+    .collect(Collectors.partitioningBy(s -> s.getScore() >= 60));
+// {true=[passing...], false=[failing...]}
+```
+
+### 6.5 joining: String Joining
+
+```java
+String s1 = Stream.of("A", "B", "C").collect(Collectors.joining());        // ABC
+String s2 = Stream.of("A", "B", "C").collect(Collectors.joining(", "));    // A, B, C
+String s3 = Stream.of("A", "B", "C").collect(Collectors.joining(", ", "[", "]"));   // [A, B, C]
+```
+
+### 6.6 counting / summing / averaging / summarizing
+
+```java
+long count = stream.collect(Collectors.counting());
+int sum = stream.collect(Collectors.summingInt(Student::getScore));
+double avg = stream.collect(Collectors.averagingInt(Student::getScore));
+IntSummaryStatistics stats = stream.collect(Collectors.summarizingInt(Student::getScore));
+// stats.getCount(), getSum(), getMin(), getAverage(), getMax()
+```
+
+`summarizingInt` returns count/sum/min/avg/max all at once—super convenient.
+
+## 7. Numeric Streams: IntStream / LongStream / DoubleStream
+
+A regular `Stream＜Integer＞` has boxing overhead. When working with numbers, use the primitive-specialized `IntStream` and friends:
+
+```java
+int sum = IntStream.of(1, 2, 3, 4, 5).sum();   // 15, no boxing
+
+// Convert from an object stream to a numeric stream
+int sum2 = students.stream().mapToInt(Student::getScore).sum();
+
+// Ranges
+IntStream.range(1, 5).forEach(System.out::println);        // 1,2,3,4
+IntStream.rangeClosed(1, 5).forEach(System.out::println);  // 1,2,3,4,5
+
+// Statistics
+IntSummaryStatistics stats = IntStream.of(3, 1, 4, 1, 5).summaryStatistics();
+System.out.println(stats.getAverage());   // 2.8
+System.out.println(stats.getMax());       // 5
+```
+
+`mapToInt` / `mapToLong` / `mapToDouble` convert an object stream to a numeric stream; `boxed()` converts a numeric stream back to an object stream.
+
+## 8. Parallel Streams
+
+`.parallel()` or `parallelStream()` makes a stream execute in parallel—internally using ForkJoinPool to automatically split tasks.
+
+```java
+long count = list.parallelStream()
+    .filter(n -> isPrime(n))
+    .count();
+```
+
+**Conditions for using parallel streams**:
+
+1. **Large data volume** (at least 10,000+, otherwise the splitting overhead outweighs the benefit).
+2. **Heavy per-element computation** (if the computation is simple, the parallel benefit is negligible).
+3. **Stateless, side-effect-free operations** (operations don't depend on order).
+4. **Element order doesn't matter** (or use `forEachOrdered` to preserve order).
+
+**Things to watch out for**:
+
+- Parallel streams don't guarantee order—`forEach` output may be shuffled.
+- Shared mutable state is a **disaster**—modifying a shared variable in `forEach` causes data races.
+- The terminal `collect` operation uses a merge function to combine sub-task results—make sure the merge is associative.
+
+```java
+// ❌ parallel stream + shared mutable state = disaster
+ArrayList<Integer> result = new ArrayList<>();
+list.parallelStream().forEach(result::add);   // data loss, null, IndexOutOfBoundsException
+
+// ✅ use a thread-safe collector
+List<Integer> result = list.parallelStream().collect(Collectors.toList());
+```
+
+## 9. Hands-On: Processing Student Grades with Stream
+
+<CodeRunner code={`import java.util.*;
+import java.util.stream.*;
+
+public class Main {
+    public static void main(String[] args) {
+        List<Student> students = List.of(
+            new Student("Alice", "女", 92),
+            new Student("Bob", "男", 78),
+            new Student("Charlie", "男", 85),
+            new Student("Diana", "女", 95),
+            new Student("Eve", "女", 60),
+            new Student("Frank", "男", 88),
+            new Student("Grace", "女", 72),
+            new Student("Henry", "男", 95)
+        );
+
+        // 1. 筛选优秀学生（>85），取名字
+        System.out.println("--- 优秀学生（>85）---");
+        List<String> excellent = students.stream()
+            .filter(s -> s.score > 85)
+            .map(s -> s.name)
+            .collect(Collectors.toList());
+        System.out.println(excellent);
+
+        // 2. 按性别分组
+        System.out.println("\\n--- 按性别分组 ---");
+        Map<String, List<Student>> byGender = students.stream()
+            .collect(Collectors.groupingBy(s -> s.gender));
+        byGender.forEach((g, list) ->
+            System.out.println(g + ": " + list.stream().map(s -> s.name).collect(Collectors.joining(", "))));
+
+        // 3. 按性别统计平均分
+        System.out.println("\\n--- 各性别平均分 ---");
+        Map<String, Double> avgByGender = students.stream()
+            .collect(Collectors.groupingBy(s -> s.gender, Collectors.averagingInt(s -> s.score)));
+        avgByGender.forEach((g, avg) -> System.out.printf("%s: %.1f%n", g, avg));
+
+        // 4. 分数分段统计
+        System.out.println("\\n--- 分数段统计 ---");
+        Map<String, Long> gradeCount = students.stream()
+            .collect(Collectors.groupingBy(
+                s -> s.score >= 90 ? "优秀" : s.score >= 80 ? "良好" : s.score >= 60 ? "及格" : "不及格",
+                Collectors.counting()
+            ));
+        gradeCount.forEach((g, c) -> System.out.println(g + ": " + c + " 人"));
+
+        // 5. Top 3 学生
+        System.out.println("\\n--- Top 3 ---");
+        List<String> top3 = students.stream()
+            .sorted(Comparator.comparingInt((Student s) -> s.score).reversed())
+            .limit(3)
+            .map(s -> s.name + "(" + s.score + ")")
+            .collect(Collectors.toList());
+        System.out.println(top3);
+
+        // 6. 全班统计
+        System.out.println("\\n--- 全班统计 ---");
+        IntSummaryStatistics stats = students.stream()
+            .mapToInt(s -> s.score)
+            .summaryStatistics();
+        System.out.println("人数: " + stats.getCount());
+        System.out.println("最高: " + stats.getMax());
+        System.out.println("最低: " + stats.getMin());
+        System.out.println("平均: " + stats.getAverage());
+        System.out.println("总分: " + stats.getSum());
+
+        // 7. 谁是第一名（用 reduce）
+        System.out.println("\\n--- 第一名（reduce）---");
+        Optional<Student> top = students.stream()
+            .reduce((a, b) -> a.score > b.score ? a : b);
+        top.ifPresent(s -> System.out.println("第一名: " + s.name + " (" + s.score + ")"));
+
+        // 8. 拼接所有名字
+        String allNames = students.stream()
+            .map(s -> s.name)
+            .collect(Collectors.joining(", ", "学生名单: [", "]"));
+        System.out.println("\\n" + allNames);
+
+        // 9. 分区：及格/不及格
+        System.out.println("\\n--- 及格分区 ---");
+        Map<Boolean, List<Student>> passFail = students.stream()
+            .collect(Collectors.partitioningBy(s -> s.score >= 60));
+        System.out.println("及格: " + passFail.get(true).stream().map(s -> s.name).collect(Collectors.joining(", ")));
+        System.out.println("不及格: " + passFail.get(false).stream().map(s -> s.name).collect(Collectors.joining(", ")));
+
+        // 10. 数值流：1 到 100 求和
+        System.out.println("\\n--- 数值流 ---");
+        int sum = IntStream.rangeClosed(1, 100).sum();
+        System.out.println("1+2+...+100 = " + sum);
+
+        // 偶数和
+        int evenSum = IntStream.rangeClosed(1, 100).filter(n -> n % 2 == 0).sum();
+        System.out.println("1..100 偶数和 = " + evenSum);
+    }
+}
+
+class Student {
+    final String name;
+    final String gender;
+    final int score;
+
+    Student(String name, String gender, int score) {
+        this.name = name;
+        this.gender = gender;
+        this.score = score;
+    }
+
+    @Override
+    public String toString() {
+        return name + "(" + score + ")";
+    }
+}`} />
+
+This example captures the essence of the Stream API: `filter`, `map`, `sorted`, `limit`, `collect`, `groupingBy`, `partitioningBy`, `joining`, `summarizingInt`, `reduce`, `mapToInt`, `rangeClosed`—90% of everyday Stream operations are right here.
+
+## 10. The Design Philosophy of Stream
+
+The brilliance of Stream lies in abstracting "data processing" into three stages:
+
+```
+Source → [Intermediate Operations] → Terminal Operation
+```
+
+Intermediate operations are **lazy**—they don't execute immediately, they "record" what to do. Only when the terminal operation is triggered does the entire pipeline execute at once, with each element "flowing through" all the processes.
+
+This design has several benefits:
+
+1. **Optimizable**: the pipeline knows all operations and can do "loop fusion"—completing multiple operations in a single pass instead of multiple passes.
+2. **Short-circuiting**: `limit`, `findFirst`, `anyMatch`, and others don't need to traverse all elements.
+3. **Infinite streams**: because of laziness, `Stream.iterate` can represent an infinite sequence, truncated by `limit`.
+
+## 11. Chapter Summary
+
+| Topic | Key Points |
+| --- | --- |
+| Stream essence | Not a data structure, but an operation sequence; lazy, doesn't modify source, one-time use |
+| Creation | `Collection.stream()`, `Stream.of`, `generate`, `iterate`, `Arrays.stream` |
+| Intermediate operations | filter/map/flatMap/sorted/distinct/peek/limit/skip/takeWhile |
+| Terminal operations | forEach/collect/reduce/count/min/max/anyMatch/findFirst |
+| Collectors | toList/toMap/groupingBy/partitioningBy/joining/summarizingInt |
+| Numeric streams | IntStream/LongStream, avoid boxing |
+| reduce | Reduce to a single value, requires an identity element and an associative function |
+| Parallel streams | `.parallel()`, use only for large data + heavy computation + statelessness |
+| Parallel stream pitfall | Cannot modify shared mutable state |
+
+## Conclusion: The Triumph of Declarative Style
+
+The Stream API is a key step in Java's evolution toward modern languages. It elevates data processing from the imperative mire of "loops + temporary variables + indices" to the declarative elegance of "filter-map-collect."
+
+But Stream isn't a panacea:
+
+- **Simple traversal** is more intuitive with for-each; don't force Stream.
+- **Modifying elements** is less convenient with Stream than with a for loop (Stream advocates no side effects).
+- **Performance-sensitive** small data may have Stream overhead exceeding that of a for loop.
+
+The key to mastering Stream is: **think in terms of "pipelines"**—data flows from the source, passes through processes one by one, and ultimately converges into a result container. Each process is a concise function, yet combined they express powerful logic.
+
+With this, Stage 4 "Collections Framework" is complete. We've covered: framework overview, List, Set, Map, Queue/Deque, the Collections utility, and the Stream API. This collections framework is the Java programmer's core arsenal—almost every program relies on it.
+
+In the next stage, we enter **Functional Programming**—Lambdas, functional interfaces, and method references. They are the foundation of the Stream API and the soul of Java's modern programming style.

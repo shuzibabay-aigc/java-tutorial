@@ -1,0 +1,508 @@
+---
+title: "Atomic Classes and CAS"
+chapter: 41
+stage: "Stage 7"
+stageName: "Concurrent Programming"
+order: 8
+description: "Master AtomicInteger/AtomicLong/AtomicReference, AtomicStampedReference to solve ABA, field updaters, CAS principles, LongAdder vs AtomicLong, and non-blocking algorithms"
+pubDate: 2026-07-03
+tags: ["Java", "CAS", "Atomic", "AtomicInteger", "LongAdder", "ABA"]
+---
+
+# Atomic Classes and CAS
+
+The previous chapter covered locks — `ReentrantLock`/`synchronized` are "pessimistic strategies": lock first, then operate, assuming there will be conflict. But in many scenarios conflicts are not frequent — the cost of a pessimistic lock is mostly spent on "locking/unlocking" itself, not on conflict. Can we be safe "without locking"?
+
+The answer is **CAS (Compare-And-Swap)** — an "optimistic strategy": operate first, check for conflict at commit time, and retry on conflict. Java's `java.util.concurrent.atomic` package provides CAS-based atomic classes — `AtomicInteger`, `AtomicLong`, `AtomicReference`, and friends. They are the cornerstone of lock-free programming and the foundation of advanced concurrency tools like `ConcurrentHashMap`, `LongAdder`, and `AtomicStampedReference`.
+
+## 1. CAS Principles
+
+### 1.1 What Is CAS
+
+**CAS (Compare-And-Swap)** is a **hardware-supported atomic instruction** — the CPU directly guarantees that "compare and swap" cannot be interrupted.
+
+Pseudo-code:
+
+```
+boolean CAS(memory, expected, newValue) {
+    if (memory == expected) {     // compare
+        memory = newValue;        // swap
+        return true;
+    }
+    return false;                  // failed
+}
+```
+
+The whole instruction is guaranteed atomic by the CPU. On x86 it is the `lock cmpxchg` instruction; on ARM it is the `LDREX`/`STREX` instruction pair.
+
+### 1.2 How CAS Works
+
+The implementation idea of `AtomicInteger.incrementAndGet()`:
+
+```
+1. Read the current value V = value
+2. Compute the new value N = V + 1
+3. CAS(value, V, N)
+   - If value == V, write N, return true → success
+   - Otherwise return false → someone else changed it, retry
+4. On failure, go back to step 1
+```
+
+Throughout the "read-compute-compare-write" process there is no lock — only the final CAS step is atomic. If someone changed the value in between, CAS fails and the loop retries. This is called **spinning**.
+
+### 1.3 CAS in Java: Unsafe and VarHandle
+
+Java invokes CAS through `sun.misc.Unsafe` (JDK 9+ recommends `VarHandle`):
+
+```java
+// Unsafe API
+public final native boolean compareAndSwapInt(Object o, long offset,
+                                              int expected, int x);
+
+// VarHandle (JDK 9+)
+VarHandle vh = MethodHandles.lookup().findVarHandle(...)
+vh.compareAndSet(instance, expected, newValue);
+```
+
+`AtomicInteger.compareAndSet` internally calls `Unsafe.compareAndSwapInt`.
+
+### 1.4 The Three Big Problems of CAS
+
+| Problem | Description | Solution |
+| --- | --- | --- |
+| **ABA** | Value goes A→B→A; CAS thinks it never changed | `AtomicStampedReference` adds a version number |
+| **Spinning overhead** | Under high contention CAS repeatedly fails and retries; CPU spikes | `LongAdder` segmentation, limit retries |
+| **Single variable only** | One CAS can change only one variable | Wrap an object in `AtomicReference`, or use a lock |
+
+## 2. The Atomic Class Family
+
+The `java.util.concurrent.atomic` package provides a series of atomic classes, organized into several categories:
+
+### 2.1 Basic Types
+
+- **`AtomicBoolean`**
+- **`AtomicInteger`** — commonly used; `incrementAndGet`/`getAndIncrement`/`addAndGet`/`compareAndSet`
+- **`AtomicLong`**
+
+```java
+AtomicInteger counter = new AtomicInteger(0);
+counter.incrementAndGet();   // ++counter, returns the new value
+counter.getAndIncrement();   // counter++, returns the old value
+counter.addAndGet(5);        // counter += 5
+counter.compareAndSet(0, 1); // set to 1 only if it is 0, returns whether it succeeded
+counter.updateAndGet(x -> x * 2);   // Java 8+, functional update
+counter.getAndUpdate(x -> x + 1);
+counter.accumulateAndGet(10, Integer::sum);   // accumulate
+```
+
+### 2.2 Reference Types
+
+- **`AtomicReference＜V＞`** — atomic update of a reference
+- **`AtomicStampedReference＜V＞`** — carries a version number, solves ABA
+- **`AtomicMarkableReference＜V＞`** — carries a boolean mark
+
+```java
+AtomicReference<String> ref = new AtomicReference<>("init");
+ref.set("new");
+String old = ref.getAndSet("newer");
+boolean success = ref.compareAndSet("newer", "newest");
+```
+
+### 2.3 Array Types
+
+- **`AtomicIntegerArray`**/`AtomicLongArray`/`AtomicReferenceArray`
+
+```java
+AtomicIntegerArray arr = new AtomicIntegerArray(10);
+arr.incrementAndGet(0);
+arr.compareAndSet(0, 1, 5);
+```
+
+### 2.4 Field Updaters
+
+- **`AtomicIntegerFieldUpdater＜T＞`**
+- **`AtomicLongFieldUpdater＜T＞`**
+- **`AtomicReferenceFieldUpdater＜T,V＞`**
+
+They let **a specified `volatile` field of a specified class** be atomically updated — no need to wrap the field in an `AtomicInteger`, saving memory.
+
+```java
+class Person {
+    volatile int age;   // must be volatile
+}
+
+AtomicIntegerFieldUpdater<Person> ageUpdater =
+    AtomicIntegerFieldUpdater.newUpdater(Person.class, "age");
+
+Person p = new Person();
+ageUpdater.incrementAndGet(p);
+```
+
+**Restrictions**: the field must be `volatile`, non-`private`, and non-`static`.
+
+### 2.5 Accumulators (Java 8+)
+
+- **`LongAdder`**/`DoubleAdder` — purpose-built for high-concurrency accumulation
+- **`LongAccumulator`**/`DoubleAccumulator` — custom accumulation function
+
+`LongAdder` is the high-concurrency replacement for `AtomicLong` — covered in detail below.
+
+## 3. The ABA Problem
+
+### 3.1 What Is ABA
+
+CAS only compares "whether the value changed," not "the history of changes." If the value goes A→B→A, CAS thinks it never changed — but it actually did change in between.
+
+**Typical scenario** — a lock-free stack:
+
+```
+Stack top A → B → C
+
+Thread 1 is about to pop A: reads top = A, prepares CAS(top, A, B)
+Thread 2, before thread 1's CAS, pops A, pops B, pushes A:
+    stack becomes A → C (B was popped, A was pushed back)
+
+Thread 1 CAS(top, A, B): success! top becomes B
+But B has already been popped; now the stack top points to a node no longer in the stack — the linked list is corrupted!
+```
+
+The danger of ABA: **the data structure is corrupted, yet CAS still thinks it succeeded**.
+
+### 3.2 AtomicStampedReference Solves ABA
+
+`AtomicStampedReference` pairs every value with a **version number** — the version increments on every modification, and CAS compares both value and version.
+
+```java
+AtomicStampedReference<Integer> ref =
+    new AtomicStampedReference<>(100, 0);   // initial value 100, stamp 0
+
+int[] stampHolder = new int[1];
+Integer current = ref.get(stampHolder);
+int stamp = stampHolder[0];   // read the current stamp
+
+// Another thread changes 100 → 200 → 100, but the stamp also changed
+ref.compareAndSet(100, 200, 0, 1);   // 100→200, stamp 0→1
+ref.compareAndSet(200, 100, 1, 2);   // 200→100, stamp 1→2
+
+// I CAS with the old stamp: fails, because the stamp is now 2, not 0
+boolean ok = ref.compareAndSet(100, 999, stamp, stamp + 1);
+System.out.println(ok);   // false
+```
+
+`AtomicMarkableReference` is similar but uses only a boolean mark — good for binary judgments like "has this been deleted?"
+
+### 3.3 The Real-World Impact of ABA
+
+ABA **is only a problem in certain scenarios**:
+
+- **Pure counting** (like `AtomicInteger`) — ABA has no impact; we only care about the final value.
+- **Linked data structures** (like stacks, queues with node reuse) — ABA corrupts the structure; you must use a version number.
+
+## 4. LongAdder vs AtomicLong
+
+This is the classic comparison in high-concurrency counter design.
+
+### 4.1 The Bottleneck of AtomicLong
+
+`AtomicLong` has all threads CAS the same `volatile long value` — under high concurrency:
+
+- CAS fails often, spinning retries, CPU spikes.
+- The same cache line is repeatedly invalidated — coherence-protocol overhead is large (false sharing).
+
+### 4.2 LongAdder's Segmented Idea
+
+`LongAdder` splits one counter into **multiple Cells** (base + several Cells); each thread preferentially CASes its own Cell, and `sum()` adds all Cells together at the end.
+
+```
+AtomicLong:        value ←── CAS ── threads 1/2/3/4/.../100   (all contend on one spot)
+
+LongAdder:         base      ← CAS (when no Cell is used)
+                   Cell[0]   ← CAS ── thread 1
+                   Cell[1]   ← CAS ── thread 2
+                   Cell[2]   ← CAS ── thread 3
+                   ...
+                   sum() = base + ΣCell[i]
+```
+
+Contention is spread across multiple Cells — each Cell's CAS failure rate drops sharply. **This is the triumph of "state separation"** — split shared state into independent pieces to avoid contention.
+
+### 4.3 Performance Comparison
+
+| Scenario | AtomicLong | LongAdder |
+| --- | --- | --- |
+| Low concurrency (＜4 threads) | Close | Close |
+| Medium-high concurrency | Slow | 2-5x faster |
+| Extreme concurrency | Very slow (CAS storm) | 10x+ faster |
+| sum() call | O(1) | O(n), iterates all Cells |
+| Memory | Small | Large (multiple Cells) |
+
+**When to use**:
+
+- **`LongAdder` for "high-frequency write, low-frequency read" counting** — interface QPS statistics, metric collection.
+- **`AtomicLong` for "balanced read/write" or "need a sequence number / globally unique id"** — because `LongAdder.sum()` does not guarantee strong consistency (Cells may be updating during the read).
+
+The `Cell` class also uses the `@Contended` annotation — avoiding false sharing and further speeding things up.
+
+### 4.4 LongAccumulator
+
+`LongAccumulator` generalizes `LongAdder` — you can specify the accumulation function:
+
+```java
+LongAccumulator max = new LongAccumulator(Long::max, Long.MIN_VALUE);
+max.accumulate(10);
+max.accumulate(20);
+max.get();   // 20
+```
+
+## 5. A Brief Introduction to Non-blocking Algorithms
+
+A **non-blocking algorithm** is one where the failure or suspension of a thread does not prevent other threads from making progress. CAS-based algorithms are non-blocking.
+
+### 5.1 Blocking vs Non-blocking vs Lock-free
+
+| Category | Description | Example |
+| --- | --- | --- |
+| **Blocking** | Thread is suspended if it cannot get the lock | `synchronized`, `ReentrantLock.lock` |
+| **Non-blocking** | Failure does not suspend; can retry | CAS spinning |
+| **Lock-free** | At least one thread can make progress | `AtomicInteger`, `ConcurrentLinkedQueue` |
+| **Wait-free** | Every thread is guaranteed to finish in a bounded number of steps | Rare, complex to implement |
+
+### 5.2 Classic Non-blocking Algorithm: Treiber Stack
+
+A lock-free stack — uses `AtomicReference＜Node＞` to hold the top, and push/pop both use CAS:
+
+```java
+class ConcurrentStack<T> {
+    AtomicReference<Node<T>> top = new AtomicReference<>();
+
+    public void push(T value) {
+        Node<T> newNode = new Node<>(value);
+        Node<T> oldTop;
+        do {
+            oldTop = top.get();
+            newNode.next = oldTop;
+        } while (!top.compareAndSet(oldTop, newNode));
+    }
+
+    public T pop() {
+        Node<T> oldTop, newTop;
+        do {
+            oldTop = top.get();
+            if (oldTop == null) return null;
+            newTop = oldTop.next;
+        } while (!top.compareAndSet(oldTop, newTop));
+        return oldTop.value;
+    }
+
+    static class Node<T> {
+        T value;
+        Node<T> next;
+        Node(T v) { value = v; }
+    }
+}
+```
+
+This stack uses CAS in push/pop — on failure it spins and retries. When multiple threads operate concurrently, at least one succeeds — it is lock-free.
+
+Note: Treiber Stack's pop **does have an ABA problem** — a node popped and then pushed again may still let CAS succeed, but the semantics are already broken. A production-grade implementation needs `AtomicStampedReference` or GC to avoid it (GC ensures a popped node is not reused).
+
+`ConcurrentLinkedQueue` (the Michael-Scott algorithm) is the classic lock-free queue; we will cover it in the next chapter.
+
+## 6. Hands-On: Atomic Classes and CAS Demo
+
+The example below compares the performance of `synchronized`/`AtomicInteger`/`LongAdder`, demonstrates the ABA problem and the `AtomicStampedReference` fix, and shows field updaters in action.
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        int threads = 10;
+        int perThread = 1_000_000;
+
+        // === 1. Performance comparison ===
+        System.out.println("=== Atomic class performance comparison ===");
+        System.out.println("Threads: " + threads + ", per thread: " + perThread);
+        System.out.println("Expected: " + ((long) threads * perThread) + "\\n");
+
+        SyncCounter sync = new SyncCounter();
+        long t1 = testCounter(threads, perThread, sync::increment, sync::get);
+        System.out.printf("%-20s result=%-10d time=%d ms%n",
+            "synchronized", sync.get(), t1);
+
+        AtomicCounter atomic = new AtomicCounter();
+        long t2 = testCounter(threads, perThread, atomic::increment, atomic::get);
+        System.out.printf("%-20s result=%-10d time=%d ms%n",
+            "AtomicInteger", atomic.get(), t2);
+
+        LongAdderCounter adder = new LongAdderCounter();
+        long t3 = testCounter(threads, perThread, adder::increment, adder::get);
+        System.out.printf("%-20s result=%-10d time=%d ms%n",
+            "LongAdder", adder.get(), t3);
+
+        // === 2. ABA problem demo ===
+        System.out.println("\\n=== ABA problem demo ===");
+        AtomicReference<String> ref = new AtomicReference<>("A");
+        Thread tA = new Thread(() -> {
+            String cur = ref.get();
+            try { Thread.sleep(100); } catch (InterruptedException e) {}
+            // Simulate ABA: another thread does A→B→A in the meantime
+            boolean ok = ref.compareAndSet(cur, "C");
+            System.out.println("CAS without version (A→C): " + (ok ? "success (but ABA risk)" : "failed"));
+        });
+
+        Thread tB = new Thread(() -> {
+            try { Thread.sleep(50); } catch (InterruptedException e) {}
+            ref.compareAndSet("A", "B");   // A→B
+            ref.compareAndSet("B", "A");   // B→A
+            System.out.println("Another thread did A→B→A");
+        });
+        tA.start(); tB.start();
+        tA.join(); tB.join();
+
+        // === 3. AtomicStampedReference solves ABA ===
+        System.out.println("\\n=== AtomicStampedReference solves ABA ===");
+        AtomicStampedReference<String> sref =
+            new AtomicStampedReference<>("A", 0);
+        int[] stampHolder = new int[1];
+        String curValue = sref.get(stampHolder);
+        int curStamp = stampHolder[0];
+
+        Thread sA = new Thread(() -> {
+            try { Thread.sleep(100); } catch (InterruptedException e) {}
+            // CAS with the old stamp — will fail
+            boolean ok = sref.compareAndSet("A", "C", curStamp, curStamp + 1);
+            System.out.println("Versioned CAS (A→C, old stamp): " + (ok ? "success" : "failed (change detected)"));
+        });
+        Thread sB = new Thread(() -> {
+            try { Thread.sleep(50); } catch (InterruptedException e) {}
+            sref.compareAndSet("A", "B", 0, 1);   // A→B, stamp 0→1
+            sref.compareAndSet("B", "A", 1, 2);   // B→A, stamp 1→2
+            System.out.println("Another thread did A→B→A, the stamp also changed");
+        });
+        sA.start(); sB.start();
+        sA.join(); sB.join();
+
+        // === 4. AtomicIntegerFieldUpdater ===
+        System.out.println("\\n=== Field updater ===");
+        AtomicIntegerFieldUpdater<Account> balUpdater =
+            AtomicIntegerFieldUpdater.newUpdater(Account.class, "balance");
+        Account acc = new Account(100);
+        balUpdater.addAndGet(acc, 50);
+        System.out.println("Balance after +50: " + acc.balance);
+        balUpdater.compareAndSet(acc, 150, 200);
+        System.out.println("Balance after CAS: " + acc.balance);
+
+        // === 5. AtomicReference spinning lock ===
+        System.out.println("\\n=== Simple spin lock built with CAS ===");
+        SpinLock lock = new SpinLock();
+        AtomicInteger counter = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        CountDownLatch latch = new CountDownLatch(4);
+        for (int i = 0; i < 4; i++) {
+            pool.submit(() -> {
+                for (int j = 0; j < 10000; j++) {
+                    lock.lock();
+                    try { counter.incrementAndGet(); }
+                    finally { lock.unlock(); }
+                }
+                latch.countDown();
+            });
+        }
+        latch.await();
+        pool.shutdown();
+        System.out.println("Result under spin lock: " + counter.get() + " (expected 40000)");
+    }
+
+    static long testCounter(int threads, int perThread, Runnable inc, java.util.function.LongSupplier get) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch go = new CountDownLatch(1);
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                ready.countDown();
+                try { go.await(); } catch (InterruptedException e) { return; }
+                for (int j = 0; j < perThread; j++) inc.run();
+            });
+        }
+        ready.await();
+        long start = System.nanoTime();
+        go.countDown();
+        pool.shutdown();
+        pool.awaitTermination(60, TimeUnit.SECONDS);
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+}
+
+class SyncCounter {
+    long count = 0;
+    synchronized void increment() { count++; }
+    long get() { return count; }
+}
+class AtomicCounter {
+    AtomicInteger count = new AtomicInteger();
+    void increment() { count.incrementAndGet(); }
+    long get() { return count.get(); }
+}
+class LongAdderCounter {
+    LongAdder count = new LongAdder();
+    void increment() { count.increment(); }
+    long get() { return count.sum(); }
+}
+
+class Account {
+    volatile int balance;
+    Account(int b) { balance = b; }
+}
+
+// CAS spin lock
+class SpinLock {
+    private final AtomicBoolean locked = new AtomicBoolean(false);
+    public void lock() {
+        while (!locked.compareAndSet(false, true)) {
+            Thread.onSpinWait();   // Java 9+, hints the CPU that we are spinning, optimizes power
+        }
+    }
+    public void unlock() {
+        locked.set(false);
+    }
+}`} />
+
+> **What to watch for**:
+> - **Performance order**: `LongAdder` > `AtomicInteger` > `synchronized` (under high concurrency).
+> - **ABA demo**: CAS without a version number still succeeds after A→B→A — planting hidden risks.
+> - **`AtomicStampedReference`**: with a version number it detects the in-between change and the CAS fails.
+> - **`AtomicIntegerFieldUpdater`**: gives an ordinary `volatile` field atomic update capability, without a wrapper class.
+> - **Spin lock**: built with `AtomicBoolean`+CAS — lock-free but may busy-wait. `Thread.onSpinWait()` (Java 9+) hints the CPU that we are spinning.
+
+## 7. Chapter Summary
+
+| Concept | Key point |
+| --- | --- |
+| CAS | Hardware atomic instruction, compare and swap; Java calls it via `Unsafe`/`VarHandle` |
+| Three CAS problems | ABA, spinning overhead, single-variable only |
+| `AtomicInteger`/`AtomicLong` | Basic-type atomic classes, `incrementAndGet`/`compareAndSet` |
+| `AtomicReference` | Atomic update of a reference |
+| `AtomicStampedReference` | Adds a version number to solve ABA |
+| `AtomicIntegerFieldUpdater` | Atomically updates a specified volatile field, saves memory |
+| ABA | Value A→B→A fools CAS; lethal for linked structures, harmless for pure counting |
+| `LongAdder` | Segmented accumulation, far surpasses `AtomicLong` under high concurrency |
+| `LongAdder` fit | High-frequency write, low-frequency read; statistics |
+| `AtomicLong` fit | Sequence numbers, balanced read/write |
+| Non-blocking algorithm | CAS spinning; at least one thread makes progress |
+| `Thread.onSpinWait()` | Java 9+, hints CPU to optimize spinning |
+
+**Mnemonics**:
+
+- **CAS is "optimistic locking"** — do first, check later, retry on failure, no lock.
+- **ABA is harmless for counting, lethal for linked structures** — stacks/queues need version numbers.
+- **`LongAdder` is the king of high-concurrency counting** — segmented design, divide and conquer.
+- **`AtomicLong` is right for sequence numbers** — `LongAdder.sum()` is not strongly consistent.
+- **Field updaters save memory** — but the field must be `volatile` and non-private.
+
+## Closing: From Locks to Lock-Free
+
+Atomic classes and CAS are the "other leg" of Java concurrency — they replace locks with hardware atomic instructions and far outperform locks under low contention. `AtomicInteger` makes counters lock-free and safe, `LongAdder` lets high-concurrency counters fly, `AtomicStampedReference` solves the ABA puzzle, and the CAS spin lock shows what lock-free can do.
+
+But CAS is not a panacea — spinning is costly under high contention, and the single-variable limit is real. The next chapter covers **concurrent collections** — `ConcurrentHashMap` (CAS + synchronized per bucket), `CopyOnWriteArrayList` (copy on write), `ConcurrentLinkedQueue` (lock-free CAS), the `BlockingQueue` family. They cleverly combine locks and CAS to provide thread-safe containers — the most-used tools in everyday concurrent programming.

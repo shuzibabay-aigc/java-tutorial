@@ -1,0 +1,481 @@
+---
+title: "Records"
+chapter: 47
+stage: "Stage 8"
+stageName: "Modern Java Features"
+order: 2
+description: "Master the Record class definition, auto-generated constructor/getter/equals/hashCode/toString, compact constructor validation, the inheritance restrictions of Records, local Records, and their cooperation with pattern matching"
+pubDate: 2026-07-03
+tags: ["Java", "Record", "记录类", "JDK 16", "紧凑构造器"]
+---
+
+# Records
+
+If the module system in the previous chapter was "heavy engineering," then this chapter's **Records** is a "light dessert." It's a feature previewed in Java 14 and finalized in Java 16 (JEP 395), replacing dozens of lines of POJO boilerplate with a single line of code.
+
+## 1. Why Records: The POJO Boilerplate Hell
+
+Anyone who has written Java knows — a simple "Point" class, written by the spec, takes this much code:
+
+```java
+public final class Point {
+    private final int x;
+    private final int y;
+
+    public Point(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    public int getX() { return x; }
+    public int getY() { return y; }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Point p)) return false;
+        return p.x == x && p.y == y;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(x, y);
+    }
+
+    @Override
+    public String toString() {
+        return "Point[x=" + x + ", y=" + y + "]";
+    }
+}
+```
+
+**30 lines of code** to describe the simple fact that "a point has x and y coordinates." IDEs can generate it, but you have to maintain it afterward — add a field, and the constructor, equals, hashCode, and toString all need updating. Lombok solves part of this with annotations, but Lombok is a third-party library that "intrudes" into javac at compile time, which has long been controversial in the community.
+
+Records are Java's language-level response — handling this kind of "data carrier class" with a single line.
+
+## 2. Record Definition: One Line Beats a Thousand Words
+
+### 2.1 The Simplest Record
+
+```java
+public record Point(int x, int y) {}
+```
+
+That single line is equivalent to the 30 lines above. What it does:
+
+1. **Auto-generates `private final` fields** `x`, `y`.
+2. **Auto-generates a canonical constructor** `Point(int x, int y)`.
+3. **Auto-generates accessors** — note that they're `x()`, `y()`, **not** `getX()`, `getY()`!
+4. **Auto-generates `equals`, `hashCode`, `toString`** — based on all fields.
+5. **Implicitly `final`** — Records cannot be subclassed (implicitly `final`).
+
+### 2.2 Accessor Naming: `x()` Instead of `getX()`
+
+This is the easiest place for Java veterans to "stumble." Record accessors **don't carry the `get` prefix**:
+
+```java
+Point p = new Point(3, 4);
+int x = p.x();   // not p.getX()
+int y = p.y();
+System.out.println(p);   // Point[x=3, y=4]
+```
+
+Why this design? The community's reasons:
+
+- **Shorter and more modern** — Kotlin and Scala's `data class` both access properties directly by name.
+- **Avoids JavaBean naming conflicts** — Records are "data carriers," not JavaBeans; the distinction is deliberate.
+- **Fits record patterns** — in `case Point(int x, int y)`, the `x`, `y` correspond directly to component names, without `get/set` noise.
+
+If you use them with reflection frameworks (Jackson, Hibernate), be aware of their adaptation to modern Java Records — typically an adapter is needed to treat `x()` as `getX`. Jackson 2.12+ and Hibernate 6+ already support this.
+
+### 2.3 The toString Format
+
+The auto-generated `toString` for a Record follows the format `ClassName[field1=value1, field2=value2, ...]`:
+
+```java
+record Point(int x, int y) {}
+record Range(int start, int end) {}
+
+System.out.println(new Point(3, 4));     // Point[x=3, y=4]
+System.out.println(new Range(1, 100));   // Range[start=1, end=100]
+```
+
+### 2.4 The equals Semantics
+
+A Record's `equals` is a **value comparison based on all components** — this is the "Value Object" semantic. Two Record instances are `equals`-equal as long as their component values match:
+
+```java
+Point p1 = new Point(1, 2);
+Point p2 = new Point(1, 2);
+System.out.println(p1.equals(p2));   // true
+System.out.println(p1 == p2);        // false (different references)
+```
+
+## 3. The Compact Constructor: Elegant Parameter Validation
+
+The auto-generated canonical constructor only does `this.x = x` — it can't validate parameters. Records provide a **compact constructor** that lets you insert validation logic **without writing a parameter list**:
+
+```java
+public record Range(int start, int end) {
+    // Compact constructor: no parameter list, no this.x = x
+    public Range {
+        if (start > end) {
+            throw new IllegalArgumentException("start must be <= end, but got " + start + " > " + end);
+        }
+        // You can modify parameters here (will be assigned to fields)
+        // e.g., normalize negatives to 0
+        if (start < 0) start = 0;
+        if (end < 0) end = 0;
+    }
+}
+```
+
+Compact constructor characteristics:
+
+- **No parameter list** — the parameters are the `(int start, int end)` declared in the Record header.
+- **No need to write assignments** — `this.start = start` is automatically added by the compiler at the end of the constructor.
+- **You can modify parameters** — the modified parameter values are assigned to fields (typical use: normalization, defensive copy).
+- **You can throw exceptions** — failed validation throws, and the object is never created.
+
+### 3.1 Classic Usage: Normalization and Defensive Copy
+
+```java
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Collections;
+
+public record Team(String name, List<String> members) {
+    public Team {
+        // Defensive copy + immutability
+        members = List.copyOf(members);   // immutable copy
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException("name cannot be empty");
+        }
+    }
+}
+```
+
+`List.copyOf` is a Java 10+ method that returns an **unmodifiable List** — paired with a Record's immutability, team members can't be modified from the outside.
+
+## 4. Records and Inheritance: Deliberately Restricted
+
+A Record' design philosophy is "pure value object," so inheritance is strictly limited:
+
+### 4.1 Records Cannot Extend Other Classes
+
+```java
+record Point(int x, int y) extends Object {}  // Compile error! Record cannot extends any class
+```
+
+Records implicitly extend `java.lang.Record` (an abstract class) and cannot extend anything else. This ensures the "all-field value comparison" semantics of `equals`/`hashCode`/`toString` aren't broken.
+
+### 4.2 Records Can Implement Interfaces
+
+```java
+interface Comparable2D {
+    int compareTo2D(int x, int y);
+}
+
+record Point(int x, int y) implements Comparable2D {
+    @Override
+    public int compareTo2D(int otherX, int otherY) {
+        return Integer.compare(x*x + y*y, otherX*otherX + otherY*otherY);
+    }
+}
+```
+
+### 4.3 Records Cannot Be Subclassed
+
+Records are implicitly `final` and **cannot be subclassed by any class**:
+
+```java
+class SubPoint extends Point { ... }   // Compile error! Record is final
+```
+
+This guarantees the "immutable + all-field equals" semantics of Records aren't broken by subclasses.
+
+### 4.4 Records Cannot Be abstract
+
+```java
+abstract record Shape(int x, int y) {}   // Compile error! Record cannot be abstract
+```
+
+If you want "extensible value types" — the answer is the combination of **Sealed Classes** + Records in the next chapter.
+
+## 5. Local Records
+
+Records can be declared inside methods — called **local Records** — just like local classes:
+
+```java
+public static void main(String[] args) {
+    record Point(int x, int y) {}   // local Record
+
+    List<Point> points = List.of(
+        new Point(1, 2),
+        new Point(3, 4),
+        new Point(5, 6)
+    );
+
+    points.stream()
+        .filter(p -> p.x() > 2)
+        .forEach(System.out::println);
+}
+```
+
+Use cases: temporary "data tuples" within a method — strongly typed like `Map＜String, Object＞`, but as lightweight as writing a dedicated class. Stream intermediate results are especially well-suited to local Records.
+
+## 6. Records and Pattern Matching: A Match Made in Heaven
+
+Records' most powerful use case is cooperation with **Pattern Matching** (detailed in the next chapter) — you can directly "deconstruct" a Record:
+
+```java
+record Point(int x, int y) {}
+record Rectangle(Point topLeft, Point bottomRight) {}
+
+Rectangle r = new Rectangle(new Point(1, 2), new Point(5, 6));
+
+// instanceof pattern matching + Record deconstruction (JDK 21)
+if (r instanceof Rectangle(Point(int x1, int y1), Point(int x2, int y2))) {
+    System.out.println("Rectangle: (" + x1 + "," + y1 + ") to (" + x2 + "," + y2 + ")");
+}
+```
+
+`Rectangle(Point(int x1, int y1), Point(int x2, int y2))` directly deconstructs both layers of nested Records into variables — this is functional language "pattern matching" implemented in Java. We'll cover this in detail in the next chapter.
+
+## 7. What Records Cannot Do
+
+| Restriction | Explanation |
+| --- | --- |
+| Fields cannot be modified | Fields are implicitly `final`; Records are immutable |
+| Cannot extend other classes | Implicitly extends `java.lang.Record`, cannot extends anything else |
+| Cannot be subclassed | Records are implicitly `final` |
+| Cannot be `abstract` | Must be directly instantiable |
+| Fields cannot be additionally declared | The components declared in the header are all the fields; no extra instance fields in the body |
+| Cannot define native methods | No `native` methods allowed in the Record body |
+
+But you can:
+
+- Add **static fields** and **static methods**.
+- Add **instance methods** (other than overriding `equals`/`hashCode`/`toString`/accessors).
+- Implement **interfaces**.
+- Add a **compact constructor** for validation.
+
+## 8. Practice: Modeling Real Data with Records
+
+The following example demonstrates Record definition, compact constructor validation, cooperation with Stream, the value semantics of equals/hashCode, the toString format, and local Records.
+
+<CodeRunner code={`import java.util.*;
+import java.util.stream.*;
+
+public class Main {
+    // Top-level Record: represents a range
+    public record Range(int start, int end) {
+        // Compact constructor: validation + normalization
+        public Range {
+            if (start > end) {
+                throw new IllegalArgumentException(
+                    "start(%d) cannot be greater than end(%d)".formatted(start, end));
+            }
+            if (start < 0) start = 0;
+            if (end < 0) end = 0;
+        }
+        public int length() { return end - start; }
+    }
+
+    // Top-level Record: represents an employee, implements an interface
+    public record Employee(String name, int age, String department) implements Comparable<Employee> {
+        @Override
+        public int compareTo(Employee o) {
+            return this.name.compareTo(o.name);
+        }
+        // Custom accessor behavior: name is never null
+        public String name() {
+            return name == null ? "Anonymous" : name;
+        }
+    }
+
+    // Top-level Record: contains a List field, compact constructor does defensive copy
+    public record Team(String name, List<String> members) {
+        public Team {
+            // Immutability + defensive copy
+            members = List.copyOf(members);
+            if (name == null || name.isBlank()) {
+                throw new IllegalArgumentException("Team name cannot be empty");
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println("=== Record Class Demo ===\\n");
+
+        // 1. Basic Record usage
+        System.out.println("--- 1. Basic Record ---");
+        record Point(int x, int y) {}   // local Record
+        Point p1 = new Point(3, 4);
+        Point p2 = new Point(3, 4);
+        Point p3 = new Point(5, 6);
+        System.out.println("p1 = " + p1);                    // Point[x=3, y=4]
+        System.out.println("p1.x() = " + p1.x());            // 3 (note: x(), not getX())
+        System.out.println("p1.equals(p2) = " + p1.equals(p2));  // true (value equality)
+        System.out.println("p1.equals(p3) = " + p1.equals(p3));  // false
+        System.out.println("p1.hashCode() == p2.hashCode(): "
+            + (p1.hashCode() == p2.hashCode()));             // true
+        System.out.println("p1.getClass() = " + p1.getClass().getSimpleName());
+        System.out.println("Is Record: " + p1.getClass().isRecord());
+
+        // 2. Compact constructor validation
+        System.out.println("\\n--- 2. Compact Constructor Validation ---");
+        Range r1 = new Range(10, 20);
+        System.out.println("Range(10, 20) = " + r1 + ", length=" + r1.length());
+        Range r2 = new Range(-5, 8);   // normalized to (0, 8)
+        System.out.println("Range(-5, 8) normalized to = " + r2);
+        try {
+            new Range(20, 10);   // start > end, throws
+        } catch (IllegalArgumentException e) {
+            System.out.println("Range(20, 10) throws: " + e.getMessage());
+        }
+
+        // 3. Record implementing interface + custom accessor
+        System.out.println("\\n--- 3. Implementing Comparable + Custom Accessor ---");
+        Employee e1 = new Employee("Alice", 30, "Engineering");
+        Employee e2 = new Employee("Bob", 25, "Product");
+        Employee e3 = new Employee("Alice", 30, "Engineering");
+        System.out.println("e1 = " + e1);
+        System.out.println("e1.equals(e3) = " + e1.equals(e3));  // true
+        System.out.println("e1.compareTo(e2) = " + e1.compareTo(e2));  // compares by name
+        Employee eNull = new Employee(null, 28, "Operations");
+        System.out.println("Accessor for name=null: " + eNull.name());  // custom accessor returns "Anonymous"
+
+        // 4. Record with Stream
+        System.out.println("\\n--- 4. Record + Stream ---");
+        List<Employee> emps = List.of(
+            new Employee("Charlie", 35, "Engineering"),
+            new Employee("Alice", 28, "Design"),
+            new Employee("Bob", 40, "Engineering"),
+            new Employee("David", 32, "Engineering")
+        );
+        // Group by department, take the oldest in each group
+        Map<String, Optional<Employee>> oldestByDept = emps.stream()
+            .collect(Collectors.groupingBy(
+                Employee::department,
+                Collectors.maxBy(Comparator.comparingInt(Employee::age))
+            ));
+        oldestByDept.forEach((dept, emp) ->
+            System.out.println(dept + " department oldest: " + emp.orElse(null)));
+
+        // 5. Record containing a List field, defensive copy
+        System.out.println("\\n--- 5. Defensive Copy + Immutability ---");
+        List<String> memberList = new ArrayList<>(List.of("Alice", "Bob"));
+        Team team = new Team("Core Team", memberList);
+        System.out.println("team = " + team);
+        // Try to modify the original list
+        memberList.add("Charlie");
+        System.out.println("After modifying original list, team.members = " + team.members());  // unchanged
+        // Try to modify the list inside the record
+        try {
+            team.members().add("David");
+        } catch (UnsupportedOperationException ex) {
+            System.out.println("Trying to modify team.members() throws: " + ex.getClass().getSimpleName());
+        }
+
+        // 6. Local Record as intermediate data in Stream
+        System.out.println("\\n--- 6. Local Record as Intermediate Data ---");
+        record DeptStat(String dept, int count, double avgAge) {
+            @Override
+            public String toString() {
+                return dept + " (count=" + count + ", avgAge=" + String.format("%.1f", avgAge) + ")";
+            }
+        }
+        List<DeptStat> stats = emps.stream()
+            .collect(Collectors.groupingBy(Employee::department))
+            .entrySet().stream()
+            .map(entry -> {
+                List<Employee> group = entry.getValue();
+                double avg = group.stream().mapToInt(Employee::age).average().orElse(0);
+                return new DeptStat(entry.getKey(), group.size(), avg);
+            })
+            .sorted(Comparator.comparing(DeptStat::dept))
+            .collect(Collectors.toList());
+        stats.forEach(System.out::println);
+
+        // 7. Record reflection API
+        System.out.println("\\n--- 7. Record Reflection API ---");
+        System.out.println("Is Employee a Record: " + Employee.class.isRecord());
+        System.out.println("Employee's Record components:");
+        for (java.lang.reflect.RecordComponent rc : Employee.class.getRecordComponents()) {
+            System.out.println("  - " + rc.getName()
+                + " : " + rc.getType().getSimpleName()
+                + " (accessor: " + rc.getAccessor().getName() + ")");
+        }
+
+        System.out.println("\\n=== Summary ===");
+        System.out.println("1. Record = immutable value object, auto-generates constructor/accessor/equals/hashCode/toString");
+        System.out.println("2. Accessor is x(), not getX()");
+        System.out.println("3. Compact constructor for validation and normalization, no parameter list needed");
+        System.out.println("4. Record cannot extend or be extended, but can implement interfaces");
+        System.out.println("5. Local Records suit Stream intermediate results");
+        System.out.println("6. Cooperates with pattern matching for deconstruction");
+    }
+}`} />
+
+> **Key observations**:
+> - **`p1.equals(p2)` returns `true`** — value object semantics; same component values means equal.
+> - **`Range(-5, 8)` is normalized to `Range[start=0, end=8]`** — the compact constructor modified the parameters.
+> - **Modifying `team.members()` throws `UnsupportedOperationException`** — `List.copyOf` returns an immutable List.
+> - **`Employee.class.getRecordComponents()`** — reflection can get the component list; frameworks (Jackson/Hibernate) rely on this to adapt to Records.
+> - **The local `DeptStat`** — declared in one line, strongly typed Stream intermediate results, far safer than `Map＜String, Object＞`.
+
+## 9. Record vs Lombok vs Traditional POJO
+
+| Dimension | Traditional POJO | Lombok @Data | Record |
+| --- | --- | --- | --- |
+| Code volume | Dozens of lines | 1 line + annotation | 1 line |
+| Mutability | Usually mutable | Mutable by default | **Immutable** |
+| Third-party dependency | None | Requires Lombok | None (built into JDK) |
+| Inheritance | Can extend | Can extend | Cannot extend |
+| equals semantics | Usually by field | By field | **Value equality** |
+| Accessor | getX/setX | getX/setX | **x()** |
+| Suitable for | JavaBean, ORM entities | Simplified POJO | Pure data carriers, DTOs, value objects |
+
+**When to use Record**:
+
+- DTOs (Data Transfer Objects) — API responses, config items.
+- Functions returning multiple values — strongly typed vs `Map＜String, Object＞`.
+- Immutable value objects — `Money`, `Coordinate`, `DateRange`.
+- Pattern matching carriers — modeling ADTs with Sealed Classes.
+
+**When NOT to use Record**:
+
+- When you need mutable state — JavaBeans, JPA entities (Hibernate by default requires a no-arg constructor and setters).
+- When you need inheritance hierarchies — use Sealed Classes + Record or traditional classes.
+- When the framework is incompatible — older Jackson, Hibernate 5.x have poor Record support.
+
+## 10. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| Record definition | `record Point(int x, int y) {}`, done in one line |
+| Auto-generated | Canonical constructor, accessors, equals, hashCode, toString |
+| Accessor naming | `x()`, `y()`, without `get` prefix |
+| Compact constructor | `public Point { ... }`, for validation/normalization/defensive copy |
+| Immutability | Fields are final, Record is implicitly final, cannot be subclassed |
+| Inheritance restrictions | Cannot extends any class, but can implements interfaces |
+| Local Record | Declared inside a method, suits Stream intermediate results |
+| Reflection API | `Class.isRecord()`, `getRecordComponents()` |
+| Value equality | equals is based on all component values |
+
+**Mnemonics**:
+
+- **One line beats a thousand words** — `record Point(int x, int y) {}` replaces 30 lines of POJO.
+- **Accessor without get** — `p.x()`, not `p.getX()`.
+- **Compact constructor for validation** — `public Point { if (x ＜ 0) throw ... }`.
+- **Immutable + value equality** — two `Point(1,2)` are equals-true.
+- **Cannot extend or be extended** — pure value objects, deliberately restricted.
+- **Use `List.copyOf` for List fields** — defensive copy + immutability.
+- **Use local Records as tuples** — strongly typed containers for Stream intermediate results.
+
+## Conclusion: Java Finally Has "Value Objects"
+
+Records are Java's language-level support for the "Value Object" concept in DDD (Domain-Driven Design) — immutable, value-equal, self-describing. The essential difference from Lombok is: Lombok "reduces boilerplate," while Record "changes semantics" — Record enforces immutability, value equality, and non-extendability. This is a design commitment, not syntactic sugar.
+
+The next chapter covers **Sealed Classes** — Records' "sibling," one solving "closed inheritance hierarchies," the other "immutable value objects." Combined with **Pattern Matching**, Java can finally elegantly model **algebraic data types (ADTs)** — a core feature of functional languages. See you in the next chapter.

@@ -1,0 +1,400 @@
+---
+title: "Thread Basics"
+chapter: 35
+stage: "Stage 7"
+stageName: "Concurrent Programming"
+order: 2
+description: "Master the three ways to create threads, the six states of the thread lifecycle, common thread methods, daemon threads and thread priorities, with a hands-on multithreaded concurrent download simulation"
+pubDate: 2026-07-03
+tags: ["Java", "Thread", "Lifecycle", "Daemon Thread", "Priority"]
+---
+
+# Thread Basics
+
+In the previous chapter we built up the mental model of concurrency — processes, threads, concurrency, parallelism. This chapter gets our hands dirty: how do you actually "make a thread" in Java?
+
+You might think `new Thread().start()` is trivial, but the truth is many people write Java for 5 years without understanding the difference between `start()` and `run()`, not knowing that `interrupt` is not a forced stop, or not understanding why `join` lets threads "queue up." These details determine whether you write "concurrency that runs" or "concurrency that explodes."
+
+## 1. Three Ways to Create a Thread
+
+Java gives us three ways to "open a thread," progressing from simple to powerful.
+
+### 1.1 Method 1: Extending the Thread Class
+
+The most direct approach — extend `Thread` and override `run()`.
+
+```java
+class MyThread extends Thread {
+    @Override
+    public void run() {
+        System.out.println("Thread " + Thread.currentThread().getName() + " is running");
+    }
+}
+
+MyThread t = new MyThread();
+t.start();   // Call start(), not run()!
+```
+
+**Key points**:
+
+- `start()` **creates a new OS thread and invokes run()**; calling `run()` directly is just an ordinary method call and **does not open a new thread** — the most common beginner mistake.
+- Java only allows single inheritance; once you extend `Thread`, you cannot extend any other class — this approach is inflexible and **is not recommended in real projects**.
+
+### 1.2 Method 2: Implementing the Runnable Interface
+
+The more recommended approach — implement `Runnable` and hand it to a `Thread` to execute.
+
+```java
+class MyTask implements Runnable {
+    @Override
+    public void run() {
+        System.out.println("Task runs on " + Thread.currentThread().getName());
+    }
+}
+
+Thread t = new Thread(new MyTask(), "worker-1");
+t.start();
+
+// Or use a Lambda (Runnable is a functional interface)
+new Thread(() -> System.out.println("Lambda runs on " + Thread.currentThread().getName())).start();
+```
+
+**Advantages**:
+
+- `Runnable` is an interface, so you can still extend another class.
+- The task (`Runnable`) and execution (`Thread`) are decoupled — the same `Runnable` can be submitted to a thread pool, a virtual thread, or a `ForkJoinPool`.
+- `Runnable` is a functional interface, so Lambdas work.
+
+> **Thread itself also implements Runnable** — the `Thread` class has an internal `private Runnable target;` field, and the default implementation of `Thread.run()` is `if (target != null) target.run();`. So extending `Thread` and overriding `run` essentially overrides the default "call target" behavior.
+
+### 1.3 Method 3: Implementing Callable + Future
+
+`Runnable`'s `run()` returns `void` — once the task finishes you cannot get a result back. If you need to "spawn a thread to compute a value and bring it back," use `Callable`.
+
+```java
+import java.util.concurrent.*;
+
+Callable<Integer> task = () -> {
+    Thread.sleep(1000);
+    return 42;
+};
+
+FutureTask<Integer> future = new FutureTask<>(task);
+new Thread(future).start();
+
+Integer result = future.get();   // Blocks until the task completes
+System.out.println("Result is " + result);
+```
+
+**Key points**:
+
+- `Callable＜V＞`'s `call()` method **has a return value** and **can throw checked exceptions** (which `Runnable.run()` cannot).
+- `FutureTask` is the bridge between `Future` and `Runnable` — it can be passed to a `Thread` or a thread pool for execution.
+- `future.get()` will **block** until the task completes — this is the limitation of `Future`, solved by `CompletableFuture` in Chapter 44.
+
+In real projects, `Callable` is almost always used together with `ExecutorService.submit()` — directly `new Thread` to run a `FutureTask` is rare.
+
+### 1.4 Comparison of the Three Methods
+
+| Method | Return value | Exceptions | Recommendation |
+| --- | --- | --- | --- |
+| Extending Thread | None | Cannot throw | Not recommended (single-inheritance limit) |
+| Implementing Runnable | None | Cannot throw | Recommended (simple tasks) |
+| Implementing Callable | Yes | Can throw | Recommended (when a result is needed) |
+
+## 2. Thread Lifecycle: Six States
+
+A thread goes through several states from birth to death. Java defines them in the `Thread.State` enum — **6 states** in total.
+
+```
+        ┌──────────────────────────────────────────┐
+        │                                          ▼
+   ┌─NEW───→ RUNNABLE ──┬──→ BLOCKED ──┬──→ RUNNABLE
+   │                     │              │
+   │                     ├──→ WAITING ──┤
+   │                     │              │
+   │                     └──→ TIMED_WAITING ──┘
+   │
+   └─────────────────────────────────────────────→ TERMINATED
+```
+
+### 2.1 The Six States Explained
+
+| State | Meaning | How to enter |
+| --- | --- | --- |
+| **NEW** | Created but not started | `new Thread()` |
+| **RUNNABLE** | Eligible to run (may be running or waiting for CPU) | `start()` |
+| **BLOCKED** | Waiting for a monitor lock (synchronized) | Entering a synchronized block when the lock is held |
+| **WAITING** | Waiting indefinitely to be woken up | `wait()` / `join()` / `LockSupport.park()` |
+| **TIMED_WAITING** | Waiting with a timeout | `sleep(ms)` / `wait(ms)` / `join(ms)` / `parkNanos` |
+| **TERMINATED** | Thread execution finished | `run()` returns normally or throws an uncaught exception |
+
+> Note: Java's `RUNNABLE` merges "currently running" and "waiting for a CPU time slice" — at the OS level these are called Running and Ready, but Java does not distinguish them. So a Java thread in the `RUNNABLE` state **may be running, or may be queuing for the CPU**.
+
+### 2.2 BLOCKED vs WAITING
+
+Beginners most easily confuse these two states — both are "waiting," but they wait for different things:
+
+- **BLOCKED**: waiting for a **synchronized lock**. The thread wants to enter a synchronized block/method, but the lock is held by another thread, so it is placed in the "entry set" to wait. When the lock is released, the JVM picks a BLOCKED thread from the entry set to wake up.
+- **WAITING**: waiting for **some event or notification**. For example, calling `obj.wait()` (waiting for another thread to call `obj.notify()`), `thread.join()` (waiting for the target thread to finish), or `LockSupport.park()` (waiting for an unpark).
+
+**Important**: `ReentrantLock.lock()` puts a thread into **WAITING** (more precisely, into `park`), not BLOCKED! Only `synchronized` puts a thread into the BLOCKED state. This is a subtle difference between JUC locks and `synchronized` in the state machine.
+
+## 3. Core Thread Methods
+
+### 3.1 start() vs run()
+
+```
+start()  → JVM creates a new thread → calls run() in the new thread
+run()    → ordinary method call, runs in the current thread, no new thread
+```
+
+The source of countless bugs is writing `start()` as `run()` — the code "looks like it ran," but it is actually single-threaded.
+
+### 3.2 sleep(ms) — Sleep
+
+`Thread.sleep(ms)` makes the **current thread** sleep for the specified milliseconds and **does not release the lock**.
+
+```java
+Thread.sleep(1000);              // Sleep 1 second
+TimeUnit.SECONDS.sleep(1);       // More readable
+```
+
+During `sleep`, the thread enters `TIMED_WAITING`. If it is interrupted during sleep, it throws `InterruptedException` — so `sleep` is interruptible.
+
+### 3.3 join() — Waiting for Another Thread to Finish
+
+`thread.join()` blocks the **current thread** until `thread` finishes.
+
+```java
+Thread t = new Thread(() -> { /* ... */ });
+t.start();
+t.join();        // Wait for t to finish before continuing
+t.join(1000);    // Wait at most 1 second, then continue
+```
+
+The essence of `join` is that the **current thread calls t.wait()** — so `join` puts the current thread into `WAITING`, and it **does respond to interrupts**.
+
+### 3.4 yield() — Hint to Yield
+
+`Thread.yield()` is a hint — it tells the scheduler "I am willing to give up the CPU." But the scheduler **can completely ignore it** — you may yield and immediately get the CPU back.
+
+```java
+Thread.yield();   // A hint, no guarantee it actually yields
+```
+
+In practice `yield` is almost never used — it has no reliable semantics. When you need to "wait for some condition to become true," use `wait/notify` or a `Condition`, not a `yield` loop.
+
+### 3.5 interrupt() — Interruption
+
+Java has no safe way to "force a thread to stop" — `Thread.stop()` was deprecated long ago (forced stops can leave objects in an inconsistent state). Interruption is Java's "cooperative stopping" mechanism.
+
+```java
+Thread t = new Thread(() -> {
+    while (!Thread.currentThread().isInterrupted()) {
+        // do work
+    }
+});
+t.start();
+t.interrupt();   // Set the interrupt flag
+```
+
+**Key points**:
+
+- `interrupt()` **only sets the interrupt flag**; it does not force a stop.
+- The thread should **actively check** `Thread.currentThread().isInterrupted()` and exit gracefully.
+- If a thread is interrupted during `sleep`/`wait`/`join`, it throws `InterruptedException` and **clears the interrupt flag at the same time**.
+- After catching `InterruptedException`, you should typically either re-set the interrupt flag (`Thread.currentThread().interrupt()`) or rethrow it — **do not swallow the exception**.
+
+### 3.6 Method Quick Reference
+
+| Method | Purpose | Releases lock | Responds to interrupt |
+| --- | --- | --- | --- |
+| `start()` | Starts a new thread | — | — |
+| `run()` | Task body (a plain call if invoked directly) | — | — |
+| `sleep(ms)` | Current thread sleeps | ❌ No | ✅ Throws exception |
+| `join()` | Waits for target thread to finish | ✅ Yes (uses wait internally) | ✅ Throws exception |
+| `yield()` | Yields CPU (hint) | ❌ No | ❌ |
+| `interrupt()` | Sets the interrupt flag | — | — |
+| `isInterrupted()` | Queries the interrupt flag | — | — |
+
+## 4. Daemon Threads
+
+Java threads come in two kinds: **user threads** and **daemon threads**.
+
+- **User threads**: by default all threads are user threads. The JVM waits for all user threads to finish before exiting.
+- **Daemon threads**: threads that quietly do work in the background. **The JVM does not wait for daemon threads to finish** — when the last user thread ends, the JVM just exits, and all daemon threads are forcibly terminated.
+
+Typical daemon threads: **the GC thread**, **the Finalizer thread**, **the compiler thread** — they are the JVM's "logistics crew."
+
+```java
+Thread t = new Thread(() -> {
+    while (true) {
+        // periodic cleanup
+    }
+});
+t.setDaemon(true);   // Must be set BEFORE start()
+t.start();
+```
+
+**Key points**:
+
+- `setDaemon(true)` must be called **before** `start()`, otherwise it throws `IllegalThreadStateException`.
+- Do **not** operate on unrecoverable resources inside a daemon thread (writing files, modifying a database) — it may be terminated at any time, leaving resources unclosed.
+- Child threads created by a daemon thread **are daemon threads by default**.
+
+## 5. Thread Priority: No Order Guarantee
+
+`Thread` has a `setPriority(int)` method, ranging from 1 (`MIN_PRIORITY`) to 10 (`MAX_PRIORITY`), with a default of 5 (`NORM_PRIORITY`).
+
+```java
+t.setPriority(Thread.MAX_PRIORITY);   // 10
+```
+
+But note — **priority is only a hint to the OS, and there is no guarantee that a high-priority thread runs first**. Behavior differs completely across OSes and JVM implementations. **Never rely on priority for correctness** — at most it can "fine-tune performance," and even that effect is unpredictable.
+
+## 6. Hands-On: Simulating Concurrent Downloads
+
+The example below demonstrates the three thread creation methods, `join` waiting, `interrupt` interruption, daemon threads, and a complete lifecycle observation.
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Main thread started, name: " + Thread.currentThread().getName());
+        System.out.println("CPU cores: " + Runtime.getRuntime().availableProcessors());
+
+        // === Method 1: Extending Thread ===
+        Thread t1 = new Thread("downloader-1") {
+            @Override
+            public void run() {
+                System.out.println("[Thread subclass] state=" + getState() + " name=" + getName());
+                simulateDownload("file-A.zip", 3);
+            }
+        };
+        System.out.println("t1 state before start: " + t1.getState());   // NEW
+        t1.start();
+        System.out.println("t1 state after start: " + t1.getState());   // RUNNABLE
+
+        // === Method 2: Runnable + Lambda ===
+        Thread t2 = new Thread(() -> {
+            simulateDownload("file-B.zip", 2);
+        }, "downloader-2");
+        t2.start();
+
+        // === Method 3: Callable + FutureTask ===
+        Callable<Integer> task = () -> {
+            simulateDownload("file-C.zip", 2);
+            return 100;   // pretend to return downloaded bytes (MB)
+        };
+        FutureTask<Integer> future = new FutureTask<>(task);
+        Thread t3 = new Thread(future, "downloader-3");
+        t3.start();
+
+        // === Daemon thread: progress monitor ===
+        Thread monitor = new Thread(() -> {
+            AtomicInteger tick = new AtomicInteger(0);
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    Thread.sleep(500);
+                    System.out.println("  [monitor] elapsed " + tick.addAndGet(500) + " ms");
+                } catch (InterruptedException e) {
+                    System.out.println("  [monitor] interrupted, exiting");
+                    break;
+                }
+            }
+        }, "monitor");
+        monitor.setDaemon(true);   // must be before start
+        monitor.start();
+
+        // === join waits for the three downloads to finish ===
+        System.out.println("\\n=== Main thread waiting for downloads ===");
+        t1.join();
+        System.out.println("t1 finished, state: " + t1.getState());   // TERMINATED
+        t2.join();
+        Integer cResult = future.get();   // blocks to get the Callable result
+        System.out.println("t3 finished, downloaded: " + cResult + " MB");
+
+        // === interrupt the monitor thread ===
+        System.out.println("\\n=== Interrupting the monitor thread ===");
+        System.out.println("monitor before interrupt isInterrupted=" + monitor.isInterrupted());
+        monitor.interrupt();
+        Thread.sleep(100);
+        System.out.println("monitor state after interrupt: " + monitor.getState());
+
+        // === Priority demo (no order guarantee) ===
+        System.out.println("\\n=== Priority demo ===");
+        for (int i = 0; i < 3; i++) {
+            Thread t = new Thread(() -> {
+                System.out.println("  " + Thread.currentThread().getName()
+                    + " priority=" + Thread.currentThread().getPriority()
+                    + " started");
+            }, "prio-" + i);
+            t.setPriority(i == 0 ? Thread.MIN_PRIORITY
+                          : i == 1 ? Thread.NORM_PRIORITY
+                          : Thread.MAX_PRIORITY);
+            t.start();
+        }
+
+        Thread.sleep(500);
+        System.out.println("\\n=== Main thread finished ===");
+    }
+
+    static void simulateDownload(String file, int seconds) {
+        String name = Thread.currentThread().getName();
+        System.out.println("[" + name + "] starting download " + file);
+        try {
+            for (int i = 0; i < seconds; i++) {
+                Thread.sleep(1000);
+                System.out.println("[" + name + "] " + file + " progress "
+                    + ((i + 1) * 100 / seconds) + "%");
+            }
+        } catch (InterruptedException e) {
+            System.out.println("[" + name + "] " + file + " download interrupted");
+            Thread.currentThread().interrupt();
+            return;
+        }
+        System.out.println("[" + name + "] " + file + " download complete");
+    }
+}`} />
+
+> **Key observations**:
+> - **`t1` is NEW before start, RUNNABLE after start, and TERMINATED after finishing** — the core transitions of the state machine.
+> - **`join` makes the main thread wait for child threads** — the main thread prints "waiting for downloads" then blocks, only continuing after t1/t2/t3 all finish.
+> - **`future.get()` blocks to retrieve the Callable return value** — `Callable` is ideal for "spawn a thread to compute a result."
+> - **`monitor.interrupt()` does not forcibly stop the thread** — it only sets the flag; the monitor's `sleep` throws `InterruptedException`, and the loop checks the interrupt and breaks out.
+> - **The daemon thread `monitor`, even with `while(true)`, exits when the main thread ends** — that is the point of daemon threads.
+> - **A high-priority thread is not guaranteed to run first** — the output order has no necessary relationship with priority.
+
+## 7. Chapter Summary
+
+| Topic | Key points |
+| --- | --- |
+| Three creation methods | Extending `Thread` (not recommended) / implementing `Runnable` (recommended) / `Callable`+`Future` (when a return value is needed) |
+| `start` vs `run` | `start` opens a new thread; `run` is an ordinary method call |
+| Six states | NEW → RUNNABLE → (BLOCKED/WAITING/TIMED_WAITING) → TERMINATED |
+| BLOCKED vs WAITING | BLOCKED waits for a synchronized lock; WAITING waits for a notification/event |
+| `sleep` | Does not release the lock; responds to interrupts |
+| `join` | Waits for target thread to finish (uses wait internally); releases the lock; responds to interrupts |
+| `yield` | A yield hint with no reliable semantics |
+| `interrupt` | Cooperative stopping — only sets the flag, the thread checks itself |
+| Daemon thread | `setDaemon(true)` must be set before start; the JVM does not wait for daemon threads to exit |
+| Priority | Only a hint, no order guarantee, never rely on it for correctness |
+
+**Mnemonics**:
+
+- **`start` opens a thread, `run` is an ordinary method** — get this right.
+- **`sleep` does not release the lock, `join` does** — high-frequency interview question.
+- **BLOCKED waits for synchronized, WAITING waits for a notification** — only `synchronized` puts a thread into BLOCKED.
+- **`interrupt` is cooperative, not a forced stop** — the thread decides how to respond.
+- **Daemon threads are logistics** — do not let them write critical data.
+- **Priority is unreliable** — do not treat it as a scheduling guarantee.
+
+## Conclusion: From "Knowing How to Open a Thread" to "Knowing How to Manage Threads"
+
+This chapter taught us how to "make a thread" — the three creation methods, six states, and core methods. But in real production environments you almost never `new Thread` directly — you use a thread pool (Chapter 43). The problem with direct `new Thread` is: high creation/destruction cost, no way to control concurrency, no task queue, no exception handling.
+
+However, understanding `Thread` is the foundation for understanding all concurrency — thread pools still use `Thread` internally, `CompletableFuture` uses `ForkJoinPool` by default, and virtual threads are essentially subclasses of `Thread`. Master these fundamentals, and the rest will flow naturally.
+
+The next chapter confronts the core question of concurrency head-on — **thread safety**: why does it go wrong when multiple threads modify the same variable at the same time? What is a race condition? Why is `i++` not an atomic operation? This is the chapter where you truly "fall into the concurrency pit."

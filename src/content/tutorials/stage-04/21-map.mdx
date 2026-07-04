@@ -1,0 +1,367 @@
+---
+title: "Map"
+chapter: 21
+stage: "第四阶段"
+stageName: "集合框架"
+order: 4
+description: "剖析 HashMap 数组+链表+红黑树结构、扩容与 rehash、TreeMap/LinkedHashMap 原理、ConcurrentHashMap 并发设计，并实现 LRU 缓存"
+pubDate: 2026-07-03
+tags: ["Java", "Map", "HashMap", "TreeMap", "LinkedHashMap", "ConcurrentHashMap", "LRU", "红黑树"]
+---
+
+# Map
+
+如果说 `List` 和 `Set` 是装"一堆东西"的容器，那 `Map` 就是装"一堆对应关系"的容器——一个 key 对应一个 value，像字典、像通讯录、像配置表。给个名字查号码，给个单词查翻译，给个 id 查用户——这些都是 `Map` 的主场。
+
+`Map` 是集合框架中最有故事的一支。它的明星成员 `HashMap` 经历了 Java 8 的"链表转红黑树"大升级；`LinkedHashMap` 一行配置就能做 LRU 缓存；`ConcurrentHashMap` 是并发编程的扛把子。这一章，我们把这些故事一一讲清楚。
+
+## 一、Map 接口
+
+`Map<K, V>` 是独立的接口，不继承 `Collection`：
+
+```java
+public interface Map<K, V> {
+    // 基本操作
+    V put(K key, V value);              // 存（key 已存在则更新，返回旧值）
+    V get(Object key);                  // 取
+    V getOrDefault(Object key, V defaultValue);   // 取，没有则返回默认值
+    V remove(Object key);               // 删
+    boolean containsKey(Object key);
+    boolean containsValue(Object value);
+
+    // 批量
+    void putAll(Map<? extends K, ? extends V> m);
+
+    // 视图
+    Set<K> keySet();                         // key 的 Set 视图
+    Collection<V> values();                  // value 的 Collection 视图
+    Set<Map.Entry<K, V>> entrySet();         // 键值对的 Set 视图
+
+    // Java 8+
+    V putIfAbsent(K key, V value);
+    V compute(K key, BiFunction<K, V, V> remappingFunction);
+    V merge(K key, V value, BiFunction<V, V, V> remappingFunction);
+    void forEach(BiConsumer<K, V> action);
+}
+```
+
+三个视图方法是 `Map` 与 `Collection` 世界沟通的桥梁——`keySet()`、`values()`、`entrySet()` 返回的都是**视图**，对视图的修改会反映到 Map 本身。
+
+## 二、HashMap：数组 + 链表 + 红黑树
+
+### 2.1 核心结构
+
+`HashMap` 是 `Map` 的"默认代言人"。理解它，关键看三个字段：
+
+```java
+public class HashMap<K,V> extends AbstractMap<K,V>
+        implements Map<K,V>, Cloneable, Serializable {
+    transient Node<K,V>[] table;      // 哈希桶数组（桶）
+    transient int size;                // 元素个数
+    int threshold;                     // 扩容阈值 = capacity * loadFactor
+    final float loadFactor;            // 负载因子
+
+    static class Node<K,V> implements Map.Entry<K,V> {
+        final int hash;
+        final K key;
+        V value;
+        Node<K,V> next;                // 同一个桶里的下一个节点（链表）
+    }
+}
+```
+
+`table` 是一个 `Node[]` 数组，每个槽位叫一个"桶"（bucket）。key 的 hash 决定它进哪个桶，同一个桶的元素用链表串起来。
+
+### 2.2 put 的完整流程
+
+`HashMap.put` 做的事大致是：
+
+1. **算 hash**：`(h = key.hashCode()) ^ (h ＞＞＞ 16)`——高位低位异或，让 hash 更均匀。
+2. **定桶**：`hash & (capacity - 1)`——位运算代替取模，前提是容量是 2 的幂。
+3. **桶空**：直接放新 `Node`。
+4. **桶非空**：遍历链表/红黑树，找到相同 key 就更新 value；找不到就追加。
+5. **链表长度 >= 8 且容量 >= 64**：链表转红黑树（treeify）。
+6. **size > threshold**：扩容。
+
+```java
+// 简化的 putVal（Java 8+）
+final V putVal(int hash, K key, V value, boolean onlyIfAbsent, boolean evict) {
+    Node<K,V>[] tab = table;
+    int n = tab.length;
+    int i = (n - 1) & hash;                 // 定桶
+    Node<K,V> p = tab[i];
+    if (p == null) {
+        tab[i] = newNode(hash, key, value, null);   // 桶空，直接放
+    } else {
+        // 桶非空，遍历查找/追加
+        // ...
+    }
+    if (++size > threshold) resize();       // 扩容
+    return null;
+}
+```
+
+### 2.3 为什么容量必须是 2 的幂
+
+`HashMap` 用 `hash & (capacity - 1)` 而不是 `hash % capacity` 来定桶——位运算比取模快得多。但 `& (capacity - 1)` 等价于 `% capacity` **仅当 capacity 是 2 的幂**。所以 `HashMap` 内部始终把容量凑成 2 的幂（默认 16，扩容翻倍）。
+
+### 2.4 链表转红黑树（Java 8+）
+
+Java 7 的 HashMap 在哈希冲突严重时，桶里是长链表，查找 O(n)。恶意构造的 key 甚至能造成 DoS 攻击。
+
+Java 8 引入"链表树化"机制：
+
+- 链表长度达到 **8** 且 `table` 容量达到 **64**：链表转红黑树，查找降为 O(log n)。
+- 红黑树节点数降至 **6** 以下：退化回链表（untreeify）。
+
+8 和 6 之间有"滞后"是为了避免频繁在链表和树之间来回切换。
+
+### 2.5 扩容与 rehash
+
+当 `size ＞ threshold`（默认 `capacity * 0.75`）时，`HashMap` 扩容：
+
+- **容量翻倍**：`newCapacity = oldCapacity ＜＜ 1`。
+- **重新分布**：每个元素重新定位桶。由于容量翻倍，新桶号要么是 `原桶号`，要么是 `原桶号 + 原容量`——这个巧妙的性质让 rehash 不必重算 hash。
+
+扩容是 O(n) 的——所有元素要重新分布。所以**预估容量**很重要：
+
+```java
+// 已知要放 1000 个元素，避免扩容
+int cap = (int) (1000 / 0.75) + 1;   // 1334，凑成 2 的幂 = 2048
+Map<String, Integer> map = new HashMap<>(2048);
+```
+
+> 💡 **Guava 的 Maps.newHashMapWithExpectedSize(expectedSize)** 帮你算这个，不用手算。
+
+### 2.6 负载因子 0.75 的含义
+
+负载因子（loadFactor）控制"装多满才扩容"：
+
+- 默认 `0.75`：装到 75% 满就扩容。
+- **更小（如 0.5）**：冲突少，查找快，但空间浪费多，扩容频繁。
+- **更大（如 1.0）**：空间利用率高，但冲突多，查找慢。
+
+`0.75` 是时间与空间的折中——这是 Joshua Bloch 等大神经验调出的最佳值，日常别改。
+
+### 2.7 关键：key 必须"不可变"
+
+`HashMap` 用 key 的 hash 定位桶。如果 key 是可变对象，放入后被修改，导致 hash 变了——再 `get` 时就找不到了！
+
+```java
+List<String> key = new ArrayList<>(List.of("A"));
+Map<List<String>, Integer> map = new HashMap<>();
+map.put(key, 1);
+key.add("B");                  // 修改了 key！
+map.get(key);                  // null！hash 变了，找不到原桶了
+map.get(new ArrayList<>(List.of("A")));   // 也找不到
+```
+
+**最佳实践**：用 `String`、`Integer`、`Long` 这类不可变对象做 key。自定义对象做 key 时，要么设计成不可变，要么确保做 key 的字段不再修改。
+
+## 三、TreeMap：按键排序
+
+`TreeMap` 用红黑树存储，遍历时按键的升序：
+
+```java
+TreeMap<String, Integer> map = new TreeMap<>();
+map.put("banana", 2);
+map.put("apple", 5);
+map.put("cherry", 3);
+map.forEach((k, v) -> System.out.println(k + "=" + v));
+// apple=5, banana=2, cherry=3（按 key 字典序）
+```
+
+排序方式与 TreeSet 一致：自然排序（key 实现 Comparable）或定制排序（构造时传 Comparator）。它实现了 `NavigableMap`，提供 `firstKey`/`lastKey`/`ceilingKey`/`floorKey`/`subMap` 等导航方法。
+
+适合需要"按 key 排序遍历""范围查询"的场景。
+
+## 四、LinkedHashMap：保持顺序与 accessOrder
+
+### 4.1 两种顺序模式
+
+`LinkedHashMap` 在 `HashMap` 之上加了一条双向链表，记录顺序。它有两种模式：
+
+- **插入顺序**（默认）：按 put 的先后顺序。遍历时就是 put 顺序。
+- **访问顺序**（accessOrder=true）：每次 `get`/`put` 已存在的 key，都会把该条目移到链表末尾——"最近访问的在后面"。
+
+```java
+// 插入顺序（默认）
+LinkedHashMap<String, Integer> m1 = new LinkedHashMap<>(16, 0.75f, false);
+// 访问顺序
+LinkedHashMap<String, Integer> m2 = new LinkedHashMap<>(16, 0.75f, true);
+```
+
+### 4.2 LRU 缓存的原理
+
+`accessOrder=true` 模式下，链表头部是"最久未访问"，尾部是"最近访问"——这正是 **LRU**（Least Recently Used，最近最少使用）缓存淘汰策略的依据。
+
+更妙的是，`LinkedHashMap` 留了一个钩子：
+
+```java
+protected boolean removeEldestEntry(Map.Entry<K,V> eldest) {
+    return false;   // 默认不删
+}
+```
+
+每次 `put` 后会调用这个方法，返回 `true` 就自动删除最老的条目。**重写它返回 `size() ＞ 容量`，一个 LRU 缓存就完成了**——这就是为什么"LRU 缓存"是面试经典题。
+
+## 五、ConcurrentHashMap：并发安全
+
+### 5.1 为什么不用 Hashtable 或 Collections.synchronizedMap
+
+`Hashtable` 给每个方法加 `synchronized`——并发读都被锁死，性能差，已被时代淘汰。`Collections.synchronizedMap` 也是同样的"全锁"思路。
+
+`ConcurrentHashMap` 的思路是**降低锁粒度**——只锁"正在写的那个桶"，其他桶的读写都不阻塞。
+
+### 5.2 Java 8 的实现：CAS + synchronized 锁桶
+
+Java 7 的 `ConcurrentHashMap` 用"分段锁"（Segment），把整个 map 切成 16 段，每段一把锁。Java 8 重写为更精细的"CAS + synchronized 锁单个桶头节点"：
+
+- **桶空**：用 CAS 把新节点放进去，无锁。
+- **桶非空**：`synchronized` 锁住桶头节点，链表/树上追加。
+- **size**：用 `LongAdder` 思路，多个 `baseCount` + `CounterCell` 数组，减少竞争。
+
+这种设计让读完全无锁，写只锁单个桶——并发度极高。
+
+### 5.3 原子操作：putIfAbsent / compute / merge
+
+并发场景下，"判断-再操作"不是原子的：
+
+```java
+// ❌ 并发不安全
+if (!map.containsKey(k)) {
+    map.put(k, v);
+}
+
+// ✅ 原子
+map.putIfAbsent(k, v);
+```
+
+`ConcurrentHashMap` 提供了一组原子方法：
+
+- `putIfAbsent(key, value)`：不存在才放。
+- `compute(key, (k, v) -＞ ...)`：原子地根据当前值计算新值。
+- `merge(key, value, (oldV, newV) -＞ ...)`：原子合并。
+
+```java
+// 并发安全的词频统计
+ConcurrentHashMap<String, Long> freq = new ConcurrentHashMap<>();
+freq.merge(word, 1L, Long::sum);   // 原子：不存在则放 1，存在则累加
+```
+
+## 六、实战：实现 LRU 缓存
+
+继承 `LinkedHashMap`，几行代码就能实现 LRU：
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        LRUCache<String, Integer> cache = new LRUCache<>(3);
+
+        cache.put("A", 1);
+        cache.put("B", 2);
+        cache.put("C", 3);
+        System.out.println("初始: " + cache);          // [A=1, B=2, C=3]
+
+        cache.get("A");    // 访问 A，A 移到末尾
+        System.out.println("get A 后: " + cache);       // [B=2, C=3, A=1]
+
+        cache.put("D", 4); // 超容量，淘汰最久未访问的 B
+        System.out.println("put D 后: " + cache);       // [C=3, A=1, D=4]
+
+        System.out.println("get B (已被淘汰): " + cache.get("B"));   // null
+
+        // 演示 TreeMap 排序
+        System.out.println("\\n--- TreeMap 排序 ---");
+        TreeMap<String, Integer> tree = new TreeMap<>();
+        tree.put("banana", 2);
+        tree.put("apple", 5);
+        tree.put("cherry", 3);
+        tree.forEach((k, v) -> System.out.println("  " + k + "=" + v));
+
+        System.out.println("firstKey: " + tree.firstKey());
+        System.out.println("lastKey: " + tree.lastKey());
+        System.out.println("subMap(apple, cherry): " + tree.subMap("apple", "cherry"));
+        System.out.println("headMap(banana): " + tree.headMap("banana"));
+
+        // 演示 HashMap 的 compute/merge
+        System.out.println("\\n--- HashMap 原子操作 ---");
+        Map<String, Integer> wordCount = new HashMap<>();
+        String[] words = {"a", "b", "a", "c", "b", "a"};
+        for (String w : words) {
+            wordCount.merge(w, 1, Integer::sum);
+        }
+        System.out.println("词频: " + wordCount);
+
+        // compute：根据当前值计算新值
+        wordCount.compute("a", (k, v) -> v == null ? 1 : v + 100);
+        System.out.println("compute a+100 后: " + wordCount);
+    }
+}
+
+class LRUCache<K, V> extends LinkedHashMap<K, V> {
+    private final int capacity;
+
+    LRUCache(int capacity) {
+        super(capacity, 0.75f, true);   // accessOrder=true
+        this.capacity = capacity;
+    }
+
+    @Override
+    protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+        return size() > capacity;       // 超容量就淘汰最老的
+    }
+}`} />
+
+这个 `LRUCache` 实现的精髓在于：
+
+1. 构造时 `accessOrder=true`——开启访问顺序模式。
+2. 重写 `removeEldestEntry`——超容量自动淘汰。
+3. 一切交给 `LinkedHashMap`，自己只写两行——这就是设计模式的魅力。
+
+## 七、HashMap 调优指南
+
+| 参数 | 默认 | 调优建议 |
+| --- | --- | --- |
+| 初始容量 | 16 | 已知元素数 → 设为 `expected / 0.75`（凑 2 的幂） |
+| 负载因子 | 0.75 | 通常别动；内存紧张可调到 0.9，查找频繁可调到 0.5 |
+| key 类型 | - | 优先用不可变对象（String、Integer） |
+
+一个常见的坑：`new HashMap＜＞(expectedSize)` 仍可能扩容。因为 threshold = capacity × loadFactor，容量 100 时 threshold 才 75。如果预计放 100 个，要用 `new HashMap＜＞(expectedSize / 0.75f + 1)`，或用 Guava 的 `Maps.newHashMapWithExpectedSize`。
+
+## 八、四大 Map 对比
+
+| 特性 | HashMap | LinkedHashMap | TreeMap | ConcurrentHashMap |
+| --- | --- | --- | --- | --- |
+| 顺序 | 无 | 插入/访问顺序 | 按 key 排序 | 无 |
+| null key | 允许 1 个 | 允许 1 个 | 不允许 | 不允许 |
+| null value | 允许多个 | 允许多个 | 允许多个 | 不允许 |
+| 线程安全 | 否 | 否 | 否 | 是 |
+| add/get | O(1) | O(1) | O(log n) | O(1) |
+| 适用 | 通用 | 保序/缓存 | 排序/范围 | 并发 |
+
+## 九、本章小结
+
+| 主题 | 要点 |
+| --- | --- |
+| Map 接口 | key-value 映射，三个视图 keySet/values/entrySet |
+| HashMap 结构 | `Node[] table` + 链表 + 红黑树（Java 8+） |
+| 定桶 | `hash & (capacity - 1)`，容量必须 2 的幂 |
+| 树化 | 链表 >= 8 且容量 >= 64 转红黑树 |
+| 扩容 | capacity × 0.75 触发，翻倍，rehash |
+| 负载因子 0.75 | 时间与空间的折中 |
+| key 不可变 | 修改 key 会导致 get 找不到 |
+| TreeMap | 红黑树，按键排序，NavigableMap |
+| LinkedHashMap | HashMap + 链表，支持 accessOrder |
+| LRU 缓存 | 继承 LinkedHashMap，重写 removeEldestEntry |
+| ConcurrentHashMap | CAS + synchronized 锁桶，读无锁 |
+| 原子操作 | putIfAbsent/compute/merge |
+
+## 结语：Map 是集合框架的皇冠
+
+`Map` 比 `List`/`Set` 更复杂，也更强大。它把"键值对映射"这件事做到了极致：`HashMap` 用哈希表换取 O(1) 的极致性能，`TreeMap` 用红黑树换取排序能力，`LinkedHashMap` 用一条链表换取顺序与 LRU，`ConcurrentHashMap` 用细粒度锁换取高并发。
+
+理解了 `HashMap` 的数组+链表+红黑树，你就理解了 `HashSet`；理解了 `LinkedHashMap` 的 accessOrder，你就拿到了 LRU 缓存的钥匙；理解了 `ConcurrentHashMap` 的锁桶，你就触碰了并发编程的门道。
+
+下一章，我们看 `Queue` 与 `Deque`——专门处理"按特定顺序进出"的容器，那里有优先队列与双端队列的精彩设计。

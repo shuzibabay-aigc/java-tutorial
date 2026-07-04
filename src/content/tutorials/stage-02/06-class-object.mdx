@@ -1,0 +1,435 @@
+---
+title: "类与对象"
+chapter: 6
+stage: "第二阶段"
+stageName: "面向对象编程"
+order: 1
+description: "从面向对象思想出发，掌握类的定义、对象的创建、this 关键字、方法重载与可变参数，并设计一个英雄类"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "类", "对象", "重载"]
+---
+
+# 类与对象
+
+如果说前五章我们学的是"咖啡豆"——变量、运算符、流程控制、数组，那么从这一章开始，我们要把它们磨成粉、萃取出咖啡，端出一杯完整的饮品。这就是**面向对象编程**（Object-Oriented Programming，简称 OOP）。
+
+想象一位咖啡师。她不仅知道"咖啡豆是什么"，更知道"如何把豆子变成一杯拿铁"。在面向对象的世界里，我们不再只关注"数据"和"步骤"，而是关注"谁在做什么"——把数据和操作数据的方法揉成一个整体，这就是**对象**（Object）。
+
+本章是面向对象之旅的起点。我们将从思想出发，理解类与对象的本质，学会定义自己的类型，并最终设计出一个能战斗的"英雄"。
+
+## 一、面向对象思想：三大特性概述
+
+在 procedural（面向过程）编程的时代，程序是一连串"先做这个、再做那个"的指令。这种思路在小型程序里清晰直观，但随着软件规模膨胀，代码会变成一团乱麻——某个数据被几十个函数随意修改，bug 就像藏在蛛网里的灰尘，难以察觉。
+
+面向对象思想提供了一种全新的组织方式：**把程序看作一组协作的对象**。每个对象都有自己的数据（状态）和行为（方法），它们通过消息传递来协作。这种方式更贴近人类认知世界的方式——我们看到的是"一辆红色的汽车在加速"，而不是"先设置颜色变量，再调用加速函数"。
+
+面向对象有三大核心特性，它们将贯穿接下来几章的学习：
+
+- **封装（Encapsulation）**：把数据藏在对象内部，只暴露必要的接口。就像咖啡机的内部线路被金属外壳包裹，你只需按按钮，不必懂电路。封装让对象的状态不被随意篡改，提升安全性。
+
+- **继承（Inheritance）**：子类可以继承父类的字段和方法，避免重复造轮子。就像拿铁继承了"咖啡+牛奶"的基础配方，又加入了独特的奶泡艺术。
+
+- **多态（Polymorphism）**：同一个方法调用，不同的对象表现出不同的行为。就像同一句"请出杯"，咖啡师、调酒师、茶艺师会做出截然不同的饮品。
+
+本章我们先聚焦于"类与对象"本身，封装、继承、多态将在后续章节逐一深入。
+
+## 二、类与对象：蓝图与房子
+
+### 2.1 一个生动的比喻
+
+想象一位建筑师。她在图纸上画出房子的设计图——几间卧室、几个卫生间、门窗的位置。这张**设计图**就是**类（Class）**：它是一种"模板"或"蓝图"，描述了某一类事物的共同特征。
+
+而根据设计图盖出来的真实房子，就是**对象（Object）**——也叫**实例（Instance）**。同一张图纸可以盖出许多房子，它们结构相同，但里面的家具、住户各不相同。
+
+```
+类（设计图）        对象（实例）
+  House        →    House@1a2b（你家的房子）
+                 →    House@3c4d（邻家的房子）
+                 →    House@5e6f（另一栋）
+```
+
+类是抽象的"概念"，对象是具体的"存在"。**定义类时不会分配内存，只有 `new` 出对象时才会在堆内存中创建。**
+
+### 2.2 类的定义
+
+一个 Java 类通常包含三种成员：
+
+- **字段（Field）**：对象的状态/属性，有时也叫成员变量。
+- **方法（Method）**：对象的行为/功能。
+- **构造方法（Constructor）**：用于创建并初始化对象。
+
+```java
+public class Coffee {
+    // 字段（属性）
+    String name;       // 名字
+    int size;          // 杯型（毫升）
+    boolean hasMilk;   // 是否加奶
+
+    // 构造方法：与类同名，无返回值类型
+    public Coffee(String name, int size, boolean hasMilk) {
+        this.name = name;
+        this.size = size;
+        this.hasMilk = hasMilk;
+    }
+
+    // 方法（行为）
+    public void describe() {
+        String milk = hasMilk ? "加奶" : "不加奶";
+        System.out.println(name + "，" + size + "ml，" + milk);
+    }
+}
+```
+
+### 2.3 创建与使用对象
+
+用 `new` 关键字调用构造方法，就能在堆内存中创建一个对象：
+
+```java
+Coffee c1 = new Coffee("拿铁", 350, true);  // 创建对象
+c1.describe();                              // 调用方法：拿铁，350ml，加奶
+System.out.println(c1.size);                // 访问字段：350
+```
+
+这一行代码做了三件事：
+
+1. `new Coffee(...)` 在**堆**（Heap）中分配内存，初始化字段。
+2. 构造方法被调用，对字段赋值。
+3. 把对象的**引用**（地址）赋给栈中的变量 `c1`。
+
+> ⚠️ 注意：Java 中对象变量存的是"引用"，不是对象本身。`Coffee c1 = c2;` 不会复制对象，而是让 `c1` 和 `c2` 指向同一个对象。
+
+让我们把这些都跑起来看看：
+
+<CodeRunner code={`public class Main {
+    // 定义一个 Coffee 类
+    static class Coffee {
+        String name;
+        int size;
+        boolean hasMilk;
+
+        // 构造方法
+        public Coffee(String name, int size, boolean hasMilk) {
+            this.name = name;
+            this.size = size;
+            this.hasMilk = hasMilk;
+        }
+
+        // 方法
+        public void describe() {
+            String milk = hasMilk ? "加奶" : "不加奶";
+            System.out.println(name + "，" + size + "ml，" + milk);
+        }
+    }
+
+    public static void main(String[] args) {
+        Coffee c1 = new Coffee("拿铁", 350, true);
+        Coffee c2 = new Coffee("美式", 400, false);
+
+        c1.describe();
+        c2.describe();
+
+        // 修改字段
+        c2.size = 500;
+        c2.describe();
+    }
+}`} />
+
+## 三、this 关键字：指向"当前对象"
+
+在构造方法里你可能注意到了 `this.name = name;` 这样的写法。这里的 `this` 是什么？
+
+### 3.1 this 指向当前对象
+
+**`this` 是一个隐式参数，代表"正在调用这个方法的当前对象"**。当字段名与参数名相同时，`this.name` 指字段，`name` 指参数——`this` 起到了区分作用。
+
+```java
+public Coffee(String name, int size, boolean hasMilk) {
+    this.name = name;          // this.name 是字段，name 是参数
+    this.size = size;
+    this.hasMilk = hasMilk;
+}
+```
+
+如果不写 `this`，就会变成 `name = name;`——把参数赋值给自己，字段仍是默认值（`null`/`0`/`false`）。这是新手常踩的坑。
+
+### 3.2 this 在普通方法中
+
+在普通方法里，`this` 指向调用该方法的那个对象：
+
+```java
+public void describe() {
+    // this.name 等同于 name，this 可省略
+    System.out.println(this.name + "，" + this.size + "ml");
+}
+```
+
+当字段与局部变量不重名时，`this` 通常省略；编译器会自动补上。
+
+### 3.3 this 调用构造器
+
+`this(...)` 可以在一个构造方法中调用本类的另一个构造方法，避免重复初始化代码。注意：**`this(...)` 必须是构造方法的第一条语句**。
+
+```java
+public class Coffee {
+    String name;
+    int size;
+
+    // 主构造方法
+    public Coffee(String name, int size) {
+        this.name = name;
+        this.size = size;
+    }
+
+    // 重载的构造方法：默认 350ml
+    public Coffee(String name) {
+        this(name, 350);   // 调用上面的构造方法
+    }
+}
+```
+
+## 四、方法重载（Overload）：一名多身
+
+### 4.1 为什么需要重载
+
+想象咖啡店的点单系统：客人可能说"来杯拿铁"，也可能说"来杯拿铁，大杯"，甚至"来杯拿铁，大杯，少冰"。如果每种说法都要起一个不同的方法名——`orderLatte()`、`orderLatteWithSize()`、`orderLatteWithSizeAndIce()`——名字会爆炸。
+
+**方法重载（Method Overloading）**允许同一个类中存在多个**同名**方法，只要它们的**参数列表不同**（参数个数、类型或顺序不同）。编译器会根据传入的参数自动选择合适的方法。
+
+### 4.2 重载的规则
+
+- 方法名必须**相同**。
+- 参数列表必须**不同**（个数、类型、顺序至少一项不同）。
+- 返回类型、访问修饰符**不影响**重载（不能仅靠返回类型区分）。
+
+```java
+public class CoffeeMaker {
+    // 重载 1：无参
+    public void make() {
+        System.out.println("做一杯默认咖啡");
+    }
+
+    // 重载 2：一个 String 参数
+    public void make(String name) {
+        System.out.println("做一杯" + name);
+    }
+
+    // 重载 3：String + int 参数
+    public void make(String name, int size) {
+        System.out.println("做一杯" + size + "ml 的" + name);
+    }
+
+    // 重载 4：int + String（顺序不同，也算重载）
+    public void make(int size, String name) {
+        System.out.println(size + "ml 的" + name + "做好了");
+    }
+}
+```
+
+调用时，编译器根据实参类型和数量匹配最合适的方法：
+
+```java
+maker.make();                  // 调用重载 1
+maker.make("拿铁");            // 调用重载 2
+maker.make("拿铁", 350);       // 调用重载 3
+maker.make(350, "拿铁");       // 调用重载 4
+```
+
+> 💡 **重载 vs 重写**：重载（Overload）发生在**同一个类**中，是编译时多态；重写（Override）发生在**父子类**之间，是运行时多态。两者不要混淆，后续章节会详细讲解重写。
+
+## 五、可变参数（varargs）：参数个数的弹性
+
+### 5.1 语法
+
+有时我们无法预先知道参数的个数——比如"统计这几天的销量"，可能是 3 天，也可能是 10 天。Java 5 引入了**可变参数**（Variable Arguments，简称 varargs）：
+
+```java
+类型... 参数名
+```
+
+例如：`int... nums` 表示可以接收任意个数（包括 0 个）的 `int` 参数。在方法内部，`nums` 被当作**数组**处理。
+
+```java
+public int sum(int... nums) {
+    int total = 0;
+    for (int n : nums) {
+        total += n;
+    }
+    return total;
+}
+```
+
+调用时可以传入任意数量的参数：
+
+```java
+sum();                // 0
+sum(1, 2, 3);         // 6
+sum(10, 20, 30, 40);  // 100
+sum(new int[]{1, 2}); // 也可以直接传数组
+```
+
+### 5.2 可变参数的规则
+
+- 一个方法**最多只能有一个**可变参数。
+- 可变参数必须是参数列表的**最后一个**。
+
+```java
+// 正确：可变参数在最后
+public void log(String tag, String... messages) { ... }
+
+// 编译错误：可变参数不在最后
+// public void log(String... messages, String tag) { ... }
+```
+
+### 5.3 可变参数的本质
+
+可变参数本质上是**语法糖**（Syntactic Sugar）。编译器会把它编译成数组，`int... nums` 在字节码层面就是 `int[] nums`。`sum(1, 2, 3)` 实际上等价于 `sum(new int[]{1, 2, 3})`。许多 Java API 都用了可变参数，比如 `String.format`、`System.out.printf`、`List.of`、`Set.of` 等。
+
+> ⚠️ **可变参数与重载的陷阱**：当重载方法同时存在可变参数版本和固定参数版本时，编译器优先匹配固定参数版本。例如同时有 `make(String name)` 和 `make(String... names)`，调用 `make("拿铁")` 会匹配前者。如果只有可变参数版本，`make()` 也能调用（传 0 个参数），这有时会引发意料之外的行为。
+
+## 六、实战：设计一个英雄类
+
+把所学知识融会贯通，我们来设计一个游戏中的"英雄"类。英雄有名字、血量、攻击力，并能发动攻击。
+
+### 6.1 设计思路
+
+- **字段**：`name`（名字）、`hp`（血量）、`attack`（攻击力）。
+- **构造方法**：初始化英雄属性。
+- **方法**：
+  - `attack(Hero target)`：攻击另一个英雄，扣减其血量。
+  - `isAlive()`：判断英雄是否存活。
+  - `showStatus()`：显示英雄状态。
+- **重载**：`rest()`（恢复固定血量）和 `rest(int amount)`（恢复指定血量）。
+
+### 6.2 完整实现
+
+<CodeRunner code={`public class Main {
+    // 英雄类
+    static class Hero {
+        String name;
+        int hp;        // 血量
+        int attack;    // 攻击力
+
+        // 构造方法
+        public Hero(String name, int hp, int attack) {
+            this.name = name;
+            this.hp = hp;
+            this.attack = attack;
+        }
+
+        // 攻击另一个英雄
+        public void attack(Hero target) {
+            if (!this.isAlive()) {
+                System.out.println(name + " 已倒下，无法攻击！");
+                return;
+            }
+            if (!target.isAlive()) {
+                System.out.println(target.name + " 已倒下，无需攻击。");
+                return;
+            }
+            System.out.println(name + " 攻击了 " + target.name + "，造成 " + attack + " 点伤害！");
+            target.hp -= this.attack;
+            if (target.hp < 0) target.hp = 0;
+        }
+
+        // 重载：休息恢复 50 血
+        public void rest() {
+            this.hp += 50;
+            System.out.println(name + " 休息了一下，恢复了 50 点血量（当前：" + hp + "）");
+        }
+
+        // 重载：休息恢复指定血量
+        public void rest(int amount) {
+            this.hp += amount;
+            System.out.println(name + " 休息了一下，恢复了 " + amount + " 点血量（当前：" + hp + "）");
+        }
+
+        // 判断是否存活
+        public boolean isAlive() {
+            return hp > 0;
+        }
+
+        // 显示状态
+        public void showStatus() {
+            String status = isAlive() ? "存活" : "阵亡";
+            System.out.printf("[%s] 血量=%d, 攻击力=%d, 状态=%s%n", name, hp, attack, status);
+        }
+    }
+
+    public static void main(String[] args) {
+        Hero arthur = new Hero("亚瑟", 500, 80);
+        Hero luban = new Hero("鲁班七号", 300, 120);
+
+        System.out.println("=== 初始状态 ===");
+        arthur.showStatus();
+        luban.showStatus();
+
+        System.out.println("\\n=== 第一回合 ===");
+        arthur.attack(luban);
+        luban.attack(arthur);
+
+        System.out.println("\\n=== 第二回合 ===");
+        arthur.attack(luban);
+        arthur.attack(luban);   // 鲁班血量已为 0
+        luban.attack(arthur);   // 鲁班倒下，无法攻击
+
+        System.out.println("\\n=== 鲁班尝试休息恢复 ===");
+        luban.rest(100);        // 调用重载方法
+
+        System.out.println("\\n=== 最终状态 ===");
+        arthur.showStatus();
+        luban.showStatus();
+    }
+}`} />
+
+### 6.3 代码要点回顾
+
+- 构造方法 `Hero(String, int, int)` 完成对象初始化。
+- `this.name`、`this.hp`、`this.attack` 用 `this` 区分字段与参数。
+- `rest()` 与 `rest(int)` 构成**方法重载**，编译器根据参数个数选择。
+- `attack(Hero target)` 接收一个 `Hero` 对象作为参数——对象也可以作为方法的参数和返回值，传递的是引用。
+- `isAlive()` 返回 `boolean`，体现了"方法封装逻辑"的好处：调用方不需要关心 `hp ＞ 0` 的细节。
+
+## 七、类与对象的内存图景
+
+理解内存布局，能帮你避开许多初学者的陷阱。
+
+```java
+Hero arthur = new Hero("亚瑟", 500, 80);
+```
+
+执行后内存中发生了什么？
+
+1. **栈（Stack）** 中创建局部变量 `arthur`。
+2. **堆（Heap）** 中分配一块内存存放 `Hero` 对象，字段初始化为 `name="亚瑟"`、`hp=500`、`attack=80`。
+3. `arthur` 存储堆中对象的地址（引用）。
+
+```
+栈                        堆
+arthur ──────────────►  Hero对象
+                        name = "亚瑟"
+                        hp = 500
+                        attack = 80
+```
+
+如果执行 `Hero luban = arthur;`，那么 `luban` 和 `arthur` 会指向**同一个对象**——修改 `luban.hp` 也会影响 `arthur.hp`。这正是"引用类型"的核心特征。
+
+> ⚠️ **字符串的特殊性**：从 Java 7 起，`String` 对象也存在堆中（之前在方法区的字符串常量池）。字符串字面量（如 `"亚瑟"`）会被放入常量池复用，而 `new String("亚瑟")` 会在堆中新建对象。这些细节后续章节会进一步讨论。
+
+## 八、本章小结
+
+| 概念 | 要点 |
+| --- | --- |
+| 类（Class） | 模板/蓝图，定义字段、方法、构造方法 |
+| 对象（Object） | 类的实例，通过 `new` 创建于堆内存 |
+| 构造方法 | 与类同名，无返回值，用于初始化对象 |
+| `this` | 指向当前对象；`this(...)` 调用本类其他构造方法 |
+| 方法重载 | 同名方法、参数列表不同，编译时决定调用哪个 |
+| 可变参数 | `类型... 名称`，本质是数组，必须放在参数列表末尾 |
+
+## 结语
+
+这一章，我们从"面向过程"的旧世界跨入了"面向对象"的新世界。我们学会了用类来定义自己的类型，用 `new` 来创造对象，用 `this` 来指代自己，用重载来让同一个名字承担多种职责。
+
+但目前的 `Hero` 类有个问题：它的字段是 `public` 的，任何人都能直接写 `arthur.hp = -999`，让英雄莫名其妙地"负血"。这种数据的不安全性，正是下一章"封装"要解决的问题。封装，是面向对象三大特性的第一道防线，也是写出健壮代码的基石。
+
+让我们带着"英雄"的故事，继续向封装的世界进发。

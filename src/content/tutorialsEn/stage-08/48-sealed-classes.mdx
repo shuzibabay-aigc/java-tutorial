@@ -1,0 +1,476 @@
+---
+title: "Sealed Classes"
+chapter: 48
+stage: "Stage 8"
+stageName: "Modern Java Features"
+order: 3
+description: "Master Sealed Classes, the permits keyword, the final/sealed/non-sealed requirements for subclasses, the combination punch with Records and pattern matching, and the modeling of algebraic data types (ADT)"
+pubDate: 2026-07-03
+tags: ["Java", "Sealed Class", "密封类", "ADT", "JDK 17"]
+---
+
+# Sealed Classes
+
+This chapter covers **Sealed Classes** — a feature officially released in Java 17 (JEP 409). They are "siblings" to the Records of the previous chapter: Records solve "closed value objects," while Sealed Classes solve "closed inheritance hierarchies." Combined with Pattern Matching, Java can for the first time elegantly model a core concept of functional languages — **algebraic data types (Algebraic Data Type, ADT)**.
+
+## 1. Why Sealed Classes: The Cost of Open Inheritance
+
+### 1.1 Java's Traditional "Open Inheritance"
+
+Java's class inheritance is **open** by default — any `public class` can be `extends`-ed by anyone (as long as it isn't `final`). This "openness" is good in frameworks (extensible), but often a disaster in domain modeling:
+
+```java
+// You define a Shape class
+public class Shape { ... }
+
+// You think there are only Circle/Square/Triangle subclasses
+// But someone else can do this:
+class WeirdShape extends Shape { ... }   // you can't control this
+class MaliciousShape extends Shape { ... }
+```
+
+Problems:
+
+- **switch doesn't dare omit default** — you don't know if `WeirdShape` will pop up in the future; `switch` must include `default`, and the compiler can't check "exhaustiveness" for you.
+- **equals/hashCode are hard to write** — should `Shape.equals` consider subclasses? How do you determine "same kind"?
+- **Domain constraints are broken** — the business rule "only three shapes" can't be expressed in code, only in verbal agreements.
+
+### 1.2 What Sealed Classes Solve
+
+**Sealed Classes** let you **explicitly declare "which classes can extend me"** — locking inheritance rights within a whitelist:
+
+```java
+public sealed class Shape permits Circle, Square, Triangle {}
+```
+
+`Shape` now only allows `Circle`, `Square`, and `Triangle` to extend it — any other class `extends Shape` is a direct compile error. This codifies "closed inheritance hierarchy" as a language feature.
+
+### 1.3 Historical Background
+
+Sealed Classes were officially released in Java 17 (JEP 409), after previewing in Java 15, second preview in Java 16, and finalization in Java 17. They are part of a coordinated design with Records and Pattern Matching — the three together constitute Java's "modern data modeling."
+
+## 2. Sealed Class Definition: sealed + permits
+
+### 2.1 Basic Syntax
+
+```java
+public sealed class Shape permits Circle, Square, Triangle {}
+//                ^^^^^^                ^^^^^^^^^^^^^^^^^^^^^^^^^
+//                Declared as sealed    List of permitted subclasses
+```
+
+`sealed` is a modifier; `permits` is followed by a comma-separated list of subclasses. Subclasses must be in the **same module or the same package** — this is a hard constraint of Sealed Classes.
+
+### 2.2 The Subclass's "Pick One of Three" Modifier
+
+Subclasses in the `permits` list **must** use one of these three modifiers:
+
+| Modifier | Meaning | Can it be further subclassed? |
+| --- | --- | --- |
+| `final` | Final class, cannot be subclassed | No |
+| `sealed` | Sealed class, continues `permits` its own subclasses | Yes, but must declare a whitelist |
+| `non-sealed` | Non-sealed class, returns to open inheritance | Yes, anyone can extend |
+
+```java
+public sealed class Shape permits Circle, Square, Triangle {}
+
+final class Circle extends Shape {}            // Final, cannot be subclassed
+sealed class Square extends Shape permits FilledSquare, OutlinedSquare {}
+non-sealed class Triangle extends Shape {}     // Open, any class can extend
+
+// Square's subclasses
+final class FilledSquare extends Square {}
+final class OutlinedSquare extends Square {}
+
+// Triangle is non-sealed, any class can extend it
+class RightTriangle extends Triangle {}
+class IsoscelesTriangle extends Triangle {}
+```
+
+**Why force pick one of three?** Because without forcing, subclasses default to open inheritance, and the sealed-ness is silently broken. Java chose "explicit over implicit" — if you want open, use `non-sealed`; if you want closed, use `final`; if you want half-closed, use `sealed`. You must say it explicitly.
+
+### 2.3 Omitting permits: Same-File Subclasses
+
+If the subclasses are in the **same source file** as the sealed class, you can omit `permits` — the compiler automatically finds direct subclasses in the same file:
+
+```java
+// Shape.java
+public sealed class Shape {}   // permits omitted
+
+final class Circle extends Shape {}
+final class Square extends Shape {}
+final class Triangle extends Shape {}
+```
+
+The compiler infers `Shape permits Circle, Square, Triangle`. This is a common compact style after Java 17.
+
+### 2.4 Interfaces Can Be Sealed Too
+
+`sealed` can modify not only classes but also **interfaces**:
+
+```java
+public sealed interface Currency permits CNY, USD, EUR {}
+
+record CNY(long fen) implements Currency {}
+record USD(long cents) implements Currency {}
+record EUR(long cents) implements Currency {}
+```
+
+The combination of interface + Record + Sealed is the standard paradigm for modeling ADTs (detailed below).
+
+## 3. Constraints on Sealed Classes
+
+### 3.1 Same Module or Same Package
+
+Subclasses in the `permits` list must be in the **same module** as the sealed class (if the sealed class is in a named module), or in the **same package** (if in an unnamed module). This prevents "third parties maliciously adding subclasses."
+
+```java
+// Module A
+module A { exports com.example; }
+public sealed class Shape permits com.example.Circle, com.other.Square {}  // Error! Square isn't in module A
+```
+
+### 3.2 Subclasses Must Directly extends
+
+Classes in the `permits` list must **directly** extend the sealed class — not "grandchild" classes. If `Shape permits Circle`, then `Circle` must `extends Shape`; it cannot be `Circle extends Ellipse extends Shape`.
+
+### 3.3 Subclasses Must Be Explicitly Declared
+
+Subclasses **must** be modified with `final`/`sealed`/`non-sealed` — none can be omitted. Omitting is a compile error.
+
+```java
+sealed class Shape permits Circle {}
+class Circle extends Shape {}   // Compile error! Must be final/sealed/non-sealed
+```
+
+## 4. Algebraic Data Types (ADT): The Core of Functional Languages
+
+### 4.1 What Is an ADT
+
+**Algebraic Data Type (ADT)** is a core feature of functional languages (Haskell, OCaml, Scala) — combining complex data structures through "product types" and "sum types."
+
+- **Product type**: `Point(int x, int y)` — a point = x **and** y. Both present, "multiplication" combination.
+- **Sum type**: `Shape = Circle | Square | Triangle` — a shape = circle **or** square **or** triangle. "Addition" combination.
+
+Java previously had no "sum type" — any `class` could be subclassed by anyone, so you couldn't express "Shape **only has these three**." Sealed Classes finally give Java "sum types."
+
+### 4.2 Java's Paradigm for Modeling ADTs
+
+```java
+// Sum type: Shape has only these three
+public sealed interface Shape permits Circle, Rectangle, Triangle {}
+
+// Product type: each shape has its own attributes
+record Circle(double radius) implements Shape {}
+record Rectangle(double width, double height) implements Shape {}
+record Triangle(double a, double b, double c) implements Shape {}
+```
+
+This is the classic ADT modeling — `sealed interface` defines the "sum type," `record` defines the "product type." Each `record` is an immutable value object, and the entire inheritance hierarchy is closed.
+
+### 4.3 The Benefit of ADTs: Exhaustiveness Checking
+
+The biggest benefit of ADTs is **switch exhaustiveness checking** — the compiler can check "whether all cases are handled":
+
+```java
+double area(Shape shape) {
+    return switch (shape) {
+        case Circle(double r) -> Math.PI * r * r;
+        case Rectangle(double w, double h) -> w * h;
+        // case Triangle is missing! Compiler warns: not exhaustive
+    };
+}
+```
+
+If you later add `case Pentagon`, all switches will get compile warnings — forcing you to update every place that handles Shape. This is the "compile-time guarantee" of ADT + Pattern Matching; traditional Java can't do it.
+
+## 5. Sealed + Record + Pattern Matching: The Combination Punch
+
+This example shows the classic combination of all three — modeling an expression tree (AST) and destructuring it with Pattern Matching during evaluation. This is a classic scenario for compilers, rule engines, and configuration systems.
+
+```java
+// Abstract expression: only three types
+sealed interface Expr permits Num, Add, Mul {}
+
+record Num(double value) implements Expr {}
+record Add(Expr left, Expr right) implements Expr {}
+record Mul(Expr left, Expr right) implements Expr {}
+
+// Evaluation
+double eval(Expr expr) {
+    return switch (expr) {
+        case Num(double v) -> v;
+        case Add(Expr l, Expr r) -> eval(l) + eval(r);
+        case Mul(Expr l, Expr r) -> eval(l) * eval(r);
+        // No default needed! The compiler knows there are only these three
+    };
+}
+
+// Expression: (3 + 4) * 5
+Expr expr = new Mul(new Add(new Num(3), new Num(4)), new Num(5));
+System.out.println(eval(expr));   // 35.0
+```
+
+**`eval` needs no `default`** — `Expr` is sealed, and the compiler knows there are only `Num`/`Add`/`Mul`. This is the power of ADT + Pattern Matching — compile-time exhaustiveness guarantee; adding a `Sub` subclass in the future will immediately flag an error to remind you.
+
+## 6. Sealed vs Final vs Abstract
+
+| Modifier | Inheritance | When to use |
+| --- | --- | --- |
+| `final` | Fully closed, cannot be subclassed | Single immutable value (e.g., String) |
+| `sealed` | Whitelist-closed, only specified subclasses can extend | Domain modeling "sum type," known subclasses |
+| `non-sealed` | Open inheritance | "Opens a hole" inside a sealed hierarchy |
+| (no modifier) | Default open inheritance | Traditional Java class |
+| `abstract` | Must be subclassed to use | Template method, abstract base class |
+
+Sealed isn't a replacement for `final`/`abstract` — it **fills the gap in between** — "whitelist-closed" between "fully open" and "fully closed."
+
+## 7. Practice: Modeling Domains with Sealed + Record
+
+The following example demonstrates using Sealed + Record to model a "payment method" ADT, with switch pattern matching handling different payments. This is a typical real-business ADT application.
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    // === 1. Model payment method ADT with sealed + record ===
+    public sealed interface PaymentMethod permits Cash, CreditCard, Alipay, WechatPay {}
+
+    public record Cash(double amount) implements PaymentMethod {
+        public Cash {
+            if (amount < 0) throw new IllegalArgumentException("Cash cannot be negative");
+        }
+    }
+    public record CreditCard(String cardNo, String holder, double amount) implements PaymentMethod {
+        public CreditCard {
+            if (cardNo == null || cardNo.length() < 12) {
+                throw new IllegalArgumentException("Invalid card number");
+            }
+            if (amount < 0) throw new IllegalArgumentException("Amount cannot be negative");
+        }
+    }
+    public record Alipay(String userId, double amount) implements PaymentMethod {}
+    public record WechatPay(String openId, double amount) implements PaymentMethod {}
+
+    // === 2. Model payment result with sealed + record ===
+    public sealed interface PaymentResult permits Success, Failure, Pending {}
+
+    public record Success(String txnId, double paid) implements PaymentResult {}
+    public record Failure(String reason) implements PaymentResult {}
+    public record Pending(String txnId, String statusUrl) implements PaymentResult {}
+
+    // === 3. Processing function: exhausts all PaymentMethod ===
+    public static PaymentResult process(PaymentMethod method) {
+        return switch (method) {
+            case Cash(double amt) -> {
+                System.out.println("  Cash received " + amt);
+                yield new Success("CASH-" + System.nanoTime(), amt);
+            }
+            case CreditCard(String card, String holder, double amt) -> {
+                System.out.println("  Card swipe: " + holder + " (" + maskCard(card) + ") amount " + amt);
+                if (amt > 10000) {
+                    yield new Failure("Single transaction exceeds limit");
+                }
+                yield new Success("CC-" + System.nanoTime(), amt);
+            }
+            case Alipay(String user, double amt) -> {
+                System.out.println("  Alipay: " + user + " amount " + amt);
+                yield new Pending("ALI-" + System.nanoTime(), "https://alipay.com/status");
+            }
+            case WechatPay(String openId, double amt) -> {
+                System.out.println("  WeChat Pay: " + openId + " amount " + amt);
+                yield new Success("WX-" + System.nanoTime(), amt);
+            }
+            // No default needed! The compiler knows there are only these four
+        };
+    }
+
+    // === 4. Process result: exhausts all PaymentResult ===
+    public static String describe(PaymentResult r) {
+        return switch (r) {
+            case Success(String id, double paid) -> "Success: txn " + id + ", paid " + paid;
+            case Failure(String reason) -> "Failed: " + reason;
+            case Pending(String id, String url) -> "Pending: txn " + id + ", status page " + url;
+        };
+    }
+
+    static String maskCard(String card) {
+        return card.substring(0, 4) + "****" + card.substring(card.length() - 4);
+    }
+
+    public static void main(String[] args) {
+        System.out.println("=== Sealed Classes + Record ADT Demo ===\\n");
+
+        // 1. Demo ADT modeling
+        System.out.println("--- 1. Payment Method ADT ---");
+        List<PaymentMethod> methods = List.of(
+            new Cash(88.50),
+            new CreditCard("6225881234567890", "Alice", 580.00),
+            new CreditCard("6225881234567890", "Bob", 58000.00),  // exceeds limit
+            new Alipay("user-alice", 199.99),
+            new WechatPay("wx-openid-001", 9.90)
+        );
+
+        for (PaymentMethod m : methods) {
+            System.out.println("Payment method: " + m);
+            PaymentResult result = process(m);
+            System.out.println("  -> " + describe(result));
+            System.out.println();
+        }
+
+        // 2. Demo exhaustiveness checking - use reflection to view sealed permits
+        System.out.println("--- 2. Reflection to View Sealed Info ---");
+        System.out.println("Is PaymentMethod sealed: " + PaymentMethod.class.isSealed());
+        System.out.println("PaymentMethod's permitted subclasses:");
+        for (Class<?> c : PaymentMethod.class.getPermittedSubclasses()) {
+            System.out.println("  - " + c.getSimpleName()
+                + " (isRecord: " + c.isRecord() + ")");
+        }
+
+        // 3. Expression tree (AST) - classic ADT usage
+        System.out.println("\\n--- 3. Expression Tree ADT ---");
+        // (3 + 4) * (5 - 2)  = 21
+        Expr expr = new Mul(
+            new Add(new Num(3), new Num(4)),
+            new Sub(new Num(5), new Num(2))
+        );
+        System.out.println("Expression: (3 + 4) * (5 - 2)");
+        System.out.println("Evaluate: " + eval(expr));
+        System.out.println("Format: " + format(expr));
+
+        // 4. Demo sealed inheritance hierarchy: Square subclasses
+        System.out.println("\\n--- 4. Multi-Layer Sealed Inheritance ---");
+        Shape s1 = new Circle(5);
+        Shape s2 = new FilledSquare(3);
+        Shape s3 = new RightTriangle(3, 4);
+        for (Shape s : List.of(s1, s2, s3)) {
+            System.out.println(s + " -> area " + area(s));
+        }
+
+        // 5. Verify non-sealed subclass open inheritance
+        System.out.println("\\n--- 5. non-sealed Open Inheritance ---");
+        Triangle rt = new RightTriangle(6, 8);
+        Triangle it = new IsoscelesTriangle(5);
+        System.out.println("Can RightTriangle be new-ed: " + (rt != null));
+        System.out.println("Can IsoscelesTriangle be new-ed: " + (it != null));
+        System.out.println("RightTriangle extends Triangle: " + (rt instanceof Triangle));
+    }
+
+    // === Expression ADT (for demoing add/mul/sub) ===
+    sealed interface Expr permits Num, Add, Mul, Sub {}
+    record Num(double value) implements Expr {}
+    record Add(Expr left, Expr right) implements Expr {}
+    record Mul(Expr left, Expr right) implements Expr {}
+    record Sub(Expr left, Expr right) implements Expr {}
+
+    static double eval(Expr e) {
+        return switch (e) {
+            case Num(double v) -> v;
+            case Add(Expr l, Expr r) -> eval(l) + eval(r);
+            case Mul(Expr l, Expr r) -> eval(l) * eval(r);
+            case Sub(Expr l, Expr r) -> eval(l) - eval(r);
+        };
+    }
+
+    static String format(Expr e) {
+        return switch (e) {
+            case Num(double v) -> String.valueOf(v);
+            case Add(Expr l, Expr r) -> "(" + format(l) + " + " + format(r) + ")";
+            case Mul(Expr l, Expr r) -> "(" + format(l) + " * " + format(r) + ")";
+            case Sub(Expr l, Expr r) -> "(" + format(l) + " - " + format(r) + ")";
+        };
+    }
+
+    // === Shape ADT: demo multi-layer sealed inheritance ===
+    public sealed interface Shape permits Circle, Square, Triangle {}
+    public record Circle(double radius) implements Shape {}
+    public sealed abstract static class Square implements Shape permits FilledSquare, OutlinedSquare {}
+    public record FilledSquare(double side) extends Square {}
+    public record OutlinedSquare(double side) extends Square {}
+    public non-sealed static class Triangle implements Shape {}
+    public static class RightTriangle extends Triangle {
+        final double a, b;
+        RightTriangle(double a, double b) { this.a = a; this.b = b; }
+        public String toString() { return "RightTriangle[" + a + "," + b + "]"; }
+    }
+    public static class IsoscelesTriangle extends Triangle {
+        final double side;
+        IsoscelesTriangle(double side) { this.side = side; }
+        public String toString() { return "IsoscelesTriangle[" + side + "]"; }
+    }
+
+    static double area(Shape s) {
+        return switch (s) {
+            case Circle(double r) -> Math.PI * r * r;
+            case FilledSquare(double side) -> side * side;
+            case OutlinedSquare(double side) -> side * side;
+            case RightTriangle rt -> 0.5 * rt.a * rt.b;
+            case IsoscelesTriangle it -> Math.sqrt(3) / 4 * it.side * it.side;
+            case Triangle t -> 0;   // Generic Triangle, non-sealed open, must have default
+        };
+    }
+}`} />
+
+> **Key observations**:
+> - **`process` and `describe` have no `default`** — the `switch` exhausts all `permits`-ed subclasses, and the compiler accepts it.
+> - **`CreditCard`'s compact constructor validates the card number** — each ADT subclass can have its own invariants.
+> - **`PaymentMethod.class.isSealed()`** — reflection can query sealed status; `getPermittedSubclasses()` returns the whitelist.
+> - **`Square` is `sealed abstract`** — it can be both sealed and abstract, making `Square` itself part of a closed hierarchy.
+> - **`Triangle` is `non-sealed`** — its subclasses `RightTriangle`/`IsoscelesTriangle` aren't in `Shape.permits`, but can "bubble up" — `case Triangle t` must serve as a fallback, because its subclasses can't be enumerated.
+
+## 8. Cooperation with Pattern Matching
+
+The `switch` pattern matching that keeps appearing in this chapter is a Java 21 feature (detailed in the next chapter). Sealed Classes are Pattern Matching's "best partner":
+
+- **Sealed provides "closure"** — the compiler knows all subclasses.
+- **Pattern Matching provides "deconstruction"** — directly gets the components.
+- **Exhaustiveness checking** — missing any one in a switch triggers a compile warning.
+
+Without Sealed, a switch must include `default` (because unknown subclasses might exist); only with Sealed can you enjoy "omitting default + compile-time exhaustiveness."
+
+## 9. Real Application Scenarios for Sealed
+
+| Scenario | Example |
+| --- | --- |
+| Domain modeling | Payment methods, order states, user roles — business "closed enumeration" concepts |
+| AST (Abstract Syntax Tree) | Expression trees, JSON/HTML nodes, rule engine rules |
+| State machines | State sets of finite state machines — `sealed interface State permits Idle, Running, Paused, Done` |
+| API return values | `sealed interface ApiResult permits Success, Error＜T＞` |
+| Config items | `sealed interface Config permits YamlConfig, JsonConfig, EnvConfig` |
+
+**When NOT to use Sealed**:
+
+- Subclasses are open and third-party extensible (e.g., Spring's `BeanPostProcessor`).
+- Framework extension points — deliberately open for user subclassing.
+- Subclass count explodes — Sealed suits "few and stable" hierarchies.
+
+## 10. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| `sealed class` | Declares a sealed class; `permits` specifies the whitelist of subclasses |
+| `permits` | Lists the permitted subclasses |
+| Subclass pick one of three | `final` / `sealed` / `non-sealed`, must be explicit |
+| Same module/package | Subclasses must be in the same module or package as the sealed class |
+| Interfaces can be sealed too | `sealed interface` |
+| ADT | Algebraic Data Type = sum type (sealed) + product type (record) |
+| Exhaustiveness checking | Switch pattern matching can omit default; the compiler checks exhaustiveness |
+| Reflection API | `isSealed()`, `getPermittedSubclasses()` |
+
+**Mnemonics**:
+
+- **Sealed is "whitelist inheritance"** — only state-permits subclasses can extend.
+- **`permits` is the "invitation"** — only invited subclasses can enter.
+- **Subclass picks one of three** — `final` closes, `sealed` half-closes, `non-sealed` opens.
+- **Same module, same package** — subclasses must "live with" the sealed class.
+- **Sealed + record = ADT** — sum type + product type, functional modeling.
+- **Exhaustiveness checking** — the compiler checks your switch for missing cases.
+
+## Conclusion: Java's Functional Modeling Finally Matures
+
+Sealed Classes are an important completion for Java in "domain modeling" — together with Records and Pattern Matching, they form modern Java data modeling's "three-piece set":
+
+- **Records** — immutable value objects (product type).
+- **Sealed Classes** — closed inheritance hierarchies (sum type).
+- **Pattern Matching** — deconstruction + exhaustiveness checking (using ADTs).
+
+These three coordinate, letting Java for the first time model algebraic data types as elegantly as Scala and Haskell. The next chapter details **Pattern Matching** — finishing "the last puzzle piece" of this three-piece set, showing how instanceof and switch cooperate with Sealed Classes and Records to turn ugly if-else chains into elegant switch expressions. See you in the next chapter.

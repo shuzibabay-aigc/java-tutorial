@@ -1,0 +1,430 @@
+---
+title: "Files 工具类进阶"
+chapter: 33
+stage: "第六阶段"
+stageName: "I/O 与 NIO"
+order: 6
+description: "掌握 Files 读写小/大文件、流式行读取、WatchService 文件监视、临时文件与 POSIX 权限管理，实现实时目录监控"
+pubDate: 2026-07-03
+tags: ["Java", "Files", "WatchService", "临时文件", "POSIX", "Files.lines"]
+---
+
+# Files 工具类进阶
+
+第 28 章我们初识了 `Files`——它有 `createFile`、`copy`、`walk` 等方法。但那只是 `Files` 的"半张脸"。这个工具类还有另一面：**一行代码读写整个文件**、**流式处理大文件**、**监视目录变化**、**管理文件权限**。这些都是现代 Java 文件操作的杀手锏。
+
+这一章是 NIO.2 的收尾，我们把 `Files` 的进阶能力一次讲透。读完它，你会发现 Java 的文件操作可以简洁到令人发指——很多以前要写 20 行流循环的代码，现在 1 行就够。
+
+## 一、读写小文件：一行搞定
+
+对于"小文件"（几 MB 以内，能整个装进内存），`Files` 提供了"一行流"API：
+
+### 1.1 读
+
+```java
+import java.nio.file.*;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+
+Path p = Path.of("data.txt");
+
+// 一次性读所有字节
+byte[] bytes = Files.readAllBytes(p);
+
+// 一次性读所有行（返回 List<String>，已自动解码）
+List<String> lines = Files.readAllLines(p, StandardCharsets.UTF_8);
+
+// 一次性读成 String（Java 11+）
+String content = Files.readString(p, StandardCharsets.UTF_8);
+```
+
+这三个方法把"打开流 → 读 → 关流"封装成一步。但注意——它们会**把整个文件加载进内存**，文件大了会 OOM。
+
+### 1.2 写
+
+```java
+// 写字节数组
+Files.write(p, bytes);
+
+// 写文本（按行）
+Files.write(p, List.of("第一行", "第二行"), StandardCharsets.UTF_8);
+
+// 写 String（Java 11+）
+Files.writeString(p, "你好，世界", StandardCharsets.UTF_8);
+
+// 追加写
+Files.write(p, List.of("追加的一行"), StandardCharsets.UTF_8,
+    StandardOpenOption.APPEND);
+```
+
+`StandardOpenOption` 是个枚举，常用值：`CREATE`（不存在则创建）、`APPEND`（追加）、`TRUNCATE_EXISTING`（清空已有内容）、`WRITE`、`READ`。`Files.write` 默认是 `CREATE + WRITE + TRUNCATE_EXISTING`——覆盖写。
+
+### 1.3 适用边界
+
+`readAllBytes`/`readAllLines`/`readString` 适合**几 MB 内**的文件。配置文件、JSON、小日志，用这些方法最舒服。但处理 GB 级日志时，它们会让 JVM 直接 OOM——这时要用下一节的 `Files.lines`。
+
+## 二、读写大文件：Files.lines 流式读取
+
+`Files.lines` 返回 `Stream＜String＞`——**惰性读取**，每次只保留一行在内存里，处理完丢弃。这让你能处理"无法装进内存的大文件"。
+
+```java
+import java.util.stream.*;
+
+try (Stream<String> stream = Files.lines(p, StandardCharsets.UTF_8)) {
+    stream.filter(line -> line.contains("ERROR"))
+          .map(String::trim)
+          .forEach(System.out::println);
+}
+```
+
+**关键点**：
+
+- 返回的 `Stream` 持有文件句柄，**必须用 try-with-resources 关闭**。不关会泄漏文件描述符，最终导致 "Too many open files"。
+- 是**惰性**的——`filter` 不消费，`forEach` 才真正读文件。所以是"边读边处理"，内存占用恒定。
+- 适合"日志分析、ETL、统计行数"等场景。
+
+### 2.1 性能对比
+
+| 方法 | 内存 | 适用 |
+| --- | --- | --- |
+| `Files.readAllLines` | 文件大小 ×2 | 小文件（＜10MB） |
+| `Files.lines` | 单行大小 | 大文件、流式处理 |
+| `BufferedReader.readLine` 循环 | 单行大小 | 与 `Files.lines` 等价，写法更老式 |
+
+新代码里**优先用 `Files.lines`**——它内部就是 `BufferedReader` 的封装，但接入了 Stream API，可以链式处理。
+
+### 2.2 统计大文件行数
+
+```java
+try (Stream<String> stream = Files.lines(p)) {
+    long count = stream.count();
+    System.out.println("总行数: " + count);
+}
+```
+
+`count()` 是 Stream 的终止操作，触发真正的读取。一行代码就能统计任意大小的文件行数——内存恒定，几 GB 也无压力。
+
+## 三、Files.newBufferedReader / newBufferedWriter
+
+如果你要更精细地控制读写（比如配合 `readLine` + 自定义逻辑），用 `Files.newBufferedReader`/`newBufferedWriter`——它们直接返回 `BufferedReader`/`BufferedWriter`，并支持显式编码：
+
+```java
+try (BufferedReader br = Files.newBufferedReader(p, StandardCharsets.UTF_8)) {
+    String line;
+    while ((line = br.readLine()) != null) {
+        // 处理 line
+    }
+}
+
+try (BufferedWriter bw = Files.newBufferedWriter(p, StandardCharsets.UTF_8,
+        StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
+    bw.write("追加内容");
+    bw.newLine();
+}
+```
+
+和直接 `new BufferedReader(new InputStreamReader(new FileInputStream(...)))` 相比，`Files.newBufferedReader` 是"语法糖"——更短、更不易错、默认 UTF-8 友好。
+
+## 四、文件监视：WatchService
+
+`WatchService` 是 NIO.2 的"惊喜功能"——它可以**监视目录变化**，文件创建、修改、删除时触发事件。这是构建"热加载"、"文件同步"、"IDE 提示保存"等功能的基石。
+
+### 4.1 基本用法
+
+```java
+import static java.nio.file.StandardWatchEventKinds.*;
+import java.nio.file.*;
+
+WatchService watcher = FileSystems.getDefault().newWatchService();
+Path dir = Path.of("/var/log");
+
+// 注册感兴趣的事件
+dir.register(watcher, ENTRY_CREATE, ENTRY_DELETE, ENTRY_MODIFY);
+
+while (true) {
+    WatchKey key = watcher.take();   // 阻塞，直到有事件
+    for (WatchEvent<?> event : key.pollEvents()) {
+        Path file = (Path) event.context();
+        System.out.println(event.kind() + " -> " + file);
+    }
+    key.reset();   // 重置 key，等待下一批事件
+}
+```
+
+**关键点**：
+
+- `register` 接受可变参数 `WatchEvent.Kind＜?＞`，常用三种：`ENTRY_CREATE`、`ENTRY_MODIFY`、`ENTRY_DELETE`。
+- `take()` 阻塞直到有事件，`poll()` 立即返回（非阻塞）。
+- `event.context()` 是触发事件的文件名（相对路径），**不是完整路径**——要拼上 `dir` 才能用。
+- 处理完事件必须 `key.reset()`，否则这个 key 不再接收新事件。
+- **WatchService 只监视直接子项**——不递归。要递归得自己实现：每个子目录都 register 一次。
+
+### 4.2 限制
+
+- 通知可能不精确——某些系统会重复触发 MODIFY，或丢失事件。
+- 不提供"改动内容"——只通知"哪个文件变了"，要看内容变化得自己读。
+- macOS 上基于 `kqueue`，Linux 上基于 `inotify`，Windows 上基于 `ReadDirectoryChangesW`——平台行为略有差异。
+
+## 五、临时文件：createTempFile / createTempDirectory
+
+临时文件是"用完就删"的文件——缓存中间结果、解压上传内容、生成报表等场景常用。
+
+```java
+// 在系统默认临时目录（/tmp 或 %TEMP%）创建
+Path tmpFile = Files.createTempFile("prefix-", ".txt");
+// /tmp/prefix-1234567890123456789.txt
+
+Path tmpDir = Files.createTempDirectory("myapp-");
+
+// 指定父目录
+Path tmpFile2 = Files.createTempFile(Path.of("."), "data-", ".bin");
+```
+
+文件名是"prefix + 随机长数字 + suffix"——保证唯一。
+
+**坑**：临时文件**不会自动删除**——JVM 退出后它们留在磁盘上。要确保删除有三种方式：
+
+### 5.1 手动删除
+
+```java
+Path tmp = Files.createTempFile("data-", ".tmp");
+try {
+    // 使用 tmp
+} finally {
+    Files.deleteIfExists(tmp);
+}
+```
+
+### 5.2 deleteOnExit（JVM 退出时删）
+
+```java
+Files.createTempFile("data-", ".tmp").toFile().deleteOnExit();
+```
+
+**注意**：`deleteOnExit` 只在 JVM 正常退出时生效，强杀进程 (`kill -9`) 不会触发。而且它会把文件路径记在内存里，长期运行的进程调用多了会泄漏内存。**不推荐用于长期运行的服务**。
+
+### 5.3 try-with-resources（Java 9+ 可用于临时目录吗？）
+
+更推荐的做法是用 try-finally 显式清理。临时目录要递归删除（参考第 28 章的 `deleteRecursively`）。
+
+## 六、文件权限：POSIX 权限
+
+Linux/macOS 用 POSIX 权限（`rwxr-xr-x`），Windows 用 ACL。NIO.2 通过 `PosixFilePermissions` 提供了简洁的 POSIX 权限 API：
+
+```java
+import java.nio.file.attribute.*;
+import java.nio.file.*;
+
+// 用字符串创建权限集
+Set<PosixFilePermission> perms = PosixFilePermissions.fromString("rwxr-xr-x");
+// rwx for owner, r-x for group, r-x for others
+
+// 创建文件时直接指定权限
+Files.createFile(Path.of("script.sh"),
+    PosixFilePermissions.asFileAttribute(perms));
+
+// 修改已有文件权限
+Files.setPosixFilePermissions(Path.of("script.sh"), perms);
+```
+
+`PosixFilePermissions.fromString` 接受 9 字符的权限串——三组 `rwx`，分别对应所有者、组、其他。`-` 表示无权限。`rwxr-xr-x` 等价于 `chmod 755`。
+
+**注意**：这是 POSIX 特性，在 Windows 上 `setPosixFilePermissions` 会抛 `UnsupportedOperationException`。要写跨平台代码，用 `Files.setAttribute(path, "dos:hidden", true)` 这类通用属性。
+
+### 6.1 设置所有者
+
+```java
+UserPrincipal owner = FileSystems.getDefault()
+    .getUserPrincipalLookupService()
+    .lookupPrincipalByName("alice");
+Files.setOwner(path, owner);
+// 或 Files.setOwner(path, Files.getOwner(path));
+```
+
+## 七、实战：实时监控目录变化
+
+下面这个例子完整演示 `WatchService`——启动监视器、在另一个线程里造文件事件、几秒后退出：
+
+<CodeRunner code={`import java.io.IOException;
+import java.nio.file.*;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static java.nio.file.StandardWatchEventKinds.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // 准备被监视的目录
+        Path watchDir = Files.createTempDirectory("watch-demo-");
+        System.out.println("监视目录: " + watchDir);
+
+        WatchService watcher = FileSystems.getDefault().newWatchService();
+        watchDir.register(watcher, ENTRY_CREATE, ENTRY_DELETE, ENTRY_MODIFY);
+
+        AtomicBoolean running = new AtomicBoolean(true);
+        List<String> events = Collections.synchronizedList(new ArrayList<>());
+
+        // 监视线程
+        Thread watcherThread = new Thread(() -> {
+            try {
+                while (running.get()) {
+                    WatchKey key = watcher.poll(java.time.Duration.ofMillis(200));
+                    if (key == null) continue;
+                    for (WatchEvent<?> event : key.pollEvents()) {
+                        Path file = (Path) event.context();
+                        String msg = event.kind() + " -> " + file;
+                        events.add(msg);
+                        System.out.println("  [事件] " + msg);
+                    }
+                    key.reset();
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        });
+        watcherThread.setDaemon(true);
+        watcherThread.start();
+
+        // 模拟文件变化
+        System.out.println("\\n--- 模拟文件变化 ---");
+        Thread.sleep(300);
+
+        Path a = watchDir.resolve("a.txt");
+        Files.writeString(a, "hello", StandardCharsets.UTF_8);
+        System.out.println("创建 a.txt");
+        Thread.sleep(300);
+
+        Files.writeString(a, "hello world", StandardCharsets.UTF_8);
+        System.out.println("修改 a.txt");
+        Thread.sleep(300);
+
+        Path b = watchDir.resolve("b.txt");
+        Files.writeString(b, "second", StandardCharsets.UTF_8);
+        System.out.println("创建 b.txt");
+        Thread.sleep(300);
+
+        Files.delete(a);
+        System.out.println("删除 a.txt");
+        Thread.sleep(500);
+
+        running.set(false);
+        watcherThread.join(1000);
+        watcher.close();
+
+        System.out.println("\\n--- 演示 Files.lines 流式读取 ---");
+        Path bigFile = watchDir.resolve("numbers.txt");
+        // 生成 1000 行
+        List<String> lines = new ArrayList<>();
+        for (int i = 1; i <= 1000; i++) lines.add("line-" + i);
+        Files.write(bigFile, lines, StandardCharsets.UTF_8);
+
+        // 用 Files.lines 流式统计
+        try (var stream = Files.lines(bigFile, StandardCharsets.UTF_8)) {
+            long count = stream.count();
+            System.out.println("bigFile 行数: " + count);
+        }
+        // 用 Files.lines 找包含 "100" 的行
+        try (var stream = Files.lines(bigFile, StandardCharsets.UTF_8)) {
+            long matches = stream.filter(l -> l.contains("100")).count();
+            System.out.println("包含 '100' 的行数: " + matches);
+        }
+
+        // 演示 Files.readString / writeString
+        System.out.println("\\n--- readString / writeString ---");
+        Path note = watchDir.resolve("note.txt");
+        Files.writeString(note, "一行测试\\n两行测试");
+        String text = Files.readString(note, StandardCharsets.UTF_8);
+        System.out.println("读取: " + text.replace("\\n", " | "));
+
+        // 演示 POSIX 权限（非 Windows）
+        System.out.println("\\n--- 权限演示 ---");
+        try {
+            Set<PosixFilePermission> perms = PosixFilePermissions.fromString("rwxr-x---");
+            Files.setPosixFilePermissions(note, perms);
+            String permStr = PosixFilePermissions.toString(Files.getPosixFilePermissions(note));
+            System.out.println("note.txt 权限: " + permStr);
+        } catch (UnsupportedOperationException e) {
+            System.out.println("当前系统不支持 POSIX 权限（可能是 Windows）");
+        }
+
+        // 清理
+        running.set(false);
+        cleanup(watchDir);
+        System.out.println("\\n共捕获事件 " + events.size() + " 个");
+        System.out.println("清理完毕");
+    }
+
+    static void cleanup(Path root) throws IOException {
+        if (!Files.exists(root)) return;
+        try (var stream = Files.walk(root)) {
+            stream.sorted(Comparator.reverseOrder())
+                  .forEach(p -> {
+                      try { Files.deleteIfExists(p); }
+                      catch (IOException e) { /* ignore */ }
+                  });
+        }
+    }
+}`} />
+
+> **观察重点**：
+> - **事件可能多于操作**——某些系统上一次写入会触发多次 `ENTRY_MODIFY`，这是平台行为，不是 bug。
+> - **`ENTRY_MODIFY` 触发时机**：文件关闭时（不是每次 `write` 调用）。所以"写入 → 关闭"对应一次事件。
+> - **`Files.lines` 流式**：处理 1000 行和 1000 万行，内存占用几乎一样——它是惰性的。
+> - **POSIX 权限**：在 Linux/macOS 上正常工作，Windows 上抛 `UnsupportedOperationException`。
+
+## 八、Files 的"一行流"速查
+
+| 任务 | 一行代码 |
+| --- | --- |
+| 读全部字节 | `byte[] data = Files.readAllBytes(p);` |
+| 读全部行 | `List＜String＞ lines = Files.readAllLines(p, UTF_8);` |
+| 读为字符串 | `String s = Files.readString(p, UTF_8);` |
+| 写字符串 | `Files.writeString(p, s, UTF_8);` |
+| 写字节数组 | `Files.write(p, bytes);` |
+| 写多行 | `Files.write(p, List.of("a","b"), UTF_8);` |
+| 流式读行 | `Files.lines(p, UTF_8).filter(...).forEach(...);` |
+| 创建临时文件 | `Files.createTempFile("pre-", ".tmp");` |
+| 创建临时目录 | `Files.createTempDirectory("dir-");` |
+| 设置权限 | `Files.setPosixFilePermissions(p, perms);` |
+| 文件存在 | `Files.exists(p);` |
+| 文件大小 | `Files.size(p);` |
+
+对比旧 `File` 类——很多旧 API 写 10 行的事，`Files` 一行搞定。这是 NIO.2 真正的价值。
+
+## 九、本章小结
+
+| 主题 | 核心要点 |
+| --- | --- |
+| 小文件读写 | `readAllBytes`/`readAllLines`/`readString`，整文件入内存 |
+| 大文件读取 | `Files.lines` 返回 Stream，惰性读取，恒定内存 |
+| 缓冲读写 | `Files.newBufferedReader`/`newBufferedWriter`，显式编码 |
+| 文件监视 | `WatchService` + `register(ENTRY_*)`，不递归、`key.reset()` |
+| 临时文件 | `createTempFile`/`createTempDirectory`，须手动清理 |
+| 文件权限 | `PosixFilePermissions.fromString("rwxr-xr-x")`，POSIX 限定 |
+
+**记忆口诀**：
+
+- **小文件**——一次读，`readAllLines` / `readString`。
+- **大文件**——流式读，`Files.lines` + try-with-resources。
+- **改文件**——`write` / `writeString` + `StandardOpenOption`。
+- **盯文件**——`WatchService` + `ENTRY_CREATE/MODIFY/DELETE`。
+- **暂存**——`createTempFile` + 手动 `deleteIfExists`。
+- **改权限**——`PosixFilePermissions`，仅 Linux/macOS。
+
+## 结语：NIO.2 是 Java 文件操作的"现代答案"
+
+回望第六阶段的六章，Java 的 I/O 与 NIO 故事是这样展开的：
+
+- **第 28 章 `Path` 与 `Files`**——把"路径"和"文件操作"重塑成清晰的现代 API，告别旧 `File` 的粗糙。
+- **第 29 章 字节流**——`InputStream`/`OutputStream` 的抽象与装饰器模式，让 IO 拥有"乐高式"组合能力。
+- **第 30 章 字符流**——`Reader`/`Writer` 与字符编码，让文本处理不再被乱码困扰。
+- **第 31 章 序列化**——对象穿越时空的方式，以及它的安全代价与现代替代。
+- **第 32 章 NIO**——Buffer + Channel + Selector，从"线程驱动"转向"事件驱动"，打开高并发的大门。
+- **第 33 章 Files 进阶**——一行读写、流式处理、文件监视、权限管理，让文件操作极致简洁。
+
+这套能力构成了 Java 处理"数据流动"的完整图景：从最底层的字节，到字符，到对象，到缓冲区，再到事件驱动的网络通信。每一个抽象层都解决了上一层的痛点，又为下一层铺好了路。
+
+掌握了 I/O 与 NIO，你就能应对 Java 开发里 90% 的"数据进出"场景——读配置、写日志、解析大文件、网络通信、对象持久化。剩下的 10%——比如零拷贝的极致优化、内存映射文件、AIO（异步 IO）——会在更高阶的并发与性能专题里展开。
+
+至此，第六阶段完结。下一阶段我们将走进并发编程——线程、锁、并发容器、`CompletableFuture`、`ExecutorService`——那是 Java 处理"同时做多件事"的核心能力。I/O 让数据流动起来，并发让多个流动并行——它们合在一起，就是高性能 Java 应用的全部秘密。

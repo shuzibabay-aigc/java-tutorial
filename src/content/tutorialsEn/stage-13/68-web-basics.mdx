@@ -1,0 +1,604 @@
+---
+title: "Java Web Fundamentals"
+chapter: 68
+stage: "Stage 13"
+stageName: "Java Web and the Spring Ecosystem"
+order: 1
+description: "Understand the HTTP protocol in depth (requests/responses/methods/status codes/headers), the Servlet architecture and lifecycle, Filters and Listeners, Session and Cookie, the Tomcat server, and simulate HTTP request handling with code"
+pubDate: 2026-07-03
+tags: ["Java", "HTTP", "Servlet", "Tomcat", "Web", "Session", "Cookie"]
+---
+
+# Java Web Fundamentals
+
+Welcome to Stage 13 — **Java Web and the Spring Ecosystem**. The previous twelve stages were all "console programs" — a `main` method runs and exits. But the majority of real-world Java programs are **web applications** — long-running servers that accept HTTP requests and return HTTP responses. This stage examines the underlying machinery of Java Web, from the HTTP protocol to Servlet, from Tomcat to Spring. The first stop — the HTTP protocol and Servlet.
+
+## 1. The HTTP Protocol in Depth
+
+**HTTP** (HyperText Transfer Protocol) is the cornerstone of the Web — browsers and servers use it to communicate. It is a **stateless** **request-response** protocol — the client sends a request, the server returns a response, and the exchange is over.
+
+### 1.1 Request and Response Structure
+
+**HTTP Request**:
+
+```http
+POST /api/users HTTP/1.1
+Host: api.example.com
+Content-Type: application/json
+Content-Length: 36
+Authorization: Bearer abc123
+
+{"name":"张三","age":20}
+```
+
+Four parts:
+
+1. **Request line** — `Method URI ProtocolVersion` (`POST /api/users HTTP/1.1`)
+2. **Request headers** — multiple lines of `Key: Value` (Host, Content-Type, Authorization)
+3. **Empty line** — marks the end of headers
+4. **Request body** — the data (only POST/PUT have one; GET does not)
+
+**HTTP Response**:
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+Content-Length: 22
+
+{"id":1,"name":"张三"}
+```
+
+Four parts:
+
+1. **Status line** — `ProtocolVersion StatusCode ReasonPhrase` (`HTTP/1.1 201 Created`)
+2. **Response headers** — multiple lines of `Key: Value`
+3. **Empty line**
+4. **Response body**
+
+### 1.2 Request Methods
+
+| Method | Purpose | Idempotent | Safe |
+| --- | --- | --- | --- |
+| `GET` | Retrieve a resource | ✅ | ✅ |
+| `POST` | Create a resource | ❌ | ❌ |
+| `PUT` | Fully update a resource | ✅ | ❌ |
+| `PATCH` | Partially update a resource | ❌ | ❌ |
+| `DELETE` | Delete a resource | ✅ | ❌ |
+| `HEAD` | Same as GET but headers only | ✅ | ✅ |
+| `OPTIONS` | Query supported methods | ✅ | ✅ |
+
+**Idempotent** — Executing the same request N times has the same effect as executing it once. GET/PUT/DELETE are idempotent — repeated clicks cause no harm. POST is not idempotent — repeated submissions create multiple resources.
+
+**Safe** — Does not modify server state. Only GET/HEAD/OPTIONS are safe.
+
+**RESTful style** — Use HTTP methods to express operations:
+
+```
+GET    /users        # Query all users
+GET    /users/1      # Query a single user
+POST   /users        # Create a user
+PUT    /users/1      # Update a user (full)
+PATCH  /users/1      # Update a user (partial)
+DELETE /users/1      # Delete a user
+```
+
+### 1.3 Status Codes
+
+| Range | Meaning | Common |
+| --- | --- | --- |
+| **1xx** | Informational | 101 Switching Protocols (WebSocket upgrade) |
+| **2xx** | Success | 200 OK, 201 Created, 204 No Content |
+| **3xx** | Redirection | 301 Permanent Redirect, 302 Temporary Redirect, 304 Not Modified |
+| **4xx** | Client error | 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 429 Too Many Requests |
+| **5xx** | Server error | 500 Internal Error, 502 Bad Gateway, 503 Service Unavailable |
+
+Key takeaways:
+
+- **401 vs 403** — 401 means "not logged in" (no authentication); 403 means "logged in but lacking permission" (no authorization).
+- **301 vs 302** — 301 is permanent (browsers cache it and jump straight to the new address next time); 302 is temporary (the original address is consulted every time).
+- **500 vs 502** — 500 means the server-side code crashed; 502 means the reverse proxy could not get a response from the upstream (the upstream is down).
+
+### 1.4 Common Headers
+
+**Request headers**:
+
+| Header | Meaning |
+| --- | --- |
+| `Host` | Target host (required in HTTP/1.1, supports virtual hosts) |
+| `User-Agent` | Client identifier (browser type) |
+| `Accept` | Accepted content types |
+| `Content-Type` | Request body type |
+| `Authorization` | Authentication credentials (Bearer token / Basic) |
+| `Cookie` | Cookies carried |
+| `Referer` | Referring page |
+
+**Response headers**:
+
+| Header | Meaning |
+| --- | --- |
+| `Content-Type` | Response body type |
+| `Content-Length` | Response body length |
+| `Set-Cookie` | Set a cookie |
+| `Location` | Redirection target (paired with 3xx) |
+| `Cache-Control` | Caching policy |
+| `Access-Control-Allow-Origin` | CORS cross-origin |
+
+**Common `Content-Type` values**:
+
+- `application/json` — JSON
+- `application/x-www-form-urlencoded` — Form (`a=1&b=2`)
+- `multipart/form-data` — File upload
+- `text/html` — HTML
+- `text/plain` — Plain text
+
+## 2. The Servlet Architecture
+
+A **Servlet** (Server Applet) is the core of Java Web — it is a Java class running inside a Servlet container (such as Tomcat) that receives HTTP requests and produces HTTP responses.
+
+### 2.1 The Servlet Interface
+
+```java
+public interface Servlet {
+    void init(ServletConfig config) throws ServletException;
+    void service(ServletRequest req, ServletResponse res)
+        throws ServletException, IOException;
+    void destroy();
+    // ... other methods
+}
+```
+
+You typically extend `HttpServlet` and dispatch by HTTP method:
+
+```java
+@WebServlet("/hello")
+public class HelloServlet extends HttpServlet {
+    @Override
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp)
+            throws ServletException, IOException {
+        String name = req.getParameter("name");
+        resp.setContentType("text/html; charset=utf-8");
+        PrintWriter out = resp.getWriter();
+        out.println("<h1>Hello, " + name + "</h1>");
+    }
+
+    @Override
+    protected void doPost(HttpServletRequest req, HttpServletResponse resp)
+            throws ServletException, IOException {
+        // Handle POST
+    }
+}
+```
+
+### 2.2 Servlet Lifecycle
+
+```
+init()          -- Called once when the container loads (initialization)
+   ↓
+service()       -- Called once per request (dispatches to doGet/doPost/...)
+   ↓
+destroy()       -- Called once when the container unloads (cleanup)
+```
+
+- **`init`** — Called once on startup (or on first access) for initialization (loading config, connecting to the database).
+- **`service`** — Called once per request; it dispatches to `doGet`/`doPost`/`doPut`/`doDelete` based on the HTTP method.
+- **`destroy`** — Called once on unload to release resources.
+
+A Servlet is a **singleton** — a Servlet class has only one instance, shared by all requests. Therefore **never keep instance variables in a Servlet** — concurrent threads will clash. This is the most common pitfall for beginners.
+
+### 2.3 HttpServletRequest / HttpServletResponse
+
+`HttpServletRequest` wraps the request:
+
+```java
+req.getMethod();              // GET/POST
+req.getRequestURI();          // /api/users/1
+req.getParameter("name");     // Query parameter / form field
+req.getHeader("User-Agent");  // Request header
+req.getCookies();             // Cookie array
+req.getInputStream();         // Request body InputStream
+req.getSession();             // Get the Session
+req.setAttribute("k", v);     // Request-scoped attribute (for forwarding)
+```
+
+`HttpServletResponse` wraps the response:
+
+```java
+resp.setStatus(200);                  // Status code
+resp.setHeader("Content-Type", "..."); // Response header
+resp.setContentType("application/json; charset=utf-8");
+resp.getWriter().write(json);          // Write response body
+resp.getOutputStream();                // Binary response body
+resp.sendRedirect("/login");           // Redirect
+```
+
+### 2.4 Modern Development: You Almost Never Write Servlets
+
+Writing Servlets directly is tedious — one class per URL, manually parsing parameters, writing responses, handling exceptions. So modern Java Web development uses Spring MVC — `@RestController` + `@GetMapping` package all this elegantly. But **Servlets are the foundation** — Spring MVC's `DispatcherServlet` is essentially a Servlet. Understanding Servlets is prerequisite to understanding what Spring does.
+
+## 3. Filter and Listener
+
+### 3.1 Filter: Request/Response Interceptor
+
+A `Filter` intercepts requests **before** they reach the Servlet and responses **after** they leave the Servlet — commonly used for authentication, logging, character encoding, and CORS.
+
+```java
+@WebFilter("/*")
+public class AuthFilter implements Filter {
+    @Override
+    public void doFilter(ServletRequest req, ServletResponse resp, FilterChain chain)
+            throws IOException, ServletException {
+        HttpServletRequest httpReq = (HttpServletRequest) req;
+        String token = httpReq.getHeader("Authorization");
+        if (token == null) {
+            ((HttpServletResponse) resp).sendError(401, "Not logged in");
+            return;   // Do not pass through
+        }
+        chain.doFilter(req, resp);   // Pass to the next Filter or Servlet
+    }
+}
+```
+
+`FilterChain` is the Chain of Responsibility pattern — multiple Filters are chained in order, and each Filter decides whether to pass the request along.
+
+### 3.2 Listener: Event Listener
+
+A `Listener` listens to container and application-level events — startup/shutdown, Session creation/destruction, attribute changes.
+
+```java
+@WebListener
+public class AppInitListener implements ServletContextListener {
+    @Override
+    public void contextInitialized(ServletContextEvent sce) {
+        System.out.println("Application started, initializing resources...");
+        // Load config, initialize connection pool
+    }
+    @Override
+    public void contextDestroyed(ServletContextEvent sce) {
+        System.out.println("Application shutting down, cleaning up...");
+    }
+}
+```
+
+The "initialize database connection pool, register Beans" steps Spring Boot performs at startup are underpinned by Listeners like this.
+
+## 4. Session and Cookie
+
+HTTP is **stateless** — the server does not remember the client. But many scenarios need to "remember the user" (login state, shopping cart). **Session** and **Cookie** are two solutions.
+
+### 4.1 Cookie: Client-side Storage
+
+The server sends a chunk of data to the browser via the `Set-Cookie` response header, and the browser automatically includes it in subsequent requests:
+
+```http
+# Response header
+Set-Cookie: sessionid=abc123; Path=/; HttpOnly; Max-Age=3600; Secure; SameSite=Lax
+
+# Subsequent request header
+Cookie: sessionid=abc123; lastLogin=2024-01-15
+```
+
+Cookie attributes:
+
+- `Domain`/`Path` — Scope.
+- `Max-Age`/`Expires` — Expiry time.
+- `HttpOnly` — Not readable by JS (prevents XSS from stealing cookies).
+- `Secure` — HTTPS only.
+- `SameSite` — Cross-site restriction (prevents CSRF).
+
+### 4.2 Session: Server-side Storage
+
+Session data lives on the server; the browser holds only a `JSESSIONID` Cookie as the key:
+
+```java
+// Inside a Servlet
+HttpSession session = req.getSession();
+session.setAttribute("user", currentUser);   // Store
+User u = (User) session.getAttribute("user"); // Retrieve
+session.invalidate();                         // Destroy (logout)
+```
+
+The server uses `JSESSIONID` to locate the corresponding Session object. By default a Session expires after 30 minutes of inactivity.
+
+**Cookie vs Session**:
+
+| Comparison | Cookie | Session |
+| --- | --- | --- |
+| Storage location | Client (browser) | Server (memory/Redis) |
+| Size limit | ~4KB | None (server-controlled) |
+| Security | Low (readable by JS, can be stolen) | High (data on the server) |
+| Use case | Preferences, tracking, tokens | Login state, sensitive data |
+
+The modern web trend — **move Session to Redis** (distributed sharing), with the client holding only a JWT token.
+
+## 5. The Tomcat Server
+
+**Tomcat** is Apache's open-source Servlet container — the runtime environment for Java Web applications. It does three things:
+
+1. **Listens on a port** (default 8080) to receive HTTP requests.
+2. **Parses requests** into `HttpServletRequest`.
+3. **Invokes the Servlet's `service`** method to handle the request and writes the response back to the client.
+
+```
+Browser --HTTP--> Tomcat --invokes--> Servlet --returns response--> Tomcat --HTTP--> Browser
+```
+
+Spring Boot embeds Tomcat — `java -jar app.jar` simply starts a Tomcat. That is why Spring Boot does not need to be deployed to an external Tomcat; it is a "standalone application".
+
+## 6. Hands-on: Simulating HTTP Request Handling
+
+Because Servlets require a Tomcat container, Piston cannot run them. Below we use plain Java SE to simulate a **minimal Web server** — receiving HTTP requests, routing them to "controller" methods, and returning responses. This is the minimal core of Spring MVC.
+
+<CodeRunner code={`import java.io.*;
+import java.net.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.regex.*;
+import com.sun.net.httpserver.*;
+
+// 模拟 Spring MVC 的 @RestController + @GetMapping
+@RestController(path = "/api/users")
+class UserController {
+
+    private final List<Map<String, Object>> users = new CopyOnWriteArrayList<>();
+
+    public UserController() {
+        users.add(Map.of("id", 1, "name", "张三", "age", 20));
+        users.add(Map.of("id", 2, "name", "李四", "age", 22));
+    }
+
+    // GET /api/users
+    public Object list() {
+        return users;
+    }
+
+    // GET /api/users/{id}
+    public Object getById(int id) {
+        return users.stream().filter(u -> (int) u.get("id") == id)
+            .findFirst().orElse(null);
+    }
+
+    // POST /api/users
+    public Object create(String name, int age) {
+        int newId = users.size() + 1;
+        Map<String, Object> u = new LinkedHashMap<>();
+        u.put("id", newId); u.put("name", name); u.put("age", age);
+        users.add(u);
+        return u;
+    }
+}
+
+// 模拟 @RestController 注解
+@java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+@java.lang.annotation.Target(java.lang.annotation.ElementType.TYPE)
+@interface RestController {
+    String path();
+}
+
+// 简易 JSON 序列化
+class Json {
+    public static String stringify(Object o) {
+        if (o == null) return "null";
+        if (o instanceof String) return "\\"" + o + "\\"";
+        if (o instanceof Number || o instanceof Boolean) return o.toString();
+        if (o instanceof Map) {
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (var e : ((Map<?, ?>) o).entrySet()) {
+                if (!first) sb.append(",");
+                sb.append("\\"").append(e.getKey()).append("\\":").append(stringify(e.getValue()));
+                first = false;
+            }
+            return sb.append("}").toString();
+        }
+        if (o instanceof Iterable) {
+            StringBuilder sb = new StringBuilder("[");
+            boolean first = true;
+            for (Object item : (Iterable<?>) o) {
+                if (!first) sb.append(",");
+                sb.append(stringify(item));
+                first = false;
+            }
+            return sb.append("]").toString();
+        }
+        return "\\"" + o + "\\"";
+    }
+}
+
+// 简易 Web 框架 (模拟 Spring MVC DispatcherServlet)
+class MiniWeb {
+    private final Map<String, Object> controllers = new HashMap<>();
+    private final Map<String, Object> beans = new HashMap<>();
+
+    public void register(Object controller) {
+        RestController rc = controller.getClass().getAnnotation(RestController.class);
+        if (rc != null) {
+            controllers.put(rc.path(), controller);
+            beans.put(controller.getClass().getSimpleName(), controller);
+        }
+    }
+
+    // 处理 HTTP 请求
+    public String handleRequest(String method, String path, String body,
+            Map<String, String> query) throws Exception {
+        // 路由: 找匹配的 controller
+        for (var entry : controllers.entrySet()) {
+            String basePath = entry.getKey();
+            if (!path.startsWith(basePath)) continue;
+            Object ctrl = entry.getValue();
+
+            // GET /api/users
+            if ("GET".equals(method) && path.equals(basePath)) {
+                Object result = ctrl.getClass().getMethod("list").invoke(ctrl);
+                return Json.stringify(result);
+            }
+            // GET /api/users/{id}
+            Matcher m = Pattern.compile(Pattern.quote(basePath) + "/(\\\\d+)$").matcher(path);
+            if ("GET".equals(method) && m.matches()) {
+                int id = Integer.parseInt(m.group(1));
+                Object result = ctrl.getClass().getMethod("getById", int.class).invoke(ctrl, id);
+                return Json.stringify(result);
+            }
+            // POST /api/users
+            if ("POST".equals(method) && path.equals(basePath)) {
+                // 简单解析 body: {"name":"x","age":20}
+                String name = "默认";
+                int age = 0;
+                Matcher nm = Pattern.compile("\\"name\\":\\"([^\\"]+)\\"").matcher(body);
+                if (nm.find()) name = nm.group(1);
+                Matcher am = Pattern.compile("\\"age\\":(\\\\d+)").matcher(body);
+                if (am.find()) age = Integer.parseInt(am.group(1));
+                Object result = ctrl.getClass().getMethod("create", String.class, int.class)
+                    .invoke(ctrl, name, age);
+                return Json.stringify(result);
+            }
+        }
+        return "{\\"error\\":\\"Not Found\\"}";
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Java Web 基础: HTTP 与 Servlet 模拟 ===\\n");
+
+        // 1. 启动真实 HTTP 服务器 (用 JDK 内置 com.sun.net.httpserver)
+        int port = 18000;
+        MiniWeb web = new MiniWeb();
+        web.register(new UserController());
+
+        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+
+        server.createContext("/", exchange -> {
+            try {
+                String method = exchange.getRequestMethod();
+                URI uri = exchange.getRequestURI();
+                String path = uri.getPath();
+                String body = "";
+                if ("POST".equals(method) || "PUT".equals(method)) {
+                    body = new String(exchange.getRequestBody().readAllBytes(), "UTF-8");
+                }
+                // 解析 query
+                Map<String, String> query = new HashMap<>();
+                if (uri.getQuery() != null) {
+                    for (String p : uri.getQuery().split("&")) {
+                        String[] kv = p.split("=", 2);
+                        query.put(kv[0], kv.length > 1 ? kv[1] : "");
+                    }
+                }
+
+                System.out.println("[请求] " + method + " " + path
+                    + (body.isEmpty() ? "" : " body=" + body));
+
+                // 路由到控制器
+                String response = web.handleRequest(method, path, body, query);
+
+                // 模拟状态码
+                int status = response.contains("Not Found") ? 404 : 200;
+                if ("POST".equals(method)) status = 201;
+
+                byte[] respBytes = response.getBytes("UTF-8");
+                exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+                exchange.sendResponseHeaders(status, respBytes.length);
+                try (OutputStream os = exchange.getResponseBody()) { os.write(respBytes); }
+            } catch (Exception e) {
+                String err = "{\\"error\\":\\"" + e.getMessage() + "\\"}";
+                byte[] b = err.getBytes("UTF-8");
+                exchange.sendResponseHeaders(500, b.length);
+                try (OutputStream os = exchange.getResponseBody()) { os.write(b); }
+            }
+        });
+        server.start();
+        System.out.println("[服务器] 启动在 http://localhost:" + port);
+        Thread.sleep(300);
+
+        // 2. 用 HttpClient 发请求
+        java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient();
+
+        // GET /api/users
+        System.out.println("\\n--- GET /api/users ---");
+        var r1 = client.send(
+            java.net.http.HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/api/users"))
+                .GET().build(),
+            java.net.http.HttpResponse.BodyHandlers.ofString());
+        System.out.println("状态: " + r1.statusCode());
+        System.out.println("Body: " + r1.body());
+
+        // GET /api/users/1
+        System.out.println("\\n--- GET /api/users/1 ---");
+        var r2 = client.send(
+            java.net.http.HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/api/users/1"))
+                .GET().build(),
+            java.net.http.HttpResponse.BodyHandlers.ofString());
+        System.out.println("Body: " + r2.body());
+
+        // POST /api/users
+        System.out.println("\\n--- POST /api/users ---");
+        var r3 = client.send(
+            java.net.http.HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/api/users"))
+                .header("Content-Type", "application/json")
+                .POST(java.net.http.HttpRequest.BodyPublishers.ofString(
+                    "{\\"name\\":\\"王五\\",\\"age\\":25}"))
+                .build(),
+            java.net.http.HttpResponse.BodyHandlers.ofString());
+        System.out.println("状态: " + r3.statusCode() + " (201 Created)");
+        System.out.println("Body: " + r3.body());
+
+        // 404 测试
+        System.out.println("\\n--- GET /api/nonexistent (404) ---");
+        var r4 = client.send(
+            java.net.http.HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/api/nonexistent"))
+                .GET().build(),
+            java.net.http.HttpResponse.BodyHandlers.ofString());
+        System.out.println("状态: " + r4.statusCode() + ", Body: " + r4.body());
+
+        server.stop(0);
+
+        System.out.println("\\n=== Java Web 关键概念 ===");
+        System.out.println("1. HTTP = 请求行 + 头 + 空行 + 体");
+        System.out.println("2. 方法: GET/POST/PUT/DELETE 表达 CRUD 操作");
+        System.out.println("3. 状态码: 2xx 成功 / 4xx 客户端错 / 5xx 服务端错");
+        System.out.println("4. Servlet: 单例, init/service/destroy 生命周期");
+        System.out.println("5. Filter: 链式拦截, 用于鉴权/日志/编码");
+        System.out.println("6. Session: 服务端存储, JSESSIONID Cookie 标识");
+        System.out.println("7. Cookie: 客户端存储, HttpOnly/Secure 防攻击");
+        System.out.println("8. Tomcat: Servlet 容器, Spring Boot 内嵌");
+        System.out.println("9. 现代 Web 用 Spring MVC 封装 Servlet, 不直接写");
+    }
+}`} />
+
+> **What to observe**:
+> - **Requests routed to controller methods** — this is the essence of Spring MVC's `DispatcherServlet`.
+> - **GET for query, POST for create, status codes 200/201/404** — the core of RESTful style.
+> - **JSON-serialized responses** — the standard format for modern Web APIs.
+> - **One thread per request** — Tomcat by default opens a thread per request (Spring Boot 3.2+ optimizes with virtual threads).
+
+## 7. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| HTTP request | Request line + headers + empty line + body |
+| HTTP methods | GET/POST/PUT/PATCH/DELETE |
+| Status codes | 2xx success, 3xx redirect, 4xx client error, 5xx server error |
+| Servlet | Singleton, `init`/`service`/`destroy` lifecycle |
+| `HttpServletRequest` | Wraps the request (parameters/headers/Cookie/Session) |
+| Filter | Chain interception, auth/logging |
+| Listener | Listens to container events |
+| Session | Server-side storage, identified by JSESSIONID |
+| Cookie | Client-side storage, HttpOnly/Secure against attacks |
+| Tomcat | Servlet container, embedded in Spring Boot |
+
+**Memory mnemonics**:
+
+- **HTTP four parts** — request line / headers / empty line / body.
+- **Methods express operations** — GET to query, POST to create, PUT to update, DELETE to remove.
+- **401 vs 403** — 401 not authenticated, 403 not authorized.
+- **Servlet is singleton and stateless** — no instance variables.
+- **Session on server, Cookie on client** — used together, JSESSIONID is the key.
+- **Modern development uses Spring MVC** — don't write Servlets directly.
+
+## Conclusion: From HTTP to Spring
+
+This chapter covered the HTTP protocol and Servlets — the underpinnings of the Web. The next chapter looks at the "king" of Java Web — **Spring Core**, from IoC/DI to AOP, understanding why Spring dominates Java back-end development.

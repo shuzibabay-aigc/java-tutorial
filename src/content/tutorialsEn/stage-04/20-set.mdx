@@ -1,0 +1,452 @@
+---
+title: "Set"
+chapter: 20
+stage: "Stage 4"
+stageName: "Collections Framework"
+order: 3
+description: "Exploring HashSet's HashMap-based implementation, TreeSet's red-black tree sorting, LinkedHashSet's order-preserving mechanism, with hands-on array deduplication and set operations"
+pubDate: 2026-07-03
+tags: ["Java", "Set", "HashSet", "TreeSet", "LinkedHashSet", "红黑树", "集合运算"]
+---
+
+# Set
+
+If `List` is a "queue that welcomes everyone," then `Set` is a "members-only club"—every member must be unique, and duplicate requests are flatly rejected. This is precisely the contract of the `Set` interface: **no duplicate elements allowed**. Behind this seemingly simple constraint lies exquisite implementation: hash tables, red-black trees, and linked lists—three data structures power the three major `Set` implementations.
+
+In this chapter, we open up the "membership management systems" of `HashSet`, `LinkedHashSet`, and `TreeSet` to see how they efficiently answer the question "has this person been here before?"
+
+## 1. The Set Interface
+
+`Set<E>` extends `Collection<E>` without adding any new methods—it simply **redefines the contract**:
+
+```java
+public interface Set<E> extends Collection<E> {
+    // Exactly the same interface as Collection
+    // but add rejects duplicate elements, and equals/hashCode follow Set semantics
+}
+```
+
+The key conventions of `Set`:
+
+- **No duplicates**: `add(e)` returns `false` and leaves the set unchanged if the element already exists.
+- **At most one null** (if the implementation allows): `HashSet` and `LinkedHashSet` allow one `null`; `TreeSet` does not.
+- **equals semantics**: two Sets are equal if and only if they contain the same elements, regardless of order.
+
+## 2. HashSet: "Borrowing a Shell" Based on HashMap
+
+### 2.1 HashSet's Secret
+
+Open the `HashSet` source code and you'll be surprised—it doesn't implement anything itself; it leans entirely on `HashMap`:
+
+```java
+public class HashSet<E> extends AbstractSet<E>
+        implements Set<E>, Cloneable, java.io.Serializable {
+    private transient HashMap<E,Object> map;
+    private static final Object PRESENT = new Object();
+
+    public HashSet() {
+        map = new HashMap<>();
+    }
+
+    public boolean add(E e) {
+        return map.put(e, PRESENT) == null;
+    }
+
+    public boolean contains(Object o) {
+        return map.containsKey(o);
+    }
+
+    public boolean remove(Object o) {
+        return map.remove(o) == PRESENT;
+    }
+}
+```
+
+Do you see it? `HashSet` stores elements as the **keys** of a `HashMap`, while the value is a fixed `Object` placeholder (`PRESENT`)—it is never actually used; it just exists so that `HashMap` has a value to store.
+
+This is "borrowing a shell" by design: `HashMap` has already solved hashing, resizing, and linked-list/red-black-tree conversion, so `HashSet` simply reuses it—why not? This is a textbook example of **composition over reimplementation**.
+
+### 2.2 How add Deduplicates
+
+```java
+public boolean add(E e) {
+    return map.put(e, PRESENT) == null;
+}
+```
+
+The semantics of `HashMap.put`: if the key doesn't exist, it adds the entry and returns `null`; if the key already exists, it **updates the value and returns the old value**. Therefore:
+
+- Returns `null` → the key didn't exist before → `add` returns `true` (added successfully).
+- Returns non-`null` (i.e., `PRESENT`) → the key already exists → `add` returns `false` (duplicate rejected).
+
+The core of the deduplication check is `HashMap.containsKey`, which relies on `hashCode` and `equals`—so **if you want custom objects to work correctly in a HashSet, you must override both methods properly**.
+
+### 2.3 Crucial: The hashCode and equals Contract
+
+```java
+public class Person {
+    private String name;
+    private int age;
+    // assume hashCode/equals are NOT overridden
+}
+
+Set<Person> set = new HashSet<>();
+set.add(new Person("Alice", 20));
+set.add(new Person("Alice", 20));   // both got added!
+System.out.println(set.size());     // 2, not 1
+```
+
+Two `Person` objects with "identical content" both made it in—because the default `hashCode`/`equals` are based on object identity (memory address), and two `new`-created objects have different addresses, so `HashSet` treats them as two different people.
+
+The correct approach is to override them:
+
+```java
+public class Person {
+    private String name;
+    private int age;
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Person p)) return false;
+        return age == p.age && Objects.equals(name, p.name);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(name, age);
+    }
+}
+```
+
+**The contract between `hashCode` and `equals`**:
+
+1. **Consistency**: multiple calls to `hashCode` must return the same value (as long as the object hasn't changed).
+2. **Equal objects must have equal hashes**: if `a.equals(b)` is `true`, then `a.hashCode() == b.hashCode()` must hold.
+3. **Equal hashes do not imply equal objects**: `a.hashCode() == b.hashCode()` does not mean `a.equals(b)` is `true` (hash collision).
+
+Violating the second rule causes "logically equal objects" to be treated as different in a `HashSet`—this is the most common source of bugs.
+
+> 💡 **IntelliJ IDEA auto-generation**: Use `Alt+Insert` → `equals() and hashCode()` to auto-generate a high-quality implementation that follows the best practices from Effective Java.
+
+### 2.4 Performance Characteristics
+
+`HashSet`'s core operations are all O(1) on average (O(n) in the worst case, with severe hash collisions):
+
+| Operation | Average | Worst |
+| --- | --- | --- |
+| `add` | O(1) | O(log n) (after Java 8+ treeification) |
+| `contains` | O(1) | O(log n) |
+| `remove` | O(1) | O(log n) |
+
+`HashSet` is unordered—the iteration order has no relation to insertion order and guarantees no particular order. Do not rely on its iteration order (even if it occasionally looks regular, that's just a coincidence).
+
+## 3. LinkedHashSet: Preserving Insertion Order
+
+`LinkedHashSet` is the "order-preserving version" of `HashSet`—it uses an internal doubly-linked list to thread all elements together, recording insertion order:
+
+```
+Insertion order: C → A → B
+HashSet       iteration: A, C, B (unordered)
+LinkedHashSet iteration: C, A, B (insertion order)
+```
+
+Its implementation is equally clever—`LinkedHashSet` uses `LinkedHashMap` internally (a HashMap with a linked list):
+
+```java
+public class LinkedHashSet<E> extends HashSet<E>
+        implements Set<E>, Cloneable, java.io.Serializable {
+    public LinkedHashSet() {
+        super(16, .75f, true);   // calls HashSet's special constructor
+    }
+}
+
+// HashSet's special constructor, making the internal map use LinkedHashMap
+HashSet(int initialCapacity, float loadFactor, boolean dummy) {
+    map = new LinkedHashMap<>(initialCapacity, loadFactor);
+}
+```
+
+`LinkedHashSet` adds almost no extra cost—just the pointer overhead of an additional linked list, while all operations remain O(1).
+
+**When to use it?** When you need "deduplication" but also want to preserve the order in which elements first appeared. For example, deduplicating URLs in a crawler while processing them in discovery order, or deduplicating user input in the order it was entered.
+
+## 4. TreeSet: A Sorted Set Based on a Red-Black Tree
+
+### 4.1 An Automatically Sorted Set
+
+`TreeSet` stores elements in a **red-black tree**, so iteration yields elements in **sorted order** (ascending). It is internally based on `TreeMap` (the same "borrowing a shell" approach):
+
+```java
+public class TreeSet<E> extends AbstractSet<E>
+        implements NavigableSet<E>, Cloneable, java.io.Serializable {
+    private transient NavigableMap<E,Object> m;
+    private static final Object PRESENT = new Object();
+
+    TreeSet(NavigableMap<E,Object> m) {
+        this.m = m;
+    }
+
+    public TreeSet() {
+        this(new TreeMap<>());
+    }
+}
+```
+
+A red-black tree is a **self-balancing binary search tree**—the height difference between the left and right subtrees of any node never exceeds a factor of 2. This guarantees that search, insertion, and deletion are all O(log n).
+
+### 4.2 How Elements Are Sorted
+
+`TreeSet` needs to know how elements "compare," and there are two ways:
+
+**Method one: natural ordering**—the element implements `Comparable＜T＞`:
+
+```java
+public class Student implements Comparable<Student> {
+    String name;
+    int score;
+
+    @Override
+    public int compareTo(Student o) {
+        return Integer.compare(this.score, o.score);   // ascending by score
+    }
+}
+
+TreeSet<Student> set = new TreeSet<>();   // uses compareTo automatically
+```
+
+**Method two: custom ordering**—pass a `Comparator` to the constructor:
+
+```java
+TreeSet<Student> set = new TreeSet<>(
+    Comparator.comparingInt(Student::getScore).reversed()   // descending
+);
+```
+
+If the element neither implements `Comparable` nor is a `Comparator` provided, `add` will throw a `ClassCastException`.
+
+### 4.3 Navigation Methods of NavigableSet
+
+`TreeSet` implements `NavigableSet`, which provides a series of "navigation" methods:
+
+```java
+TreeSet<Integer> set = new TreeSet<>(List.of(1, 3, 5, 7, 9));
+
+set.ceiling(4);    // 5   (smallest element >= 4)
+set.floor(4);      // 3   (largest element <= 4)
+set.higher(5);     // 7   (smallest element > 5)
+set.lower(5);      // 3   (largest element < 5)
+set.first();       // 1   (smallest element)
+set.last();        // 9   (largest element)
+set.pollFirst();   // 1, and removes it (pops the smallest)
+set.pollLast();    // 9, and removes it (pops the largest)
+set.subSet(3, 7);  // [3, 5] (3 <= x < 7, left-closed right-open)
+set.headSet(5);    // [1, 3] (< 5)
+set.tailSet(5);    // [5, 7, 9] (>= 5)
+set.descendingSet();// [9, 7, 5, 3, 1] (reverse-order view)
+```
+
+These methods are incredibly convenient for "finding the closest," "range queries," and "Top K"—for example, leaderboards and price-range queries.
+
+### 4.4 Performance and Limitations
+
+| Operation | TreeSet |
+| --- | --- |
+| `add` / `contains` / `remove` | O(log n) |
+| `first` / `last` / `ceiling` / `floor` | O(log n) |
+| Range query `subSet` | O(log n + k) (k is the result count) |
+| Iteration | Ascending O(n) |
+
+`TreeSet` is slower than HashSet (O(log n) vs O(1)) but provides sorting and navigation capabilities. **Use it only when you need sorting**; otherwise, use HashSet.
+
+Note: `TreeSet` does not allow `null` (because null cannot be compared)—adding null throws `NullPointerException`.
+
+## 5. Hands-On: Array Deduplication
+
+The most common use of `Set` is deduplication:
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 最简单的去重
+        List<Integer> nums = List.of(1, 2, 2, 3, 3, 3, 4, 5, 5);
+        Set<Integer> unique = new HashSet<>(nums);
+        System.out.println("去重（无序）: " + unique);
+
+        // 2. 保序去重
+        Set<Integer> linked = new LinkedHashSet<>(nums);
+        System.out.println("去重（保序）: " + linked);
+
+        // 3. 排序去重
+        Set<Integer> tree = new TreeSet<>(nums);
+        System.out.println("去重（排序）: " + tree);
+
+        // 4. 字符串去重，统计每个字符出现次数
+        String text = "hello world";
+        Map<Character, Integer> freq = new LinkedHashMap<>();
+        for (char c : text.toCharArray()) {
+            freq.merge(c, 1, Integer::sum);
+        }
+        System.out.println("\\n字符频率: " + freq);
+
+        // 5. 用 Set 检查重复元素
+        System.out.println("\\n--- 检查重复 ---");
+        List<String> words = List.of("apple", "banana", "apple", "cherry", "banana");
+        Set<String> seen = new HashSet<>();
+        Set<String> dupes = new HashSet<>();
+        for (String w : words) {
+            if (!seen.add(w)) {     // add 返回 false 说明重复
+                dupes.add(w);
+            }
+        }
+        System.out.println("重复的词: " + dupes);
+
+        // 6. 自定义对象去重
+        System.out.println("\\n--- 自定义对象去重 ---");
+        Set<Person> people = new HashSet<>();
+        people.add(new Person("Alice", 20));
+        people.add(new Person("Bob", 22));
+        people.add(new Person("Alice", 20));   // 重复，会被拒绝
+        System.out.println("人数: " + people.size());   // 2
+        for (Person p : people) {
+            System.out.println("  " + p);
+        }
+    }
+}
+
+class Person {
+    private String name;
+    private int age;
+
+    Person(String name, int age) {
+        this.name = name;
+        this.age = age;
+    }
+
+    String getName() { return name; }
+    int getAge() { return age; }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Person p)) return false;
+        return age == p.age && Objects.equals(name, p.name);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(name, age);
+    }
+
+    @Override
+    public String toString() {
+        return name + "(" + age + ")";
+    }
+}`} />
+
+Note that the custom `Person` object must properly override `equals` and `hashCode`—this is the prerequisite for `HashSet` to work correctly.
+
+## 6. Hands-On: Set Operations
+
+`Set` naturally supports set operations—union, intersection, difference. Java provides several ways:
+
+<CodeRunner code={`import java.util.*;
+import java.util.stream.*;
+
+public class Main {
+    public static void main(String[] args) {
+        Set<Integer> a = new HashSet<>(Set.of(1, 2, 3, 4, 5));
+        Set<Integer> b = new HashSet<>(Set.of(4, 5, 6, 7, 8));
+
+        // 1. 并集（a ∪ b）
+        Set<Integer> union = new HashSet<>(a);
+        union.addAll(b);
+        System.out.println("并集: " + union);
+
+        // 2. 交集（a ∩ b）
+        Set<Integer> intersection = new HashSet<>(a);
+        intersection.retainAll(b);
+        System.out.println("交集: " + intersection);
+
+        // 3. 差集（a - b）
+        Set<Integer> difference = new HashSet<>(a);
+        difference.removeAll(b);
+        System.out.println("差集 (a-b): " + difference);
+
+        // 4. 对称差（a △ b = (a ∪ b) - (a ∩ b)）
+        Set<Integer> symDiff = new HashSet<>(union);
+        symDiff.removeAll(intersection);
+        System.out.println("对称差: " + symDiff);
+
+        // 5. 用 Stream 做更灵活的运算
+        System.out.println("\\n--- Stream 版本 ---");
+        Set<Integer> streamUnion = Stream.concat(a.stream(), b.stream())
+            .collect(Collectors.toSet());
+        System.out.println("Stream 并集: " + streamUnion);
+
+        // 6. 子集判断
+        Set<Integer> c = new HashSet<>(Set.of(2, 3));
+        System.out.println("\\n{2,3} 是 {1..5} 的子集? " + a.containsAll(c));
+        System.out.println("{2,3} 是 {4..8} 的子集? " + b.containsAll(c));
+
+        // 7. 不可变集合运算（不修改原集合）
+        System.out.println("\\n--- 实用：找两份名单的公共好友 ---");
+        Set<String> aliceFriends = Set.of("Bob", "Charlie", "David", "Eve");
+        Set<String> bobFriends = Set.of("Alice", "Charlie", "David", "Frank");
+        Set<String> common = new HashSet<>(aliceFriends);
+        common.retainAll(bobFriends);
+        System.out.println("Alice 和 Bob 的共同好友: " + common);
+    }
+}`} />
+
+**Key APIs**:
+
+- `addAll(c)`: union.
+- `retainAll(c)`: intersection.
+- `removeAll(c)`: difference.
+- `containsAll(c)`: subset check.
+
+Note that these methods **modify the original set**—so it's common to first `new HashSet＜＞(originalSet)` to make a copy before operating, to avoid polluting the original data.
+
+## 7. Comparison of the Three Sets
+
+| Feature | HashSet | LinkedHashSet | TreeSet |
+| --- | --- | --- | --- |
+| Underlying structure | HashMap | LinkedHashMap | TreeMap (red-black tree) |
+| Order | Unordered | Insertion order | Ascending (natural or custom) |
+| null | Allows 1 | Allows 1 | Not allowed |
+| add/contains/remove | O(1) | O(1) | O(log n) |
+| Range queries | Not supported | Not supported | Supported (subSet/headSet/tailSet) |
+| Navigation methods | None | None | ceiling/floor/higher/lower |
+| Memory overhead | Small | Medium (extra linked-list pointers) | Large (tree nodes) |
+
+**Selection advice**:
+
+- Use `HashSet` by default—the fastest.
+- Need to preserve insertion order → `LinkedHashSet`.
+- Need sorting or range queries → `TreeSet`.
+
+## 8. Chapter Summary
+
+| Topic | Key Points |
+| --- | --- |
+| Set contract | No duplicate elements |
+| HashSet | Based on HashMap, value is a fixed PRESENT |
+| Deduplication principle | `HashMap.put` returning null means the key didn't exist |
+| Custom objects | Must override `equals` and `hashCode` |
+| equals contract | Equal objects must have equal hashes, but not vice versa |
+| LinkedHashSet | HashSet + linked list, preserves insertion order |
+| TreeSet | Based on a red-black tree, elements are sorted |
+| TreeSet sorting | Implement Comparable or pass a Comparator |
+| NavigableSet | ceiling/floor/higher/lower/subSet |
+| Set operations | addAll/retainAll/removeAll/containsAll |
+| Selection | Default HashSet, order-preserving LinkedHashSet, sorted TreeSet |
+
+## Conclusion: The Art of Deduplication
+
+`Set` looks simple—"no duplicates" is just four words—but its implementation reveals the design wisdom of the Java Collections Framework: `HashSet` borrows the shell of `HashMap` to achieve O(1) deduplication through hashing; `LinkedHashSet` adds a linked list to preserve order; `TreeSet` uses a red-black tree to provide sorting and navigation.
+
+Remember the one core point: **to put custom objects into a HashSet/LinkedHashSet, you must override equals and hashCode**—this is the source of countless bugs and a frequent interview topic. Only when you understand this can you truly claim to "know how to use" Set.
+
+In the next chapter, we dive into `Map`—the "mother" of `HashSet` and the most storied branch of the collections framework.

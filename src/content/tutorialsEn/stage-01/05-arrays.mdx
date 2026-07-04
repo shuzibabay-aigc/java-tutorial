@@ -1,0 +1,411 @@
+---
+title: "Arrays"
+chapter: 5
+stage: "Stage 1"
+stageName: "Java Fundamentals"
+order: 5
+description: "Master declaring, initializing, and iterating one-dimensional and multi-dimensional arrays, the Arrays utility class, array memory analysis, and implement bubble sort and binary search in practice"
+pubDate: 2026-07-03
+tags: ["Java", "数组", "Arrays", "排序", "基础入门"]
+---
+
+# Arrays
+
+Picture the storage shelf of a coffee shop—each compartment holds a cup of coffee, and the compartments are numbered starting from 0. When a barista calls out "the coffee in slot 3," you can find it instantly. This is the real-world analogue of an **array**: a contiguous collection of data of the same type, where each element has a number (an index).
+
+Arrays are Java's most fundamental data structure and a prerequisite for learning the Collections Framework. In this chapter, we will dive deep into every aspect of arrays and use them to implement two classic algorithms: bubble sort and binary search.
+
+## I. Why Do We Need Arrays?
+
+Suppose you want to track a coffee shop's sales over a week (7 days). Without arrays, you would have to write:
+
+```java
+int sales1 = 45;
+int sales2 = 52;
+int sales3 = 38;
+// ... 7 variables
+int total = sales1 + sales2 + sales3 + ...;  // Add them up manually
+```
+
+What if you had 365 days of data? Write 365 variables? Iterate through them by hand to sum them up? Clearly impractical. Arrays solve this problem: a single variable name manages a set of data, an index accesses any element, and a loop processes them in bulk.
+
+## II. Declaring and Initializing a One-Dimensional Array
+
+### 2.1 Declaration
+
+There are two ways to declare a one-dimensional array in Java (the first is recommended):
+
+```java
+int[] sales;     // Recommended: the type is "int array"
+int sales[];     // C-style, a habit carried over from C/C++
+```
+
+Declaring only defines a variable of an array type—**no memory has been allocated yet**, and `sales` is `null` at this point.
+
+### 2.2 Initialization
+
+An array must be initialized before it can be used. Initialization comes in two forms:
+
+**Static initialization**: Provide all element values at the point of declaration.
+
+```java
+int[] sales = {45, 52, 38, 60, 55, 70, 48};  // Shorthand form
+// Or the full form:
+int[] sales2 = new int[]{45, 52, 38, 60, 55, 70, 48};
+```
+
+> ⚠️ Note: The shorthand form `{...}` can only be used at the point of declaration. If you split the declaration and assignment, you must use `new int[]{...}`:
+> ```java
+> int[] sales;
+> sales = {45, 52, 38};           // Compile error!
+> sales = new int[]{45, 52, 38};  // Correct
+> ```
+
+**Dynamic initialization**: Specify the length, and the system assigns default values (numeric types get `0`, `boolean` gets `false`, reference types get `null`).
+
+```java
+int[] sales = new int[7];  // Length 7, all elements default to 0
+sales[0] = 45;  // Then assign values one by one
+sales[1] = 52;
+// ...
+```
+
+### 2.3 The length Property
+
+Every array has a `length` property that indicates the array's length (number of elements). Note that it is a **property**, not a method—do not add parentheses:
+
+```java
+int[] sales = {45, 52, 38, 60, 55, 70, 48};
+System.out.println(sales.length);  // 7 (not sales.length()!)
+```
+
+Once an array is created, **its length is fixed and cannot change**. This is the core difference between arrays and dynamic collections like `ArrayList`.
+
+## III. Accessing and Iterating Arrays
+
+### 3.1 Accessing by Index
+
+Array indices start at **0** and go up to `length - 1`. Accessing out of bounds throws `ArrayIndexOutOfBoundsException`:
+
+```java
+int[] sales = {45, 52, 38, 60, 55, 70, 48};
+System.out.println(sales[0]);    // 45 (the first element)
+System.out.println(sales[6]);    // 48 (the last element)
+sales[3] = 65;                   // Modify the fourth element
+// sales[7] = 100;               // Runtime exception! Index out of bounds
+```
+
+### 3.2 Iterating an Array
+
+**Classic for loop**: Use when you need the index.
+
+```java
+int[] sales = {45, 52, 38, 60, 55, 70, 48};
+for (int i = 0; i < sales.length; i++) {
+    System.out.printf("第 %d 天销量：%d 杯%n", i + 1, sales[i]);
+}
+```
+
+**Enhanced for loop (for-each)**: More concise when you only need the element values, not the index.
+
+```java
+int total = 0;
+for (int s : sales) {
+    total += s;
+}
+System.out.println("总销量：" + total + " 杯");
+```
+
+## IV. Multi-Dimensional Arrays
+
+### 4.1 The Nature of Multi-Dimensional Arrays in Java
+
+In C/C++, a two-dimensional array is a single contiguous block of rectangular memory. In Java, however, **a multi-dimensional array is an "array of arrays"**—a two-dimensional array is actually a one-dimensional array whose elements are themselves one-dimensional arrays.
+
+```
+int[][] matrix = {
+    {1, 2, 3},
+    {4, 5, 6},
+    {7, 8, 9}
+};
+```
+
+`matrix` is a one-dimensional array of length 3, where `matrix[0]`, `matrix[1]`, and `matrix[2]` are each a one-dimensional array of length 3.
+
+### 4.2 Declaration and Initialization
+
+```java
+// Static initialization
+int[][] matrix = {
+    {1, 2, 3},
+    {4, 5, 6},
+    {7, 8, 9}
+};
+
+// Dynamic initialization (regular rectangular array)
+int[][] grid = new int[3][4];  // 3 rows, 4 columns, all zeros
+
+// Dynamic initialization (jagged array)
+int[][] jagged = new int[3][];
+jagged[0] = new int[]{1, 2};
+jagged[1] = new int[]{3, 4, 5, 6};
+jagged[2] = new int[]{7, 8, 9};
+```
+
+### 4.3 Jagged Arrays
+
+Because Java's two-dimensional arrays are "arrays of arrays," **each row can have a different length**—this is a jagged array:
+
+```java
+int[][] triangle = {
+    {1},
+    {2, 3},
+    {4, 5, 6},
+    {7, 8, 9, 10}
+};
+```
+
+This flexibility is useful in scenarios like printing Pascal's triangle.
+
+### 4.4 Iterating a Two-Dimensional Array
+
+```java
+int[][] matrix = {
+    {1, 2, 3},
+    {4, 5, 6},
+    {7, 8, 9}
+};
+
+for (int i = 0; i < matrix.length; i++) {           // Iterate over rows
+    for (int j = 0; j < matrix[i].length; j++) {    // Iterate over columns
+        System.out.printf("%4d", matrix[i][j]);
+    }
+    System.out.println();
+}
+```
+
+Note that the inner loop uses `matrix[i].length` rather than a fixed value—this correctly handles jagged arrays.
+
+## V. The Arrays Utility Class
+
+`java.util.Arrays` is Java's built-in array utility class, packaging a wealth of practical methods so you do not have to reinvent the wheel.
+
+### 5.1 Common Methods at a Glance
+
+| Method | Functionality |
+| --- | --- |
+| `Arrays.toString(arr)` | Converts the array to a string, e.g. `[1, 2, 3]` |
+| `Arrays.sort(arr)` | Sorts the array (ascending) |
+| `Arrays.binarySearch(arr, key)` | Binary search (array must be sorted); returns the index, or a negative value if not found |
+| `Arrays.fill(arr, val)` | Fills the entire array with the specified value |
+| `Arrays.copyOf(arr, newLength)` | Copies the array, specifying a new length |
+| `Arrays.copyOfRange(arr, from, to)` | Copies a range of the array `[from, to)` |
+| `Arrays.equals(arr1, arr2)` | Compares the contents of two arrays for equality |
+| `Arrays.asList(arr)` | Converts an array to a `List` (note: returns a fixed-size List) |
+
+### 5.2 Usage Example
+
+```java
+import java.util.Arrays;
+
+int[] arr = {5, 2, 8, 1, 9, 3};
+
+// Sort
+Arrays.sort(arr);
+System.out.println(Arrays.toString(arr));  // [1, 2, 3, 5, 8, 9]
+
+// Binary search (must be sorted first)
+int idx = Arrays.binarySearch(arr, 8);
+System.out.println("8 的索引：" + idx);  // 4
+
+// Fill
+int[] filled = new int[5];
+Arrays.fill(filled, 100);
+System.out.println(Arrays.toString(filled));  // [100, 100, 100, 100, 100]
+
+// Copy
+int[] copy = Arrays.copyOf(arr, 3);
+System.out.println(Arrays.toString(copy));  // [1, 2, 3]
+```
+
+> ⚠️ **The `Arrays.asList()` pitfall**: The `List` returned by this method has a fixed size—you cannot `add` or `remove` from it, or it will throw `UnsupportedOperationException`. If you need a mutable List, use `new ArrayList＜＞(Arrays.asList(arr))`. Furthermore, passing an `int[]` to `asList` treats it as a single element; you need to use `Integer[]` instead.
+
+## VI. Memory Analysis of Arrays
+
+### 6.1 Arrays Are Reference Types
+
+In Java, arrays are **reference types**, not primitive types. This means an array variable does not store the data itself, but rather the address of the data in the **heap**.
+
+```java
+int[] a = {1, 2, 3};
+int[] b = a;     // b and a point to the same array!
+b[0] = 100;
+System.out.println(a[0]);  // 100! a has been changed too
+```
+
+This is like two membership cards pointing to the same account—no matter which card is used to make a purchase, the account balance changes.
+
+### 6.2 Memory Layout
+
+```java
+int[] arr = new int[3];
+arr[0] = 10;
+```
+
+Execution process:
+1. The variable `arr` is created on the **stack**.
+2. Contiguous space for 3 `int` values is allocated on the **heap**, each initialized to `0`.
+3. `arr` stores the address (reference) of the array object in the heap.
+4. `arr[0] = 10` follows the reference to find the object in the heap and modifies the first element.
+
+### 6.3 Arrays and the Limitations of Generics
+
+Java's generics have a well-known restriction: **you cannot create a generic array** `new List＜String＞[]`. This is because generics use "type erasure"—at runtime, `List＜String＞` and `List＜Integer＞` are both just `List`, so a generic array cannot guarantee type safety. This is also why the Java Collections Framework favors `ArrayList` over arrays.
+
+## VII. Hands-On: Bubble Sort
+
+Bubble sort is one of the most classic sorting algorithms. Although not efficient (time complexity O(n²)), it is an excellent way to understand the idea of sorting.
+
+### 7.1 The Algorithm
+
+Imagine the bubbles in a cup of coffee—the larger bubbles rise to the top first. Bubble sort works the same way: **compare adjacent elements in pairs, and "bubble" the larger one toward the end**. After each pass, the largest element is in its final position. Repeat for n-1 passes, and the array is sorted.
+
+```
+Initial:    [5, 3, 8, 1, 9]
+Pass 1:    [3, 5, 1, 8, 9]  ← 9 is in place
+Pass 2:    [3, 1, 5, 8, 9]  ← 8 is in place
+Pass 3:    [1, 3, 5, 8, 9]  ← 5 is in place
+Pass 4:    [1, 3, 5, 8, 9]  ← Fully sorted
+```
+
+### 7.2 Implementation
+
+<CodeRunner code={`public class Main {
+    public static void main(String[] args) {
+        int[] arr = {64, 34, 25, 12, 22, 11, 90, 5};
+
+        System.out.println("排序前：");
+        printArray(arr);
+
+        // 冒泡排序
+        bubbleSort(arr);
+
+        System.out.println("\\n排序后：");
+        printArray(arr);
+
+        // 用 Arrays 工具类验证
+        System.out.println("\\n--- 二分查找验证 ---");
+        int target = 25;
+        // 手写二分查找
+        int index = binarySearch(arr, target);
+        if (index >= 0) {
+            System.out.printf("数字 %d 的索引是 %d%n", target, index);
+        } else {
+            System.out.printf("数字 %d 不存在%n", target);
+        }
+    }
+
+    // 冒泡排序：相邻元素两两比较，大的往后冒
+    static void bubbleSort(int[] arr) {
+        int n = arr.length;
+        for (int i = 0; i < n - 1; i++) {           // 外层：n-1 轮
+            boolean swapped = false;                 // 优化：记录本轮是否发生交换
+            for (int j = 0; j < n - 1 - i; j++) {   // 内层：每轮少比较一次（末尾已有序）
+                if (arr[j] > arr[j + 1]) {
+                    // 交换相邻元素
+                    int temp = arr[j];
+                    arr[j] = arr[j + 1];
+                    arr[j + 1] = temp;
+                    swapped = true;
+                }
+            }
+            // 如果本轮没有交换，说明数组已有序，提前结束
+            if (!swapped) {
+                System.out.println("第 " + (i + 1) + " 轮后已有序，提前结束");
+                break;
+            }
+        }
+    }
+
+    // 二分查找：在已排序数组中查找目标值
+    static int binarySearch(int[] arr, int target) {
+        int low = 0;
+        int high = arr.length - 1;
+        while (low <= high) {
+            int mid = (low + high) / 2;
+            if (arr[mid] == target) {
+                return mid;        // 找到，返回索引
+            } else if (arr[mid] < target) {
+                low = mid + 1;     // 目标在右半部分
+            } else {
+                high = mid - 1;    // 目标在左半部分
+            }
+        }
+        return -1;  // 未找到
+    }
+
+    // 打印数组
+    static void printArray(int[] arr) {
+        for (int i = 0; i < arr.length; i++) {
+            System.out.printf("%4d", arr[i]);
+        }
+        System.out.println();
+    }
+}`} />
+
+### 7.3 Optimizing Bubble Sort
+
+The code above includes two optimizations:
+
+1. **Reducing inner loop iterations**: `j ＜ n - 1 - i`. After each pass, the largest i+1 elements are already in place, so there is no need to compare them again.
+2. **Early exit**: Using the `swapped` flag. If no swaps occur during a pass, the array is already sorted and the loop can end early. This can significantly improve performance on "nearly sorted" arrays.
+
+## VIII. Binary Search: The Magic of O(log n)
+
+Binary search requires the array to **already be sorted**. Its core idea: compare the target with the middle element and eliminate half of the data each time.
+
+```
+Searching for 25 in [11, 12, 22, 25, 34, 64, 90]:
+1st attempt: mid=25 → Found!
+```
+
+The time complexity of binary search is **O(log n)**—with each comparison, the data is halved. Searching through a billion elements takes at most 30 comparisons (2³⁰ ≈ 1 billion). That is the power of logarithmic complexity.
+
+> ⚠️ **Integer overflow pitfall**: When calculating the middle index, `int mid = (low + high) / 2;` can overflow when both `low` and `high` are very large. A safer approach is `int mid = low + (high - low) / 2;`, or in Java 18+, `int mid = Math.floorDiv(low + high, 2);`.
+
+## IX. Quick Reference: Common Array Operations
+
+| Operation | Code |
+| --- | --- |
+| Create an array | `int[] arr = new int[5];` |
+| Static initialization | `int[] arr = {1, 2, 3};` |
+| Get length | `arr.length` |
+| Access an element | `arr[0]` (first), `arr[arr.length - 1]` (last) |
+| Iterate | `for (int x : arr) { ... }` |
+| Sort | `Arrays.sort(arr);` |
+| Search | `Arrays.binarySearch(arr, key);` |
+| Convert to string | `Arrays.toString(arr);` |
+| Copy | `Arrays.copyOf(arr, newLen);` |
+| Compare contents | `Arrays.equals(a, b);` |
+
+## X. Arrays vs. Collections: When to Use Which?
+
+| Feature | Arrays | Collections (e.g., `ArrayList`) |
+| --- | --- | --- |
+| Length | Fixed | Dynamically resizable |
+| Types | Can store primitives | Can only store objects (use wrapper classes) |
+| Performance | Direct memory access, fastest | Slight overhead, but still efficient |
+| Functionality | Basic | Rich (add, remove, search, sort, etc.) |
+| Generics | Limited | Full support |
+
+**Rules of thumb**:
+- Length is known and fixed, and you want maximum performance → arrays
+- Need dynamic add/remove and rich operations → `ArrayList` and other collections
+- Multi-dimensional numerical computation (matrix operations) → two-dimensional arrays
+- API interfaces, business logic → collections
+
+## Conclusion
+
+Arrays are the "first lesson" in Java data structures. They are simple—a contiguous collection of the same type. They are powerful—underpinning classic algorithms like sorting and searching. And they are profound—revealing the workings of reference types and memory layout.
+
+Once you have mastered arrays, you have the ability to process data in bulk. In the chapters ahead, we will enter the world of object-oriented programming—learning about classes, objects, inheritance, and polymorphism. If arrays and control flow are Java's "skeleton," then object-oriented programming is Java's "soul." The story of coffee is about to unfold its most exciting chapter.

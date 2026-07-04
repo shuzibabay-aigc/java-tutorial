@@ -1,0 +1,523 @@
+---
+title: "HttpClient"
+chapter: 62
+stage: "第十一阶段"
+stageName: "数据库与网络"
+order: 4
+description: "理解旧 HttpURLConnection 的问题、Java 11+ 的 HttpClient API、同步 send 与异步 sendAsync、超时/Header/Body 设置、WebSocket API，并演示调用 REST API"
+pubDate: 2026-07-03
+tags: ["Java", "HttpClient", "HTTP", "REST", "WebSocket", "异步"]
+---
+
+# HttpClient
+
+上一章我们用裸 Socket 写了 TCP 通信——能发字节流，但要自己拼 HTTP 报文、解析状态码、处理 Chunked 编码……太累。HTTP 是互联网最常用的应用层协议，Java 当然要有现成的 API。这一章看 Java 11+ 的现代 **HttpClient**——同步异步一把梭，API 优雅，性能也好。
+
+## 一、旧 HttpURLConnection 的问题
+
+Java 早期内置的 HTTP 客户端是 `HttpURLConnection`（Java 1.1，1997 年）：
+
+```java
+URL url = new URL("https://api.example.com/users");
+HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+conn.setRequestMethod("GET");
+conn.setRequestProperty("Accept", "application/json");
+int code = conn.getResponseCode();
+try (BufferedReader r = new BufferedReader(
+        new InputStreamReader(conn.getInputStream()))) {
+    String line;
+    while ((line = r.readLine()) != null) System.out.println(line);
+}
+```
+
+它的毛病：
+
+1. **API 笨重**——`URLConnection` 设计于 1997 年，命名冗长、类型不友好。
+2. **默认阻塞**——没有异步支持，高并发要自己开线程池。
+3. **HTTP/2 支持差**——只能 HTTP/1.1，无法用 HTTP/2 的多路复用。
+4. **API 不直观**——`getResponseCode`/`getInputStream` 散落各处，Builder 模式缺失。
+5. **维护停滞**——Oracle 几乎不更新了。
+
+业界都用 Apache HttpClient、OkHttp 等第三方库。Java 9 引入、Java 11 标准化的新 `java.net.http.HttpClient` 终于给出了官方现代方案。
+
+## 二、HttpClient API 总览
+
+新 API 的三个核心类：
+
+| 类 | 作用 |
+| --- | --- |
+| `HttpClient` | 客户端，管连接池、HTTP 版本、超时等 |
+| `HttpRequest` | 请求，含 URL、方法、Header、Body |
+| `HttpResponse＜T＞` | 响应，含状态码、Header、Body（T 是 body 类型） |
+
+设计是 **Builder 模式 + 不可变**——HttpClient 和 HttpRequest 都是不可变对象，构建后线程安全，可复用。
+
+```java
+import java.net.URI;
+import java.net.http.*;
+import java.time.Duration;
+
+// 1. 创建 HttpClient (可复用, 线程安全)
+HttpClient client = HttpClient.newBuilder()
+    .version(HttpClient.Version.HTTP_2)        // 优先 HTTP/2
+    .connectTimeout(Duration.ofSeconds(10))    // 连接超时
+    .followRedirects(HttpClient.Redirect.NORMAL)  // 跟随重定向
+    .build();
+
+// 2. 构建请求
+HttpRequest req = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.github.com/users/octocat"))
+    .timeout(Duration.ofSeconds(10))
+    .header("Accept", "application/json")
+    .header("User-Agent", "Java HttpClient")
+    .GET()    // 可省略, 默认 GET
+    .build();
+
+// 3. 发请求 (同步)
+HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+
+System.out.println(resp.statusCode());         // 200
+System.out.println(resp.headers().firstValue("Content-Type"));
+System.out.println(resp.body());               // JSON 字符串
+```
+
+`HttpClient` 是重对象（内部有连接池），**全局建一个复用**——别每次请求都 new。
+
+## 三、同步请求：send
+
+`send` 阻塞当前线程直到响应回来：
+
+```java
+HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+```
+
+第二个参数是 `BodyHandler＜T＞`——告诉它怎么处理响应体：
+
+| BodyHandler | 处理方式 |
+| --- | --- |
+| `ofString()` | 当字符串 |
+| `ofByteArray()` | 当字节数组 |
+| `ofFile(Path)` | 直接写文件（适合下载大文件） |
+| `ofInputStream()` | 当 InputStream（流式处理） |
+| `ofLines()` | 当 `Stream＜String＞`（按行） |
+| `discarding()` | 丢弃 body（只关心状态码） |
+
+下载大文件用 `ofFile` 避免内存爆炸：
+
+```java
+HttpRequest req = HttpRequest.newBuilder()
+    .uri(URI.create("https://example.com/bigfile.zip"))
+    .build();
+Path file = Path.of("download.zip");
+HttpResponse<Path> resp = client.send(req, HttpResponse.BodyHandlers.ofFile(file));
+```
+
+## 四、异步请求：sendAsync
+
+`sendAsync` 立即返回 `CompletableFuture＜HttpResponse＜T＞＞`——不阻塞，回调在响应回来后触发：
+
+```java
+CompletableFuture<HttpResponse<String>> future =
+    client.sendAsync(req, HttpResponse.BodyHandlers.ofString());
+
+future.thenAccept(resp -> {
+    System.out.println("状态码: " + resp.statusCode());
+    System.out.println("Body: " + resp.body());
+}).exceptionally(e -> {
+    System.err.println("请求失败: " + e.getMessage());
+    return null;
+});
+
+// 主线程继续干别的...
+future.join();   // 需要时阻塞等
+```
+
+异步的威力在**并发请求**——同时发 10 个请求，总耗时≈最慢的那个，而不是 10 个加起来：
+
+```java
+List<URI> uris = List.of(uri1, uri2, uri3, /* ... */);
+
+List<CompletableFuture<String>> futures = uris.stream()
+    .map(uri -> client.sendAsync(
+            HttpRequest.newBuilder(uri).build(),
+            HttpResponse.BodyHandlers.ofString())
+        .thenApply(HttpResponse::body))
+    .toList();
+
+CompletableFuture<Void> all = CompletableFuture.allOf(
+    futures.toArray(new CompletableFuture[0]));
+all.join();   // 等全部完成
+
+List<String> results = futures.stream()
+    .map(CompletableFuture::join)
+    .toList();
+```
+
+10 个请求并发发，比串行快 10 倍——这是异步的价值。
+
+## 五、POST/PUT/DELETE 与 Body
+
+发送 Body 用 `HttpRequest.BodyPublishers`：
+
+```java
+import static java.net.http.HttpRequest.BodyPublishers.*;
+
+// POST JSON
+String json = "{\"name\":\"张三\",\"age\":20}";
+HttpRequest postReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.example.com/users"))
+    .header("Content-Type", "application/json")
+    .POST(ofString(json))           // 字符串 body
+    .build();
+
+// POST 表单
+String form = "name=张三&age=20";
+HttpRequest formReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://example.com/login"))
+    .header("Content-Type", "application/x-www-form-urlencoded")
+    .POST(ofString(form))
+    .build();
+
+// POST 文件 (上传)
+HttpRequest uploadReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://example.com/upload"))
+    .POST(ofFile(Path.of("data.bin")))
+    .build();
+
+// PUT
+HttpRequest putReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.example.com/users/1"))
+    .PUT(ofString(json))
+    .build();
+
+// DELETE
+HttpRequest delReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.example.com/users/1"))
+    .DELETE()
+    .build();
+```
+
+`BodyPublishers` 的几个工厂：
+
+- `ofString(s)` —— 字符串。
+- `ofString(s, charset)` —— 指定编码。
+- `ofByteArray(bytes)` —— 字节数组。
+- `ofFile(path)` —— 文件（流式，不占内存）。
+- `ofInputStream(supplier)` —— 从 InputStream 读。
+- `noBody()` —— 无 body。
+
+## 六、超时、Header 与配置
+
+### 6.1 超时
+
+两层超时：
+
+```java
+HttpClient client = HttpClient.newBuilder()
+    .connectTimeout(Duration.ofSeconds(5))   // 连接建立超时
+    .build();
+
+HttpRequest req = HttpRequest.newBuilder()
+    .uri(uri)
+    .timeout(Duration.ofSeconds(10))         // 整个请求超时
+    .build();
+```
+
+`connectTimeout` 限制 TCP 握手；`timeout` 限制整个请求（含读 body）。超时抛 `HttpTimeoutException`。
+
+### 6.2 Header
+
+```java
+HttpRequest req = HttpRequest.newBuilder()
+    .uri(uri)
+    .header("Accept", "application/json")
+    .header("Authorization", "Bearer " + token)
+    .header("Content-Type", "application/json; charset=utf-8")
+    .build();
+
+// 同名多值用 headers
+.headers("X-Custom", "v1", "X-Custom", "v2")
+
+// 或 setHeader 覆盖
+.setHeader("User-Agent", "MyApp/1.0")
+```
+
+读响应 Header：
+
+```java
+HttpResponse<String> resp = client.send(req, ofString());
+Optional<String> ct = resp.headers().firstValue("Content-Type");
+List<String> cookies = resp.headers().allValues("Set-Cookie");
+```
+
+### 6.3 HTTP/2 与重定向
+
+```java
+HttpClient client = HttpClient.newBuilder()
+    .version(HttpClient.Version.HTTP_2)             // 优先 HTTP/2 (默认)
+    .followRedirects(HttpClient.Redirect.NORMAL)    // 跟随重定向 (同协议)
+    .proxy(ProxySelector.of(new InetSocketAddress("proxy.host", 8080)))  // 代理
+    .authenticator(new Authenticator() {            // 认证
+        @Override protected PasswordAuthentication getPasswordAuthentication() {
+            return new PasswordAuthentication("user", "pwd".toCharArray());
+        }
+    })
+    .build();
+```
+
+`Redirect` 三档：`NEVER`（不跟随）、`NORMAL`（跟随同协议）、`ALWAYS`（跨协议也跟，如 HTTPS→HTTP，有安全风险）。
+
+## 七、WebSocket
+
+Java 9+ 的 `java.net.http.WebSocket` 提供原生 WebSocket 客户端：
+
+```java
+import java.net.http.WebSocket;
+import java.net.URI;
+
+WebSocket ws = HttpClient.newHttpClient()
+    .newWebSocketBuilder()
+    .connectTimeout(Duration.ofSeconds(5))
+    .buildAsync(URI.create("wss://echo.example.com/socket"),
+        new WebSocket.Listener() {
+            @Override public void onOpen(WebSocket webSocket) {
+                System.out.println("[WS] 连接打开");
+                webSocket.sendText("Hello WebSocket", true);
+            }
+            @Override public CompletionStage<?> onText(WebSocket webSocket,
+                    CharSequence data, boolean last) {
+                System.out.println("[WS] 收到: " + data);
+                return null;
+            }
+            @Override public void onError(WebSocket webSocket, Throwable error) {
+                System.err.println("[WS] 错误: " + error);
+            }
+            @Override public CompletionStage<?> onClose(WebSocket webSocket,
+                    int statusCode, String reason) {
+                System.out.println("[WS] 关闭: " + statusCode + " " + reason);
+                return null;
+            }
+        })
+    .join();
+
+ws.sendText("ping", true);
+ws.sendClose(WebSocket.NORMAL_CLOSURE, "bye");
+```
+
+WebSocket 是双向全双工通信——服务端能主动推消息，适合聊天、实时通知、股票行情。`Listener` 是回调接口，每个事件对应一个方法。
+
+## 八、实战：调用 REST API
+
+由于 Piston 在线环境**不一定能访问外网**，下面代码做了**双模式**——能联网就调真实 API，不能联网就用本地模拟服务器演示完整 HTTP 流程。
+
+<CodeRunner code={`import java.io.*;
+import java.net.*;
+import java.net.http.*;
+import java.time.Duration;
+import java.util.*;
+import java.util.concurrent.*;
+import com.sun.net.httpserver.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== HttpClient 实战 ===\\n");
+
+        // 启动本地 HTTP 模拟服务器 (这样无论能否联网都能演示)
+        int port = 18888;
+        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+        server.createContext("/api/users", exchange -> {
+            String method = exchange.getRequestMethod();
+            String path = exchange.getRequestURI().getPath();
+            String response;
+            int status = 200;
+
+            if ("GET".equals(method) && path.equals("/api/users")) {
+                response = "[{\\"id\\":1,\\"name\\":\\"张三\\"},{\\"id\\":2,\\"name\\":\\"李四\\"}]";
+            } else if ("GET".equals(method) && path.matches("/api/users/\\\\d+")) {
+                int id = Integer.parseInt(path.substring("/api/users/".length()));
+                response = "{\\"id\\":" + id + ",\\"name\\":\\"用户" + id + "\\"}";
+            } else if ("POST".equals(method)) {
+                String body = new String(exchange.getRequestBody().readAllBytes());
+                response = "{\\"status\\":\\"created\\",\\"received\\":" + body + "}";
+                status = 201;
+            } else if ("DELETE".equals(method)) {
+                response = "{\\"status\\":\\"deleted\\"}";
+            } else {
+                response = "{\\"error\\":\\"not found\\"}";
+                status = 404;
+            }
+
+            byte[] respBytes = response.getBytes("UTF-8");
+            exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+            exchange.sendResponseHeaders(status, respBytes.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(respBytes);
+            }
+        });
+        server.start();
+        System.out.println("[模拟服务器] 启动在 http://localhost:" + port);
+        Thread.sleep(200);
+
+        // 创建 HttpClient (全局复用)
+        HttpClient client = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)   // 模拟环境用 1.1
+            .connectTimeout(Duration.ofSeconds(3))
+            .build();
+
+        String base = "http://localhost:" + port + "/api/users";
+
+        // 1. GET 同步
+        System.out.println("\\n--- 1. GET 同步 (查询所有用户) ---");
+        HttpRequest getReq = HttpRequest.newBuilder()
+            .uri(URI.create(base))
+            .header("Accept", "application/json")
+            .timeout(Duration.ofSeconds(3))
+            .GET()
+            .build();
+        HttpResponse<String> getResp = client.send(getReq,
+            HttpResponse.BodyHandlers.ofString());
+        System.out.println("状态码: " + getResp.statusCode());
+        System.out.println("Content-Type: "
+            + getResp.headers().firstValue("Content-Type").orElse("?"));
+        System.out.println("Body: " + getResp.body());
+
+        // 2. GET 路径参数
+        System.out.println("\\n--- 2. GET 单个用户 (路径参数) ---");
+        HttpRequest getOne = HttpRequest.newBuilder()
+            .uri(URI.create(base + "/1"))
+            .GET().build();
+        HttpResponse<String> r2 = client.send(getOne,
+            HttpResponse.BodyHandlers.ofString());
+        System.out.println("Body: " + r2.body());
+
+        // 3. POST 创建
+        System.out.println("\\n--- 3. POST 创建用户 ---");
+        String json = "{\\"name\\":\\"王五\\",\\"age\\":25}";
+        HttpRequest postReq = HttpRequest.newBuilder()
+            .uri(URI.create(base))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(json))
+            .build();
+        HttpResponse<String> r3 = client.send(postReq,
+            HttpResponse.BodyHandlers.ofString());
+        System.out.println("状态码: " + r3.statusCode() + " (201 Created)");
+        System.out.println("Body: " + r3.body());
+
+        // 4. DELETE
+        System.out.println("\\n--- 4. DELETE 删除 ---");
+        HttpRequest delReq = HttpRequest.newBuilder()
+            .uri(URI.create(base + "/1"))
+            .DELETE().build();
+        HttpResponse<String> r4 = client.send(delReq,
+            HttpResponse.BodyHandlers.ofString());
+        System.out.println("Body: " + r4.body());
+
+        // 5. 异步并发请求
+        System.out.println("\\n--- 5. 异步并发请求 5 个 ---");
+        long t0 = System.currentTimeMillis();
+        List<CompletableFuture<HttpResponse<String>>> futures = new ArrayList<>();
+        for (int i = 1; i <= 5; i++) {
+            HttpRequest r = HttpRequest.newBuilder()
+                .uri(URI.create(base + "/" + i))
+                .build();
+            futures.add(client.sendAsync(r, HttpResponse.BodyHandlers.ofString()));
+        }
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        long cost = System.currentTimeMillis() - t0;
+        System.out.println("5 个并发请求总耗时: " + cost + " ms");
+        for (int i = 0; i < futures.size(); i++) {
+            System.out.println("  请求 " + (i + 1) + ": "
+                + futures.get(i).get().body());
+        }
+
+        // 6. 错误处理
+        System.out.println("\\n--- 6. 错误处理 (404) ---");
+        HttpRequest bad = HttpRequest.newBuilder()
+            .uri(URI.create(base + "/nonexistent"))
+            .GET().build();
+        HttpResponse<String> r6 = client.send(bad,
+            HttpResponse.BodyHandlers.ofString());
+        System.out.println("状态码: " + r6.statusCode() + " (404 Not Found)");
+        System.out.println("Body: " + r6.body());
+
+        // 7. 异步异常处理
+        System.out.println("\\n--- 7. 异步请求异常处理 ---");
+        HttpRequest timeoutReq = HttpRequest.newBuilder()
+            .uri(URI.create("http://192.0.2.1:9999"))   // 不可达地址
+            .timeout(Duration.ofMillis(500))
+            .GET().build();
+        client.sendAsync(timeoutReq, HttpResponse.BodyHandlers.ofString())
+            .thenAccept(r -> System.out.println("不应该到这里"))
+            .exceptionally(e -> {
+                System.out.println("捕获异常: " + e.getCause().getClass().getSimpleName()
+                    + " - " + e.getCause().getMessage());
+                return null;
+            })
+            .join();
+
+        server.stop(0);
+        System.out.println("\\n=== HttpClient 关键点 ===");
+        System.out.println("1. HttpClient 全局复用 (含连接池)");
+        System.out.println("2. send 同步, sendAsync 异步返回 CompletableFuture");
+        System.out.println("3. BodyHandlers 决定 body 处理方式");
+        System.out.println("4. BodyPublishers 决定发送 body 方式");
+        System.out.println("5. 异步 + allOf 实现高并发请求");
+        System.out.println("6. WebSocket 用 newWebSocketBuilder + Listener");
+    }
+}`} />
+
+> **观察重点**：
+> - **HttpClient 复用一个实例**——内部有连接池，不要每次 new。
+> - **同步 `send`、异步 `sendAsync`**——异步返回 `CompletableFuture`，可 `thenAccept`/`exceptionally` 链式处理。
+> - **5 个并发请求总耗时≈单个请求**——异步并发是 HttpClient 的杀手锏。
+> - **状态码 201/404 都能拿到**——通过 `statusCode()` 判断业务结果。
+> - **异常进 `exceptionally`**——超时、连接失败等异常不会进 `thenAccept`，要单独处理。
+> - **`BodyHandlers.ofString` 把 body 当字符串**——大文件用 `ofFile` 流式落盘。
+
+## 九、HttpClient vs 第三方库
+
+| 库 | 优点 | 缺点 |
+| --- | --- | --- |
+| **Java HttpClient** | 内置无需依赖、API 现代、HTTP/2 | 功能相对简单 |
+| **Apache HttpClient** | 功能丰富、生态成熟 | API 略繁琐、依赖大 |
+| **OkHttp** | API 优雅、性能好、Android 主流 | 需依赖 |
+| **Retrofit** | 声明式 REST 客户端（基于 OkHttp） | 需依赖 |
+
+**选型建议**：
+
+- 简单项目、不想引依赖 → Java HttpClient。
+- Spring Boot 项目 → 用 `RestTemplate`/`WebClient`（底层就是 HttpClient/Jetty）。
+- 复杂需求（拦截器、复杂重试）→ Apache HttpClient 或 OkHttp。
+- 声明式 REST（Feign 风格）→ Spring Cloud OpenFeign。
+
+## 十、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| `HttpClient` | 客户端，复用，含连接池 |
+| `HttpRequest` | 请求，Builder 构建，不可变 |
+| `HttpResponse＜T＞` | 响应，T 由 BodyHandler 决定 |
+| `send` | 同步阻塞 |
+| `sendAsync` | 异步返回 `CompletableFuture` |
+| `BodyHandlers` | 处理响应体（ofString/ofFile/...） |
+| `BodyPublishers` | 生成请求体（ofString/ofFile/...） |
+| `WebSocket` | 双向全双工通信，Listener 回调 |
+
+**记忆口诀**：
+
+- **HttpClient 全局复用**——别每次 new，连接池白瞎了。
+- **同步 send、异步 sendAsync**——异步返回 `CompletableFuture`。
+- **BodyHandler 处理响应**——ofString 当字符串，ofFile 落盘。
+- **并发用 allOf**——同时发 N 个，总耗时≈最慢的。
+- **超时两层**——connectTimeout 连接、timeout 整个请求。
+
+## 结语：第十一阶段完结
+
+这一章我们用 Java 11+ 的 HttpClient 调用了 REST API——同步异步都有，API 优雅。回头看第十一阶段：
+
+- **第 59 章 JDBC 详解** —— 数据库连接、PreparedStatement、事务、批处理。
+- **第 60 章 连接池** —— HikariCP/Druid，避免反复建连接。
+- **第 61 章 网络编程** —— Socket/ServerSocket，TCP/UDP 通信。
+- **第 62 章 HttpClient（本章）** —— 现代 HTTP 客户端，同步异步。
+
+这四章让你能和"外部世界"打交道——数据库、网络、HTTP。下一阶段我们离开"通信"，转向**工程化与生态**——Maven/Gradle 构建工具、Git 版本控制、JUnit 测试、日志框架、Lombok——把"能跑的代码"变成"能上线的产品"。

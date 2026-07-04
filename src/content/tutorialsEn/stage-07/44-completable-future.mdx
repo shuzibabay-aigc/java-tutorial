@@ -1,0 +1,501 @@
+---
+title: "CompletableFuture"
+chapter: 44
+stage: "Stage 7"
+stageName: "Concurrent Programming"
+order: 11
+description: "Master CompletableFuture creation, async callbacks, exception handling, multi-task composition, chained orchestration with thenCompose/thenCombine, and hands-on async aggregation of multiple interface calls"
+pubDate: 2026-07-03
+tags: ["Java", "CompletableFuture", "Async Programming", "Future", "Promise"]
+---
+
+# CompletableFuture
+
+The thread pools of the previous chapter let us "submit tasks." But after getting the result, what then? `Future.get()` is blocking — you must wait for the result before continuing; there is no "auto-callback on completion." This has long been a pain point of Java async programming.
+
+JDK 8 brought `CompletableFuture` — a composable, callback-friendly, exception-handling async programming API. It brought Java async programming up to the level of JavaScript Promises, C# Tasks, and Scala Futures. In modern microservice architectures, "calling multiple interfaces in parallel and aggregating the results" is almost standard — `CompletableFuture` is the core tool of that playbook.
+
+## 1. The Limits of Future
+
+First, the problems of `Future`:
+
+```java
+ExecutorService pool = Executors.newFixedThreadPool(4);
+Future<String> future = pool.submit(() -> queryDb());
+
+// can only block and wait
+String result = future.get();   // blocks!
+
+// no callback
+// cannot compose: "after A finishes, use A's result to call B"
+// cannot merge: "run A and B in parallel, wait for both"
+// no exception handling: "return a default value on failure"
+```
+
+`Future`'s pain points:
+
+- **Only blocking `get()`** — no "callback on completion."
+- **Cannot chain** — to run B with A's result after A finishes, you must manually `get()` then `submit`.
+- **Cannot merge multiple** — to run A and B in parallel and wait for both, you write your own `CountDownLatch`.
+- **Weak exception handling** — `get()` throws `ExecutionException`, but there is no "fall back to a default on failure."
+
+`CompletableFuture` solves all of these.
+
+## 2. Creating a CompletableFuture
+
+### 2.1 Running Tasks Asynchronously
+
+```java
+// no return value
+CompletableFuture<Void> f1 = CompletableFuture.runAsync(() -> {
+    System.out.println("running on " + Thread.currentThread().getName());
+});
+
+// with a return value
+CompletableFuture<String> f2 = CompletableFuture.supplyAsync(() -> {
+    return "result from " + Thread.currentThread().getName();
+});
+
+System.out.println(f2.join());   // join is like get but does not throw checked exceptions
+```
+
+`runAsync` takes a `Runnable` and returns `CompletableFuture＜Void＞`; `supplyAsync` takes a `Supplier＜T＞` and returns `CompletableFuture＜T＞`.
+
+### 2.2 Specifying a Thread Pool
+
+The default is `ForkJoinPool.commonPool()` — as said before, **do not run blocking tasks on commonPool**. Production code should specify its own pool:
+
+```java
+ExecutorService myPool = Executors.newFixedThreadPool(8);
+CompletableFuture<String> f = CompletableFuture.supplyAsync(() -> query(), myPool);
+```
+
+### 2.3 Known Results
+
+```java
+CompletableFuture<String> done = CompletableFuture.completedFuture("known value");
+CompletableFuture<String> failed = CompletableFuture.failedFuture(new RuntimeException("failure"));
+```
+
+`failedFuture` is a Java 9+ method.
+
+### 2.4 join vs get
+
+| Method | Blocks | Exceptions |
+| --- | --- | --- |
+| `get()` | Yes | Throws `InterruptedException` + `ExecutionException` |
+| `join()` | Yes | Throws `CompletionException` (unchecked) |
+| `getNow(T)` | No | Returns the default if not complete |
+| `get(long, unit)` | Yes | Throws `TimeoutException` on timeout |
+
+`join` is good for fetching a value at the end of a fluent API — it does not throw checked exceptions, sparing you `try-catch`.
+
+## 3. Async Callbacks
+
+### 3.1 thenApply: Transform the Result
+
+```java
+CompletableFuture<Integer> f = CompletableFuture
+    .supplyAsync(() -> "42")
+    .thenApply(Integer::parseInt)        // String → Integer
+    .thenApply(x -> x * 2);              // 42 → 84
+
+System.out.println(f.join());   // 84
+```
+
+`thenApply` takes a `Function＜T, R＞` — it transforms the previous step's result into a new value.
+
+### 3.2 thenAccept: Consume the Result
+
+```java
+CompletableFuture<Void> f = CompletableFuture
+    .supplyAsync(() -> "hello")
+    .thenAccept(s -> System.out.println("got: " + s));   // consume, no return
+```
+
+`thenAccept` takes a `Consumer＜T＞` — consumes the result, returns `CompletableFuture＜Void＞`.
+
+### 3.3 thenRun: Don't Care About the Result, Just Trigger an Action
+
+```java
+CompletableFuture<Void> f = CompletableFuture
+    .supplyAsync(() -> "hello")
+    .thenRun(() -> System.out.println("done, don't care about the result"));
+```
+
+`thenRun` takes a `Runnable` — runs after the previous step finishes, without receiving its result.
+
+### 3.4 The "Async" Variants of Callbacks
+
+Every callback method has an `Async` variant:
+
+```java
+.thenApply(fn)            // runs on the thread that completed the previous step
+.thenApplyAsync(fn)       // submits to ForkJoinPool.commonPool
+.thenApplyAsync(fn, pool) // submits to the specified pool
+```
+
+**Default non-Async** runs on the thread that completed the previous step — this may be intentional (avoiding thread switching) or a trap (running on the main thread). **Async** resubmits to a pool — an explicit thread switch.
+
+Practical advice: for short chains non-Async is fine; for long chains or to avoid blocking the main thread, use Async.
+
+### 3.5 Quick Reference
+
+| Method | Input | Returns | Description |
+| --- | --- | --- | --- |
+| `thenApply` | `Function＜T,R＞` | `R` | Transform |
+| `thenAccept` | `Consumer＜T＞` | `void` | Consume |
+| `thenRun` | `Runnable` | `void` | Trigger |
+| `thenApplyAsync` etc. | same | same | Execute asynchronously |
+
+## 4. Exception Handling
+
+`CompletableFuture`'s exceptions are not thrown at `get` — they can be handled inside the chain.
+
+### 4.1 exceptionally: Only on Exception
+
+```java
+CompletableFuture<String> f = CompletableFuture
+    .supplyAsync(() -> { throw new RuntimeException("DB down"); })
+    .exceptionally(ex -> "default value");
+System.out.println(f.join());   // default value
+```
+
+`exceptionally` takes a `Function＜Throwable, T＞` — runs only when the previous step throws, returns a default value to recover.
+
+### 4.2 handle: Handle Both Exception and Success
+
+```java
+CompletableFuture<String> f = CompletableFuture
+    .supplyAsync(() -> { if (Math.random() < 0.5) throw new RuntimeException(); return "ok"; })
+    .handle((result, ex) -> {
+        if (ex != null) return "failed: " + ex.getMessage();
+        return "success: " + result;
+    });
+```
+
+`handle` takes a `BiFunction＜T, Throwable, R＞` — invoked on both exception and success, returns based on the situation.
+
+### 4.3 whenComplete: Observe Without Modifying
+
+```java
+CompletableFuture<String> f = CompletableFuture
+    .supplyAsync(() -> "ok")
+    .whenComplete((result, ex) -> {
+        if (ex != null) log.error("failed", ex);
+        else log.info("success: {}", result);
+    });
+```
+
+`whenComplete` takes a `BiConsumer＜T, Throwable＞` — observes the result or exception **but does not modify** — the return type matches the original future. Commonly used for logging, monitoring, cleanup.
+
+### 4.4 Comparison of the Three
+
+| Method | When triggered | Can modify result |
+| --- | --- | --- |
+| `exceptionally` | Only on exception | ✓ (recover to a default value) |
+| `handle` | Both exception and success | ✓ |
+| `whenComplete` | Both exception and success | ✗ (observe only) |
+
+## 5. Multi-Task Composition
+
+### 5.1 thenCombine: Merge Two Futures
+
+```java
+CompletableFuture<Integer> price = CompletableFuture.supplyAsync(() -> 100);
+CompletableFuture<Double> discount = CompletableFuture.supplyAsync(() -> 0.8);
+
+CompletableFuture<Integer> finalPrice = price.thenCombine(discount, (p, d) -> (int)(p * d));
+System.out.println(finalPrice.join());   // 80
+```
+
+`thenCombine` merges the results of two Futures — both run in parallel, and when both finish the merge function is called.
+
+### 5.2 thenCompose: Chain (flatMap)
+
+```java
+// serial: first find the user, then find the order
+CompletableFuture<User> userFuture = CompletableFuture.supplyAsync(() -> findUser(1));
+CompletableFuture<Order> orderFuture = userFuture.thenCompose(user ->
+    CompletableFuture.supplyAsync(() -> findOrder(user.orderId))
+);
+```
+
+`thenCompose` takes a `Function＜T, CompletableFuture＜R＞＞` — after the previous step finishes, it uses the result to start **another async task** and uses that Future's result as the final result. This is `flatMap` semantics — it avoids `CompletableFuture＜CompletableFuture＜R＞＞` nesting.
+
+### 5.3 allOf: Wait for All to Complete
+
+```java
+CompletableFuture<String> f1 = CompletableFuture.supplyAsync(() -> "A");
+CompletableFuture<String> f2 = CompletableFuture.supplyAsync(() -> "B");
+CompletableFuture<String> f3 = CompletableFuture.supplyAsync(() -> "C");
+
+CompletableFuture<Void> all = CompletableFuture.allOf(f1, f2, f3);
+all.join();   // wait for all three
+
+// get each result
+String a = f1.join();
+String b = f2.join();
+String c = f3.join();
+```
+
+`allOf` returns `CompletableFuture＜Void＞` — completes when all are complete. Note it **does not return a collection of results** — you must `join()` each future separately to get the results.
+
+### 5.4 anyOf: Any One Completes
+
+```java
+CompletableFuture<String> fast = CompletableFuture.supplyAsync(() -> {
+    Thread.sleep(100); return "fast";
+});
+CompletableFuture<String> slow = CompletableFuture.supplyAsync(() -> {
+    Thread.sleep(1000); return "slow";
+});
+
+Object first = CompletableFuture.anyOf(fast, slow).join();
+System.out.println(first);   // fast
+```
+
+`anyOf` completes when any one completes — returns the fastest result. Commonly used for "multi-replica reads, fastest wins."
+
+### 5.5 Quick Reference
+
+| Method | Description |
+| --- | --- |
+| `thenCombine(other, fn)` | Merge two futures' results |
+| `thenCompose(fn)` | Chain — previous result starts a new future |
+| `allOf(f1, f2, ...)` | Wait for all to complete |
+| `anyOf(f1, f2, ...)` | Any one completes |
+
+## 6. Other Common Methods
+
+### 6.1 orTimeout / completeOnTimeout (Java 9+)
+
+```java
+CompletableFuture<String> f = CompletableFuture
+    .supplyAsync(() -> { Thread.sleep(5000); return "late"; })
+    .orTimeout(1, TimeUnit.SECONDS);   // 1 second timeout throws TimeoutException
+// f.join() throws TimeoutException
+
+CompletableFuture<String> f2 = CompletableFuture
+    .supplyAsync(() -> { Thread.sleep(5000); return "late"; })
+    .completeOnTimeout("default", 1, TimeUnit.SECONDS);   // 1 second timeout returns default value
+// f2.join() returns "default"
+```
+
+### 6.2 complete / completeExceptionally
+
+Manually complete a future:
+
+```java
+CompletableFuture<String> f = new CompletableFuture<>();
+f.complete("manual complete");   // or f.completeExceptionally(new RuntimeException())
+```
+
+Commonly used to "turn a callback-style API into a CompletableFuture-style one."
+
+### 6.3 delayedExecutor (Java 9+)
+
+```java
+CompletableFuture<String> f = CompletableFuture
+    .supplyAsync(() -> "delayed",
+        CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS));
+// executes after 1 second
+```
+
+## 7. Hands-On: Asynchronous Aggregation of Multiple Interfaces
+
+The example below simulates a "microservice gateway" — calling the user, order, and product interfaces in parallel and aggregating the result. It also demonstrates `thenCompose` chaining, `thenCombine` merging, `allOf` wait-for-all, `anyOf` first-wins, and exception handling.
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.*;
+
+public class Main {
+    // simulated thread pool
+    static final ExecutorService pool = Executors.newFixedThreadPool(6);
+
+    public static void main(String[] args) throws Exception {
+        // === 1. thenApply chained transform ===
+        System.out.println("=== thenApply chained transform ===");
+        CompletableFuture<Integer> f = CompletableFuture
+            .supplyAsync(() -> "42", pool)
+            .thenApply(Integer::parseInt)
+            .thenApply(x -> x * 2);
+        System.out.println("Result: " + f.join());
+
+        // === 2. Exception handling ===
+        System.out.println("\\n=== Exception handling ===");
+        CompletableFuture<String> safe = CompletableFuture
+            .supplyAsync(() -> { throw new RuntimeException("DB down"); }, pool)
+            .exceptionally(ex -> "default value (" + ex.getCause().getMessage() + ")");
+        System.out.println("exceptionally result: " + safe.join());
+
+        CompletableFuture<String> handled = CompletableFuture
+            .supplyAsync(() -> "ok", pool)
+            .handle((r, ex) -> ex != null ? "failed" : "success " + r);
+        System.out.println("handle result: " + handled.join());
+
+        // === 3. thenCompose chaining ===
+        System.out.println("\\n=== thenCompose chaining (find user → find order) ===");
+        long t1 = System.currentTimeMillis();
+        CompletableFuture<String> chain = CompletableFuture
+            .supplyAsync(() -> findUser(1), pool)               // 200ms
+            .thenCompose(user -> CompletableFuture.supplyAsync(  // 300ms
+                () -> findOrder(user), pool))
+            .thenApply(order -> "user order: " + order);
+        System.out.println("Result: " + chain.join());
+        System.out.println("Took: " + (System.currentTimeMillis() - t1) + " ms (serial 500ms)");
+
+        // === 4. allOf parallel aggregation (gateway pattern) ===
+        System.out.println("\\n=== allOf parallel aggregation (gateway pattern) ===");
+        long t2 = System.currentTimeMillis();
+        CompletableFuture<String> userF = CompletableFuture.supplyAsync(() -> getUser(1), pool);
+        CompletableFuture<String> orderF = CompletableFuture.supplyAsync(() -> getOrders(1), pool);
+        CompletableFuture<String> productF = CompletableFuture.supplyAsync(() -> getProducts(), pool);
+
+        CompletableFuture.allOf(userF, orderF, productF)
+            .thenRun(() -> {
+                String aggregated = String.format("{user: %s, orders: %s, products: %s}",
+                    userF.join(), orderF.join(), productF.join());
+                System.out.println("Aggregated result: " + aggregated);
+            }).join();
+        System.out.println("Took: " + (System.currentTimeMillis() - t2)
+            + " ms (parallel ≈ 300ms, serial ≈ 600ms)");
+
+        // === 5. anyOf first to return ===
+        System.out.println("\\n=== anyOf first to return ===");
+        CompletableFuture<String> primary = CompletableFuture
+            .supplyAsync(() -> { sleep(200); return "primary node"; }, pool);
+        CompletableFuture<String> replica = CompletableFuture
+            .supplyAsync(() -> { sleep(100); return "replica"; }, pool);
+        Object first = CompletableFuture.anyOf(primary, replica).join();
+        System.out.println("First to return: " + first);
+
+        // === 6. thenCombine merge two results ===
+        System.out.println("\\n=== thenCombine merge ===");
+        CompletableFuture<Integer> price = CompletableFuture.supplyAsync(() -> { sleep(100); return 100; }, pool);
+        CompletableFuture<Double> discount = CompletableFuture.supplyAsync(() -> { sleep(100); return 0.8; }, pool);
+        Integer finalPrice = price.thenCombine(discount, (p, d) -> (int)(p * d)).join();
+        System.out.println("Final price: " + finalPrice);
+
+        // === 7. orTimeout timeout (Java 9+) ===
+        System.out.println("\\n=== orTimeout timeout ===");
+        long t3 = System.currentTimeMillis();
+        try {
+            String r = CompletableFuture
+                .supplyAsync(() -> { sleep(2000); return "slow"; }, pool)
+                .orTimeout(500, TimeUnit.MILLISECONDS)
+                .join();
+            System.out.println("Result: " + r);
+        } catch (CompletionException e) {
+            System.out.println("Timed out: " + e.getCause().getClass().getSimpleName()
+                + ", took " + (System.currentTimeMillis() - t3) + " ms");
+        }
+
+        // === 8. Failure retry pattern (using handle) ===
+        System.out.println("\\n=== Failure retry pattern ===");
+        AtomicInteger attempts = new AtomicInteger();
+        String result = retryWithFallback(() -> {
+            int n = attempts.incrementAndGet();
+            if (n < 3) {
+                System.out.println("  attempt " + n + " failed");
+                throw new RuntimeException("failure " + n);
+            }
+            return "success! attempt " + n;
+        }, 3);
+        System.out.println("Final: " + result);
+
+        pool.shutdown();
+        pool.awaitTermination(2, TimeUnit.SECONDS);
+    }
+
+    // simulated interfaces
+    static String findUser(int id) { sleep(200); return "User-" + id + "(orderId=99)"; }
+    static String findOrder(String userInfo) { sleep(300); return "Order-99 belongs to " + userInfo; }
+    static String getUser(int id) { sleep(300); return "User-" + id; }
+    static String getOrders(int id) { sleep(250); return "[o1,o2,o3]"; }
+    static String getProducts() { sleep(200); return "[p1,p2,p3]"; }
+    static void sleep(long ms) { try { Thread.sleep(ms); } catch (InterruptedException e) {} }
+
+    // simple failure retry — recursively uses exceptionally
+    static String retryWithFallback(java.util.function.Supplier<String> action, int maxRetries) {
+        AtomicInteger tries = new AtomicInteger();
+        CompletableFuture<String> f = new CompletableFuture<>();
+        attempt(action, maxRetries, f);
+        return f.join();
+    }
+
+    static void attempt(java.util.function.Supplier<String> action, int left,
+                        CompletableFuture<String> result) {
+        CompletableFuture.supplyAsync(() -> {
+            try {
+                return action.get();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }, pool).handle((r, ex) -> {
+            if (ex != null) {
+                if (left > 1) {
+                    attempt(action, left - 1, result);
+                } else {
+                    result.completeExceptionally(ex);
+                }
+            } else {
+                result.complete(r);
+            }
+            return null;
+        });
+    }
+}`} />
+
+> **What to watch for**:
+> - **thenApply chain**: `"42"` → `42` → `84`, transforming at each step.
+> - **exceptionally**: on exception returns a default value, restoring normalcy.
+> - **thenCompose**: user query and order query are **serial** — total ≈ 200+300=500ms (not parallel).
+> - **allOf**: three interfaces in **parallel** — total ≈ max(300, 250, 200) = 300ms, not 750ms serial.
+> - **anyOf**: the replica is faster (100ms < 200ms), returns the replica result.
+> - **thenCombine**: price and discount run in parallel, merged into the final price.
+> - **orTimeout**: 500ms timeout — the 2000ms task does not finish, at 500ms a `TimeoutException` is thrown.
+> - **Failure retry**: recursive `handle` — first two attempts fail, the third succeeds.
+
+## 8. Chapter Summary
+
+| Method | Use |
+| --- | --- |
+| `runAsync`/`supplyAsync` | Create async tasks |
+| `thenApply` | Transform result |
+| `thenAccept`/`thenRun` | Consume / trigger |
+| `thenCombine` | Merge two futures |
+| `thenCompose` | Chain (flatMap) |
+| `allOf` | Wait for all to complete |
+| `anyOf` | Any one completes |
+| `exceptionally` | Recover only on exception |
+| `handle` | Handle both exception and success |
+| `whenComplete` | Observe, do not modify |
+| `orTimeout` | Timeout throws exception (Java 9+) |
+| `completeOnTimeout` | Timeout returns default value (Java 9+) |
+
+| Concept | Key point |
+| --- | --- |
+| Future limits | Only blocking get; no callback / composition / exception handling |
+| Async variants | Submitted to a pool; non-Async runs on the previous step's thread |
+| thenApply vs thenCompose | The former transforms a value, the latter chains another future |
+| thenCombine vs allOf | The former merges two results, the latter waits for all but you join each to get values |
+| exceptionally vs handle | The former only on exception, the latter on both |
+| Default pool | ForkJoinPool.commonPool(); production must specify a custom pool |
+| join vs get | join does not throw checked exceptions, convenient for chaining |
+
+**Mnemonics**:
+
+- **`thenApply` transforms, `thenCompose` chains, `thenCombine` merges** — the three core compositions.
+- **`allOf` waits for all, `anyOf` first one done** — multi-task coordination.
+- **`exceptionally` recovers on exception, `handle` handles both** — exception tools.
+- **Don't use the default commonPool** — specify your own pool for blocking tasks.
+- **`orTimeout` prevents waiting forever** — the Java 9+ timeout weapon.
+
+## Closing: From Synchronous to Asynchronous
+
+`CompletableFuture` is the watershed of Java async programming — it makes "calling multiple interfaces in parallel, serial orchestration, exception fallback, timeout control" possible. In microservice architectures, gateways aggregating multiple downstream interfaces and batch request concurrency both rely on it.
+
+But `CompletableFuture`'s chained API has its limits — long chains are hard to read, debug stack traces are lost, and blocking calls are still blocking (just on a different thread). The **virtual threads** introduced in Java 21 offer another idea — synchronous code style with async performance, no `CompletableFuture` orchestration needed at all.
+
+The next chapter covers **virtual threads and structured concurrency** — the future of Java concurrency. This is the biggest change in Java concurrency in 20 years, and the finale of this stage.

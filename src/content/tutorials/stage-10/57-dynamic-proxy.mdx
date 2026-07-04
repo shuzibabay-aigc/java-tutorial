@@ -1,0 +1,368 @@
+---
+title: "动态代理"
+chapter: 57
+stage: "第十阶段"
+stageName: "反射与注解进阶"
+order: 2
+description: "回顾静态代理，掌握 JDK 动态代理（Proxy.newProxyInstance / InvocationHandler）、CGLIB 简介、JDK 动态代理 vs CGLIB 选型，并用 AOP 思想实现方法执行前后的日志与计时"
+pubDate: 2026-07-03
+tags: ["Java", "动态代理", "Dynamic Proxy", "AOP", "InvocationHandler"]
+---
+
+# 动态代理
+
+上一章我们学了反射——能"看穿"类的结构。这一章我们把反射用到一个更"魔幻"的地方：**动态代理（Dynamic Proxy）**——在运行时凭空生成一个实现指定接口的代理类，让你能在不修改原代码的前提下，给方法调用加钩子。
+
+为什么叫"动态"？因为代理类不是你写的，而是 JVM 在运行时**生成**的。你只需要告诉它"我要代理这个接口"，它就给你"造"一个代理类出来。这是 AOP（面向切面编程）的底层机制——Spring AOP、MyBatis 的 Mapper、RPC 框架的远程调用 stub，全靠它。
+
+## 一、先回顾：静态代理
+
+代理模式（Proxy Pattern）大家不陌生——给目标对象套一层"中介"，控制对它的访问。
+
+```java
+interface UserService {
+    void save(String name);
+}
+
+class UserServiceImpl implements UserService {
+    public void save(String name) {
+        System.out.println("保存用户: " + name);
+    }
+}
+
+// 静态代理: 手写一个代理类
+class UserServiceProxy implements UserService {
+    private UserService target;   // 被代理的真实对象
+    public UserServiceProxy(UserService target) { this.target = target; }
+    public void save(String name) {
+        System.out.println("[Before] 准备保存");
+        target.save(name);          // 调用真实方法
+        System.out.println("[After] 保存完成");
+    }
+}
+
+// 使用
+UserService proxy = new UserServiceProxy(new UserServiceImpl());
+proxy.save("张三");
+```
+
+静态代理的问题很明显——**每个接口都要手写一个代理类**。如果你有 20 个 Service、每个 Service 有 10 个方法，代理类要写到手抽筋。于是就有了"动态代理"——让 JVM 在运行时帮你生成代理类。
+
+## 二、JDK 动态代理
+
+JDK 内置的动态代理 API 在 `java.lang.reflect` 包下。核心就两个角色：
+
+- **`Proxy`** —— 工厂类，用来生成代理对象。
+- **`InvocationHandler`** —— 调用处理器，定义"代理方法被调用时该做什么"。
+
+### 2.1 基本用法
+
+```java
+import java.lang.reflect.*;
+
+interface UserService {
+    void save(String name);
+    String get(int id);
+}
+
+class UserServiceImpl implements UserService {
+    public void save(String name) { System.out.println("保存: " + name); }
+    public String get(int id) { return "用户" + id; }
+}
+
+// 调用处理器: 所有方法调用都会进入这里
+class LogHandler implements InvocationHandler {
+    private Object target;   // 被代理对象
+    public LogHandler(Object target) { this.target = target; }
+
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        System.out.println("[Before] " + method.getName() + "(" + Arrays.toString(args) + ")");
+        Object result = method.invoke(target, args);   // 反射调用原方法
+        System.out.println("[After]  " + method.getName() + " -> " + result);
+        return result;
+    }
+}
+
+// 生成代理
+UserService target = new UserServiceImpl();
+UserService proxy = (UserService) Proxy.newProxyInstance(
+    target.getClass().getClassLoader(),   // 类加载器
+    target.getClass().getInterfaces(),    // 代理哪些接口
+    new LogHandler(target)                // 调用处理器
+);
+proxy.save("张三");   // 会进 LogHandler.invoke
+```
+
+`Proxy.newProxyInstance` 三个参数：
+
+1. **`ClassLoader`** —— 用来加载动态生成的代理类。
+2. **`Class＜?＞[]`** —— 代理类要实现的接口数组（**JDK 动态代理只能代理接口**）。
+3. **`InvocationHandler`** —— 方法调用的处理器。
+
+代理对象被调用任何方法，都会进入 `InvocationHandler.invoke`——参数 `proxy` 是代理对象本身，`method` 是被调用的方法，`args` 是参数。在 `invoke` 里你可以做任何事：前置处理、调用原方法、后置处理、改返回值。
+
+### 2.2 代理类的"真身"
+
+JVM 在运行时**生成**了一个类（名字类似 `com.sun.proxy.$Proxy0`），它实现了你指定的接口，每个方法体都是"调用 handler.invoke"。可以加 JVM 参数 `-Dsun.misc.ProxyGenerator.saveGeneratedFiles=true` 把生成的 `.class` 存下来反编译看。
+
+简化后的代理类长这样：
+
+```java
+final class $Proxy0 implements UserService {
+    private InvocationHandler h;
+    public $Proxy0(InvocationHandler h) { this.h = h; }
+    public void save(String name) {
+        // m_save 是 Method 对象, 指向 UserService.save
+        h.invoke(this, m_save, new Object[]{name});
+    }
+    public String get(int id) {
+        return (String) h.invoke(this, m_get, new Object[]{id});
+    }
+}
+```
+
+每个方法都被"包装"成一次 `h.invoke` 调用——这就是为什么所有方法调用都会进入 `InvocationHandler`。
+
+## 三、CGLIB：能代理类
+
+JDK 动态代理有个硬伤——**只能代理接口**。如果你的类没实现接口（比如直接是个普通类），JDK 动态代理就无能为力。这时候就轮到 **CGLIB**（Code Generation Library）出场了。
+
+CGLIB 的原理不同——它通过**字节码生成**目标类的**子类**，重写非 final 的方法。因为是继承，所以不需要接口。
+
+```java
+// CGLIB 用法 (需要引入 cglib 依赖, 此处仅示意)
+import net.sf.cglib.proxy.*;
+
+class UserServiceImpl {   // 注意: 没实现任何接口
+    public void save(String name) { System.out.println("保存: " + name); }
+}
+
+MethodInterceptor interceptor = (obj, method, args, proxy) -> {
+    System.out.println("[Before] " + method.getName());
+    Object result = proxy.invokeSuper(obj, args);   // 调用父类(原)方法
+    System.out.println("[After]  " + method.getName());
+    return result;
+};
+
+Enhancer enhancer = new Enhancer();
+enhancer.setSuperclass(UserServiceImpl.class);
+enhancer.setCallback(int interceptor);
+UserServiceImpl proxy = (UserServiceImpl) enhancer.create();
+proxy.save("张三");
+```
+
+CGLIB 生成的代理类是目标类的**子类**，所以叫"子类代理"。它的核心接口是 `MethodInterceptor`——和 `InvocationHandler` 类似，但用 `proxy.invokeSuper` 调原方法。
+
+> 由于 CGLIB 需要第三方依赖，不能在 Piston 在线环境直接运行。下面我们用 JDK 动态代理做实战演示，CGLIB 部分理解原理即可。Spring 默认也是优先用 JDK 动态代理，有接口就用接口代理，没接口才用 CGLIB。
+
+## 四、JDK 动态代理 vs CGLIB
+
+| 对比项 | JDK 动态代理 | CGLIB |
+| --- | --- | --- |
+| 代理目标 | 必须实现接口 | 代理类（生成子类） |
+| 原理 | 反射 + 接口实现 | 字节码生成 + 继承 |
+| 性能（创建） | 较快 | 较慢（要生成字节码） |
+| 性能（调用） | 略慢（反射 invoke） | 较快（FastClass 机制） |
+| 依赖 | JDK 自带 | 需引入 cglib 依赖 |
+| final 方法 | 不影响（接口方法） | 无法代理（final 不能重写） |
+| Spring 默认 | 有接口时用 | 无接口时用 |
+
+**选型建议**：
+
+- 目标类实现了接口 → JDK 动态代理（无需额外依赖，简单）。
+- 目标类没接口 → CGLIB（唯一选择）。
+- Spring Boot 2.0+ 默认用 CGLIB（统一行为，避免代理类型不一致问题）。
+
+## 五、实战：AOP 思想初探
+
+AOP（Aspect-Oriented Programming，面向切面编程）的核心思想——把"横切关注点"（日志、事务、权限、监控）从业务代码里抽出来，用代理统一处理。
+
+我们用 JDK 动态代理实现一个简单 AOP——给方法加"前置日志 + 后置计时"，不动业务代码。
+
+```java
+// 实际项目里类似的注解 (Spring 用 @Aspect)
+@interface Loggable {}
+```
+
+<CodeRunner code={`import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+
+// 标记需要日志的方法
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface Loggable {
+    String value() default "";
+}
+
+// 业务接口
+interface OrderService {
+    @Loggable("下单")
+    String createOrder(String user, double amount);
+    @Loggable("查询")
+    String queryOrder(int id);
+    void cancelOrder(int id);   // 没标注解, 不打日志
+}
+
+// 真实实现
+class OrderServiceImpl implements OrderService {
+    @Override
+    public String createOrder(String user, double amount) {
+        // 模拟业务耗时
+        try { Thread.sleep(50); } catch (Exception e) {}
+        return "ORD-" + user + "-" + amount;
+    }
+    @Override
+    public String queryOrder(int id) {
+        try { Thread.sleep(20); } catch (Exception e) {}
+        return "Order# " + id;
+    }
+    @Override
+    public void cancelOrder(int id) {
+        System.out.println("  [业务] 取消订单 " + id);
+    }
+}
+
+// AOP 处理器: 检查 @Loggable 注解, 决定是否记录日志和计时
+class AopHandler implements InvocationHandler {
+    private final Object target;
+    public AopHandler(Object target) { this.target = target; }
+
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        Method realMethod = target.getClass().getMethod(method.getName(), method.getParameterTypes());
+        Loggable loggable = realMethod.getAnnotation(Loggable.class);
+
+        // 没标注解 -> 直接调用, 不加任何处理
+        if (loggable == null) {
+            return method.invoke(target, args);
+        }
+
+        // 有标注解 -> 前置日志 + 计时 + 后置日志
+        String tag = loggable.value().isEmpty() ? method.getName() : loggable.value();
+        System.out.println("[AOP-前置] " + tag + " 开始, 参数: " + Arrays.toString(args));
+        long start = System.nanoTime();
+        try {
+            Object result = method.invoke(target, args);
+            long cost = (System.nanoTime() - start) / 1_000_000;
+            System.out.println("[AOP-后置] " + tag + " 完成, 耗时 " + cost + " ms, 返回: " + result);
+            return result;
+        } catch (InvocationTargetException e) {
+            // 反射调用业务异常会被包成 InvocationTargetException, 要解包
+            long cost = (System.nanoTime() - start) / 1_000_000;
+            System.out.println("[AOP-异常] " + tag + " 抛异常, 耗时 " + cost + " ms: " + e.getCause());
+            throw e.getCause();
+        }
+    }
+}
+
+// 通用代理工厂
+class ProxyFactory {
+    @SuppressWarnings("unchecked")
+    public static <T> T create(T target) {
+        return (T) Proxy.newProxyInstance(
+            target.getClass().getClassLoader(),
+            target.getClass().getInterfaces(),
+            new AopHandler(target)
+        );
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== AOP 思想初探: 动态代理实现 ===\\n");
+
+        // 1. 不用代理: 直接调用
+        System.out.println("--- 1. 直接调用 (无 AOP) ---");
+        OrderService raw = new OrderServiceImpl();
+        raw.createOrder("张三", 99.5);
+        raw.queryOrder(100);
+        raw.cancelOrder(100);
+
+        // 2. 用动态代理: 自动加日志和计时
+        System.out.println("\\n--- 2. 代理调用 (有 AOP) ---");
+        OrderService proxy = ProxyFactory.create(new OrderServiceImpl());
+        proxy.createOrder("张三", 99.5);
+        System.out.println();
+        proxy.queryOrder(100);
+        System.out.println();
+        proxy.cancelOrder(100);   // 没标注解, 不加日志
+
+        // 3. 代理对象的类型
+        System.out.println("\\n--- 3. 代理对象是什么类型 ---");
+        System.out.println("代理类名: " + proxy.getClass().getName());
+        System.out.println("是 OrderService? " + (proxy instanceof OrderService));
+        System.out.println("是 OrderServiceImpl? " + (proxy instanceof OrderServiceImpl));
+        System.out.println("(代理类实现了 OrderService 接口, 但不是 OrderServiceImpl)");
+
+        // 4. 多个 Service 共用一套 AOP
+        System.out.println("\\n--- 4. 多个 Service 共用 AOP ---");
+        // 同一个 InvocationHandler 思路, 可代理任意接口
+        HelloService helloProxy = (HelloService) Proxy.newProxyInstance(
+            HelloService.class.getClassLoader(),
+            new Class[]{HelloService.class},
+            (p, m, a) -> {
+                System.out.println("[Before] " + m.getName());
+                Object r = m.invoke(new HelloServiceImpl(), a);
+                System.out.println("[After]  返回 " + r);
+                return r;
+            }
+        );
+        helloProxy.hello("World");
+        System.out.println("(同一套代理思路, 可套在任意接口上)");
+    }
+
+    interface HelloService { String hello(String name); }
+    static class HelloServiceImpl implements HelloService {
+        public String hello(String name) { return "Hi, " + name; }
+    }
+}`} />
+
+> **观察重点**：
+> - **`createOrder` 和 `queryOrder` 被自动加上了前后日志和计时**——因为它们标注了 `@Loggable`，而 `cancelOrder` 没标注，直接原样调用。
+> - **业务代码完全没动**——AOP 的精髓：横切逻辑和业务逻辑彻底解耦。
+> - **代理对象是 `OrderService` 但不是 `OrderServiceImpl`**——代理类是 JVM 生成的 `$Proxy0`，实现了接口，但和原实现类是不同的类。
+> - **异常被 `InvocationTargetException` 包装**——反射调业务方法抛异常时，会被包一层，要 `e.getCause()` 取真实异常。
+
+## 六、动态代理的应用场景
+
+动态代理在框架里几乎无处不在：
+
+| 框架 | 用法 | 代理方式 |
+| --- | --- | --- |
+| **Spring AOP** | `@Transactional`/`@Async`/`@Cacheable` | JDK 或 CGLIB |
+| **MyBatis** | Mapper 接口无实现类，全是代理 | JDK 动态代理 |
+| **Feign/RPC** | 远程接口的本地调用 stub | JDK 动态代理 |
+| **Hibernate** | 懒加载代理 | CGLIB/ByteBuddy |
+| **Spring Data** | Repository 接口自动实现 | JDK 动态代理 |
+
+以 MyBatis 为例——你只写 `UserMapper` 接口，没写实现类，但能直接调用 `mapper.findById(1)`。背后就是 JDK 动态代理生成了一个代理对象，把方法调用转成 SQL 执行。
+
+## 七、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| 静态代理 | 手写代理类，每个接口一个，繁琐 |
+| JDK 动态代理 | `Proxy.newProxyInstance` 运行时生成代理类 |
+| `InvocationHandler` | 方法调用进入 `invoke(proxy, method, args)` |
+| JDK 代理限制 | 只能代理接口，不能代理类 |
+| CGLIB | 通过继承生成子类，能代理类（不能代理 final） |
+| 性能 | 创建 JDK 快，调用 CGLIB 快 |
+| 异常处理 | 反射调业务方法抛异常被包成 `InvocationTargetException` |
+| AOP | 动态代理是 AOP 的底层实现 |
+
+**记忆口诀**：
+
+- **JDK 代理只认接口**——没接口的类 JDK 搞不定，得 CGLIB。
+- **`Proxy.newProxyInstance` 三参**——ClassLoader、接口数组、Handler。
+- **所有方法进 `invoke`**——`method.invoke(target, args)` 调原方法。
+- **业务异常被包一层**——`InvocationTargetException`，记得 `getCause`。
+- **CGLIB 走继承**——所以 final 类/方法不能代理。
+- **AOP = 动态代理 + 注解**——注解标记"切点"，代理实现"通知"。
+
+## 结语：从代理到 AOP
+
+这一章我们用动态代理实现了简版 AOP。回头看——AOP 的本质就是"代理 + 注解 + 反射"：注解标记切点，反射读注解，代理在方法前后插逻辑。Spring AOP 把这套机制做得更完善（切点表达式、5 种通知、切面优先级），但底层的魂就是这一章的内容。
+
+下一章我们继续注解的话题——**注解进阶**：元注解、自定义注解、运行时反射读注解，最后实现一个仿 `@Autowired` 的依赖注入。

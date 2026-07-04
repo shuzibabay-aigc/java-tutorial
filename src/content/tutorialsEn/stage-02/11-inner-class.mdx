@@ -1,0 +1,509 @@
+---
+title: "Inner Classes"
+chapter: 11
+stage: "Stage 2"
+stageName: "Object-Oriented Programming"
+order: 6
+description: "Master member inner classes, static inner classes, local inner classes, anonymous inner classes, and use cases like the Builder pattern and closures"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "内部类", "匿名内部类", "Builder模式"]
+---
+
+# Inner Classes
+
+Imagine a coffee shop. Its outer wall is the public façade — anyone can come in and order. But inside the shop there are staff corridors, storage rooms, and the espresso machine operating counter — these "internal structures" serve only the shop itself; outside customers neither see them nor should they.
+
+Java's **inner classes** (Inner Class) are exactly this "building within a building" — a class defined inside another class. They let tightly-related classes "live together" and grant them the privilege of accessing the outer class's private members. In this chapter we'll learn the four kinds of inner classes and understand their respective use cases.
+
+## 1. Why Inner Classes?
+
+Before diving in, let's understand "why we need inner classes".
+
+**Scenario 1: Tightly-coupled helper classes.** A `LinkedList` has an internal `Node` class. `Node` only serves `LinkedList`; the outside world doesn't need to know it exists. Defining `Node` inside `LinkedList` both hides the implementation detail and lets the two collaborate tightly.
+
+**Scenario 2: Accessing the outer class's private members.** An ordinary class cannot access another class's `private` fields. But an inner class can "pierce" the outer class's encapsulation and directly access its private members — a special syntactic sugar provided by the Java compiler.
+
+**Scenario 3: Implementing callbacks and closures.** In event handling and callback scenarios, we need "a small object that can access the outer context". Anonymous inner classes were born for exactly this.
+
+Java provides four kinds of inner classes, each with its own use:
+
+| Type | Definition location | Can access outer class members | Typical use |
+| --- | --- | --- | --- |
+| Member inner class | Inside a class (same level as fields) | ✅ (including private) | Tightly collaborating with the outer class |
+| Static inner class | Inside a class (with `static`) | ❌ (doesn't depend on instance) | Hiding helper classes, Builder |
+| Local inner class | Inside a method | ✅ (only final local vars) | Temporary helper class |
+| Anonymous inner class | Inside a method (no name) | ✅ (only final local vars) | Callbacks, event handling |
+
+## 2. Member Inner Classes
+
+### 2.1 Definition and Basic Usage
+
+A member inner class is defined inside the outer class, at the same level as fields and methods:
+
+```java
+public class Outer {
+    private String secret = "外部类的秘密";
+
+    // 成员内部类
+    class Inner {
+        void access() {
+            // 内部类可以直接访问外部类的私有成员！
+            System.out.println("我看到 " + secret);
+        }
+    }
+}
+```
+
+To create an inner class object, you first need an outer class object:
+
+```java
+Outer outer = new Outer();
+Outer.Inner inner = outer.new Inner();   // 注意语法
+inner.access();   // 输出"我看到 外部类的秘密"
+```
+
+### 2.2 How Inner Classes Access Outer Private Members
+
+This is actually compiler "magic". An `Inner` object implicitly holds an `Outer this` reference pointing to the outer class object that created it. The compiler translates the access to `secret` into `Outer.this.secret`:
+
+```java
+class Inner {
+    void access() {
+        System.out.println("我看到 " + Outer.this.secret);
+    }
+}
+```
+
+`Outer.this` is the explicit syntax for getting the current outer class object. When inner and outer fields share a name, you use it to disambiguate:
+
+```java
+class Outer {
+    int x = 10;
+    class Inner {
+        int x = 20;
+        void show() {
+            int x = 30;
+            System.out.println(x);             // 30（局部）
+            System.out.println(this.x);        // 20（内部类字段）
+            System.out.println(Outer.this.x);  // 10（外部类字段）
+        }
+    }
+}
+```
+
+### 2.3 Limitations of Member Inner Classes
+
+- **Cannot define static members** (except `static final` constants). Because it depends on an outer instance, it is itself instance-level.
+- Creating an object requires an outer class object first, which is less flexible to use.
+- In real development, member inner classes are rarely used — static inner classes or anonymous inner classes are more appropriate in most scenarios.
+
+## 3. Static Inner Classes
+
+### 3.1 Definition
+
+Adding the `static` keyword in front of an inner class makes it a **static inner class**:
+
+```java
+public class Outer {
+    private static String secret = "外部类的静态秘密";
+
+    // 静态内部类
+    static class StaticInner {
+        void access() {
+            // 只能访问外部类的静态成员（含私有）
+            System.out.println("我看到 " + secret);
+        }
+    }
+}
+```
+
+### 3.2 Creating Objects Without an Outer Instance
+
+```java
+Outer.StaticInner inner = new Outer.StaticInner();   // 不需要 new Outer()
+inner.access();
+```
+
+### 3.3 Why Static Inner Classes Are the Most Common
+
+Static inner classes don't depend on an outer instance, are more flexible to use, and are the most common form of inner class. Their core value is **"namespace"** and **"encapsulation"**:
+
+- **Namespace**: `Map.Entry` is a static inner class of `Map`, expressing the subordinate relationship "Entry is part of Map".
+- **Encapsulation**: `HashMap.Node` is a static inner class of `HashMap`, hiding the node implementation from the outside.
+
+The JDK uses static inner classes extensively:
+
+| Static inner class | Belongs to | Use |
+| --- | --- | --- |
+| `Map.Entry` | `Map` interface | Represents a key-value pair |
+| `HashMap.Node` | `HashMap` | Represents a hash bucket node |
+| `Thread.Builder` | `Thread` | Builds threads |
+| `Integer.Cache` | `Integer` | Integer cache |
+
+> 💡 **Design principle**: If a class only serves another class and doesn't need to access the latter's instance fields, define it as a **static inner class** of that class. This is the most common "helper-class hiding" technique in the Java standard library.
+
+### 3.4 Hands-On: Implementing the Builder Pattern with a Static Inner Class
+
+The **Builder pattern** is used to construct objects with many parameters. Take a customized coffee as an example:
+
+<CodeRunner code={`public class Main {
+    // 咖啡类：用 Builder 构建
+    static class Coffee {
+        private String name;
+        private int size;
+        private boolean hasMilk;
+        private boolean hasSugar;
+        private int shots;       // 浓缩份数
+        private String syrup;    // 糖浆口味
+
+        // 私有构造，只能通过 Builder 创建
+        private Coffee(Builder b) {
+            this.name = b.name;
+            this.size = b.size;
+            this.hasMilk = b.hasMilk;
+            this.hasSugar = b.hasSugar;
+            this.shots = b.shots;
+            this.syrup = b.syrup;
+        }
+
+        public String describe() {
+            return String.format(
+                "%s（%dml，%d 份浓缩，奶=%b，糖=%b，糖浆=%s）",
+                name, size, shots, hasMilk, hasSugar,
+                syrup == null ? "无" : syrup
+            );
+        }
+
+        // 静态内部类 Builder
+        public static class Builder {
+            private String name;
+            private int size = 350;          // 默认值
+            private boolean hasMilk = false;
+            private boolean hasSugar = false;
+            private int shots = 1;
+            private String syrup = null;
+
+            public Builder(String name) {
+                this.name = name;
+            }
+
+            public Builder size(int size)         { this.size = size; return this; }
+            public Builder milk()                  { this.hasMilk = true; return this; }
+            public Builder sugar()                 { this.hasSugar = true; return this; }
+            public Builder shots(int n)            { this.shots = n; return this; }
+            public Builder syrup(String flavor)    { this.syrup = flavor; return this; }
+
+            public Coffee build() {
+                return new Coffee(this);
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        // 链式调用，优雅地构建对象
+        Coffee c1 = new Coffee.Builder("拿铁")
+            .size(500)
+            .milk()
+            .sugar()
+            .shots(2)
+            .build();
+
+        Coffee c2 = new Coffee.Builder("美式")
+            .size(400)
+            .shots(3)
+            .syrup("香草")
+            .build();
+
+        Coffee c3 = new Coffee.Builder("玛奇朵").milk().build();
+
+        System.out.println(c1.describe());
+        System.out.println(c2.describe());
+        System.out.println(c3.describe());
+    }
+}`} />
+
+Advantages of the Builder pattern:
+
+- Avoids the "too many parameters, hard-to-remember constructor signature" problem.
+- Fluent chained calls, highly readable.
+- Fields are immutable (`Coffee` has no setter), thread-safe.
+- Default values are clear, optional parameters are flexible.
+
+`Builder` is a static inner class of `Coffee` — tightly related to `Coffee` (can access its private constructor) but not dependent on a `Coffee` instance (can be `new`-ed independently). This is one of the best practices for static inner classes.
+
+## 4. Local Inner Classes
+
+### 4.1 Definition
+
+A local inner class is defined **inside a method, constructor, or initializer block**, and its scope is limited to that method:
+
+```java
+public class Outer {
+    public void process() {
+        // 局部内部类：只在 process 方法内可见
+        class Helper {
+            void assist() {
+                System.out.println("协助处理");
+            }
+        }
+
+        Helper h = new Helper();
+        h.assist();
+    }
+}
+```
+
+### 4.2 Accessing the Method's Local Variables
+
+A local inner class can access the method's local variables, but with one important restriction: **it can only access `final` or effectively final local variables**.
+
+```java
+public void process() {
+    int x = 10;   // effectively final（不再修改）
+    // x = 20;    // 一旦修改，下面的局部内部类就会编译错误
+
+    class Helper {
+        void show() {
+            System.out.println(x);   // ✅ 可以访问 effectively final 变量
+        }
+    }
+    new Helper().show();
+}
+```
+
+**Why this restriction?** Because a local inner class object's lifetime may exceed the method's execution (for example, if the method returns the object). If the local variable it captured were modified, the inner class would see inconsistent values. Java solves this by "capturing a copy of the variable", but requires the variable not be modified to ensure consistency. This is actually the semantics of a **closure**.
+
+Local inner classes are rarely used in real development because they make methods longer. Most scenarios can be replaced by anonymous inner classes or Lambdas.
+
+## 5. Anonymous Inner Classes
+
+### 5.1 Definition
+
+An anonymous inner class (Anonymous Inner Class) has no name and is instantiated at the point of definition. Its syntax is `new ParentType() { class body }`:
+
+```java
+Runnable r = new Runnable() {       // 实现 Runnable 接口
+    @Override
+    public void run() {
+        System.out.println("运行中");
+    }
+};
+r.run();
+```
+
+### 5.2 Two Forms
+
+An anonymous inner class can be based on an **interface** or a **class**:
+
+```java
+// 基于接口
+Comparator<String> cmp = new Comparator<>() {
+    @Override
+    public int compare(String a, String b) {
+        return a.length() - b.length();
+    }
+};
+
+// 基于类（包括抽象类）
+Animal a = new Animal("无名") {     // 抽象类的匿名子类
+    @Override
+    public String sound() { return "???"; }
+};
+```
+
+### 5.3 Characteristics
+
+- **Has no name**, so it cannot be instantiated again — it's one-shot.
+- **Cannot have constructors** (with no name, how would you write a constructor?). Initialization logic goes in an instance initializer block `{ ... }`.
+- **Can access outer class members** (if defined at member level), and is also subject to the effectively final restriction (if defined inside a method).
+- **Commonly used for callbacks, event handling, and one-off interface implementations**.
+
+### 5.4 Event Handling Before Java 8
+
+Before Lambdas, anonymous inner classes were the standard for GUI programming:
+
+```java
+button.addActionListener(new ActionListener() {
+    @Override
+    public void actionPerformed(ActionEvent e) {
+        System.out.println("按钮被点击");
+    }
+});
+```
+
+After Java 8, for functional interfaces, you can simplify with a Lambda:
+
+```java
+button.addActionListener(e -> System.out.println("按钮被点击"));
+```
+
+> 💡 **When to use an anonymous inner class instead of a Lambda**:
+> - You need to implement an interface with **multiple methods** (a Lambda can only implement a single abstract method).
+> - You need to define fields or extra methods.
+> - You're creating an anonymous subclass based on a class (not an interface).
+
+### 5.5 The "this" Trap of Anonymous Inner Classes
+
+Inside an anonymous inner class, `this` refers to **the anonymous inner class instance itself**, not the outer class. To reference the outer class's `this` from within an anonymous inner class, use `OuterClassName.this`:
+
+```java
+public class Outer {
+    public Runnable createRunnable() {
+        return new Runnable() {
+            @Override
+            public void run() {
+                System.out.println(this);              // 匿名内部类对象
+                System.out.println(Outer.this);        // 外部类对象
+            }
+        };
+    }
+}
+```
+
+Lambdas are different — `this` inside a Lambda refers to **the outer class**. This is an important difference between Lambdas and anonymous inner classes.
+
+## 6. Use Cases and Best Practices for Inner Classes
+
+### 6.1 Scenario Summary
+
+| Scenario | Recommended type | Example |
+| --- | --- | --- |
+| Hiding a helper class, no instance access needed | Static inner class | `HashMap.Node`, `Map.Entry` |
+| Builder pattern | Static inner class | `Coffee.Builder` |
+| One-off interface impl (single method) | Lambda (preferred) | `Comparator`, `Runnable` |
+| One-off interface impl (multiple methods) | Anonymous inner class | `WindowAdapter` |
+| Need to access outer instance's private members | Member inner class | Iterator implementation |
+| Temporary helper class used only within a method | Local inner class | Internal data structures of a complex method |
+
+### 6.2 Closures: Inner Classes and Functional Programming
+
+A **closure** is a function that "remembers" the environment (outer variables) in which it was created. Java has no true "standalone functions", but inner classes and Lambdas implement the semantics of closures — they can capture outer variables.
+
+```java
+public class Counter {
+    public Runnable makeIncrementer() {
+        int[] count = {0};    // 用数组绕过 effectively final 限制（不推荐，仅演示）
+        return () -> {
+            count[0]++;
+            System.out.println("计数：" + count[0]);
+        };
+    }
+}
+
+// 使用：
+Runnable r = new Counter().makeIncrementer();
+r.run();   // 计数：1
+r.run();   // 计数：2
+```
+
+This Lambda "captures" the `count` array and modifies it on every call. This is a closure — a function carrying the environment it depends on.
+
+### 6.3 Best Practices
+
+1. **Prefer static inner classes**: Unless you really need to access the outer instance, use `static`. Effective Java, Item 24: "Favor static member classes over nonstatic." Non-static inner classes implicitly hold a reference to the outer class, which can cause memory leaks (the outer class should have been reclaimed, but the inner class's reference keeps it "hanging around").
+
+2. **Prefer Lambdas over anonymous inner classes for functional interfaces**: The code is more concise.
+
+3. **Avoid putting complex logic inside anonymous inner classes**: If the body is more than a few lines, extracting it into a named class is easier to maintain.
+
+4. **Watch out for memory leaks**: Non-static inner classes hold a reference to the outer class; if the inner class object has a long lifetime (such as being put into a static collection or registered as a listener), the outer class cannot be reclaimed. In such cases, switch to a static inner class + weak reference, or explicitly unregister.
+
+## 7. Comprehensive Hands-On
+
+Finally, here's a comprehensive example demonstrating the use of each kind of inner class:
+
+<CodeRunner code={`public class Main {
+    // 外部类：咖啡店
+    static class CoffeeShop {
+        private String shopName = "星巴客";
+        private static int totalOrders = 0;
+
+        // 1. 成员内部类：吧台（依赖咖啡店实例）
+        class Barista {
+            void makeCoffee(String type) {
+                totalOrders++;
+                System.out.println(shopName + " 的吧台制作了一杯" + type + "（第 " + totalOrders + " 单）");
+            }
+        }
+
+        // 2. 静态内部类：菜单项（不依赖实例）
+        static class MenuItem {
+            private String name;
+            private double price;
+
+            public MenuItem(String name, double price) {
+                this.name = name;
+                this.price = price;
+            }
+
+            public void show() {
+                System.out.printf("  %-10s ￥%.2f%n", name, price);
+            }
+        }
+
+        public void serve(String type) {
+            // 3. 局部内部类：仅在本方法内使用
+            class Order {
+                String customerName;
+                Order(String name) { this.customerName = name; }
+                void print() {
+                    System.out.println("订单：" + customerName + " 的" + type);
+                }
+            }
+
+            Order order = new Order("顾客A");
+            order.print();
+
+            // 4. 匿名内部类：一次性回调
+            Runnable callback = new Runnable() {
+                @Override
+                public void run() {
+                    System.out.println("通知：" + type + " 制作完成！");
+                }
+            };
+            callback.run();
+        }
+    }
+
+    public static void main(String[] args) {
+        CoffeeShop shop = new CoffeeShop();
+
+        // 成员内部类
+        CoffeeShop.Barista barista = shop.new Barista();
+        barista.makeCoffee("拿铁");
+        barista.makeCoffee("美式");
+
+        // 静态内部类（无需 shop 实例）
+        System.out.println("\\n--- 菜单 ---");
+        CoffeeShop.MenuItem m1 = new CoffeeShop.MenuItem("拿铁", 28);
+        CoffeeShop.MenuItem m2 = new CoffeeShop.MenuItem("美式", 22);
+        m1.show();
+        m2.show();
+
+        // 局部内部类 + 匿名内部类
+        System.out.println("\\n--- 服务流程 ---");
+        shop.serve("卡布奇诺");
+    }
+}`} />
+
+## 8. Chapter Summary
+
+| Type | Key characteristic | Typical use |
+| --- | --- | --- |
+| Member inner class | Holds an outer class reference, can access private members | Iterators, tightly-coupled classes |
+| Static inner class | Doesn't depend on an outer instance, most common | Hiding helper classes, Builder pattern |
+| Local inner class | Scoped to a method, subject to effectively final | Temporary helper classes |
+| Anonymous inner class | No name, one-shot use | Callbacks, event handling, one-off implementations |
+
+| Best practice | Description |
+| --- | --- |
+| Prefer static inner classes | Avoid memory leaks from implicit references |
+| Prefer Lambdas | Anonymous inner classes for functional interfaces can be replaced by Lambdas |
+| Mind effectively final | Variables captured by local inner classes and Lambdas cannot be modified |
+| Watch for memory leaks | Long-lived inner class objects hold the outer class |
+
+## Conclusion
+
+Inner classes are a delicate and refined stroke in the Java language. They give "relationships between classes" more layers — not just peer-level inheritance and composition, but nested subordination and collaboration. From the elegant chained calls of the Builder pattern, to the concise callbacks of event handling, to the hidden implementations all over the JDK source, inner classes have long been woven into Java's fabric.
+
+Mastering inner classes gives you another weapon for writing "high-cohesion, low-coupling" code. In the next chapter, we'll learn about two special "types" in Java — **enums** and **annotations**. Enums make constants type-safe and expressive; annotations add "metadata" to code and underpin the magic of frameworks like Spring and JUnit. They are elegant tools indispensable to modern Java.

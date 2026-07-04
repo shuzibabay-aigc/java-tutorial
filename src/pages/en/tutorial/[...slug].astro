@@ -1,0 +1,69 @@
+---
+import { getCollection, type CollectionEntry } from 'astro:content';
+import TutorialLayout from '../../../layouts/TutorialLayout.astro';
+import CodeRunner from '../../../components/CodeRunnerEn.astro';
+import { type Lang, tutorialPath, getUiStrings } from '../../../i18n/ui';
+
+const lang: Lang = 'en';
+
+export async function getStaticPaths() {
+  const tutorials = await getCollection('tutorialsEn');
+  return tutorials.map((entry) => ({
+    params: { slug: entry.slug },
+    props: { entry },
+  }));
+}
+
+interface Props {
+  entry: CollectionEntry<'tutorialsEn'>;
+}
+
+const { entry } = Astro.props;
+const { Content } = await entry.render();
+
+const ui = getUiStrings(lang);
+
+// 获取所有英文教程用于上一篇/下一篇导航
+const allTutorials = (await getCollection('tutorialsEn')).sort(
+  (a, b) => a.data.chapter - b.data.chapter
+);
+const currentIndex = allTutorials.findIndex((t) => t.slug === entry.slug);
+const prev = currentIndex > 0 ? allTutorials[currentIndex - 1] : null;
+const next = currentIndex < allTutorials.length - 1 ? allTutorials[currentIndex + 1] : null;
+---
+
+<TutorialLayout
+  currentSlug={entry.slug}
+  title={entry.data.title}
+  stage={entry.data.stage}
+  stageName={entry.data.stageName}
+  description={entry.data.description}
+  lang={lang}
+>
+  <article>
+    <header class="article-header">
+      <span class="article-stage-badge">{entry.data.stage} · {entry.data.stageName}</span>
+      <h1 class="article-title">{ui.chapterPrefix} {entry.data.chapter}{ui.chapterSuffix} · {entry.data.title}</h1>
+      <p class="article-description">{entry.data.description}</p>
+    </header>
+
+    <div class="article-body">
+      <Content components={{ CodeRunner }} />
+    </div>
+
+    <nav class="article-nav">
+      {prev ? (
+        <a href={tutorialPath(prev.slug, lang)} class="nav-prev">
+          <span class="nav-label">{ui.prevChapter}</span>
+          <span class="nav-title">{ui.chapterPrefix} {prev.data.chapter}{ui.chapterSuffix} · {prev.data.title}</span>
+        </a>
+      ) : <span></span>}
+      {next ? (
+        <a href={tutorialPath(next.slug, lang)} class="nav-next">
+          <span class="nav-label">{ui.nextChapter}</span>
+          <span class="nav-title">{ui.chapterPrefix} {next.data.chapter}{ui.chapterSuffix} · {next.data.title}</span>
+        </a>
+      ) : <span></span>}
+    </nav>
+  </article>
+</TutorialLayout>

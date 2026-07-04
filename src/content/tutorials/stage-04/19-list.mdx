@@ -1,0 +1,582 @@
+---
+title: "List"
+chapter: 19
+stage: "第四阶段"
+stageName: "集合框架"
+order: 2
+description: "深入剖析 ArrayList 动态数组原理与扩容机制、LinkedList 双向链表结构、性能对比与 CopyOnWriteArrayList，并手写简易 ArrayList"
+pubDate: 2026-07-03
+tags: ["Java", "List", "ArrayList", "LinkedList", "CopyOnWriteArrayList", "动态数组", "双向链表"]
+---
+
+# List
+
+`List`（列表）是集合家族里最像数组的那一支——它有顺序、能按索引访问、允许重复。但它又比数组聪明得多：长度会自己长，插入删除有现成方法。在所有 `List` 实现里，`ArrayList` 和 `LinkedList` 是两位主角，一个像"可伸缩的抽屉"，一个像"穿成串的珠子"，性格迥异却各有所长。
+
+这一章，我们打开这两个容器的"引擎盖"，看看它们内部到底是怎么运转的，并亲手实现一个简易版的 `ArrayList`——只有亲手写过，才能真正理解。
+
+## 一、List 接口
+
+`List<E>` 继承自 `Collection<E>`，在通用操作之上增加了"索引"的能力：
+
+```java
+public interface List<E> extends Collection<E> {
+    // 按索引访问
+    E get(int index);
+    E set(int index, E element);
+    void add(int index, E element);     // 在 index 处插入
+    E remove(int index);                 // 删除 index 处的元素
+    int indexOf(Object o);               // 第一次出现的位置
+    int lastIndexOf(Object o);           // 最后一次出现的位置
+    List<E> subList(int from, int to);   // 子列表视图
+    ListIterator<E> listIterator();      // 双向迭代器
+}
+```
+
+`List` 的契约：**有序（ordered）、可重复（allow duplicates）、可索引（indexed）**。所谓"有序"指元素按插入顺序排列（不是自动排序），"可重复"指同一个对象可以加多次。
+
+## 二、ArrayList：动态数组
+
+### 2.1 一只会长大的数组
+
+`ArrayList` 的本质是一个"会自己扩容的数组"。打开源码，核心字段长这样：
+
+```java
+public class ArrayList<E> extends AbstractList<E>
+        implements List<E>, RandomAccess, Cloneable, java.io.Serializable {
+    // Java 8 及以前
+    transient Object[] elementData;
+    private int size;
+    // ...
+}
+```
+
+没错，就一个 `Object[]` 数组和一个 `size` 计数器。所谓"动态"，不过是当数组装满时，悄悄换一个更大的新数组。
+
+> 💡 **RandomAccess 标记接口**：`ArrayList` 实现了 `RandomAccess`——一个空接口，仅作"标记"，表示"我支持随机访问（O(1)）"。`LinkedList` 没实现这个接口。某些算法会据此选择遍历策略。
+
+### 2.2 初始容量
+
+很多人以为 `new ArrayList＜＞()` 一开始就有 10 个位置——历史上确实如此（Java 7 及以前），但 Java 8 之后为了省内存改成了**懒加载**：
+
+```java
+// Java 8+ ArrayList 源码
+private static final Object[] DEFAULTCAPACITY_EMPTY_ELEMENTDATA = {};
+transient Object[] elementData;
+
+public ArrayList() {
+    this.elementData = DEFAULTCAPACITY_EMPTY_ELEMENTDATA;   // 空数组！
+}
+```
+
+第一次 `add` 时才扩容到默认容量 10：
+
+```java
+public boolean add(E e) {
+    ensureCapacityInternal(size + 1);   // 第一次 add 时扩容到 10
+    elementData[size++] = e;
+    return true;
+}
+
+private void ensureCapacityInternal(int minCapacity) {
+    if (elementData == DEFAULTCAPACITY_EMPTY_ELEMENTDATA) {
+        minCapacity = Math.max(10, minCapacity);   // 默认容量 10
+    }
+    ensureExplicitCapacity(minCapacity);
+}
+```
+
+这种"延迟初始化"避免了大量空 `ArrayList` 浪费 10 个槽位的内存——在内存敏感场景下有意义。
+
+### 2.3 扩容机制：1.5 倍
+
+当数组装满时，`ArrayList` 会扩容。新容量是多少？答案：**旧容量的 1.5 倍**。
+
+```java
+private void grow(int minCapacity) {
+    int oldCapacity = elementData.length;
+    int newCapacity = oldCapacity + (oldCapacity >> 1);   // 1.5 倍
+    if (newCapacity - minCapacity < 0)
+        newCapacity = minCapacity;
+    if (newCapacity - MAX_ARRAY_SIZE > 0)
+        newCapacity = hugeCapacity(minCapacity);
+    elementData = Arrays.copyOf(elementData, newCapacity);   // 复制到新数组
+}
+```
+
+`oldCapacity ＞＞ 1` 是除以 2，加回原容量即 1.5 倍。为什么是 1.5 而不是 2？这是个权衡：
+
+- **太大（如 2 倍）**：每次扩容浪费的空间多，但扩容次数少。
+- **太小（如 1.25 倍）**：空间利用率高，但扩容频繁，复制开销大。
+- **1.5 倍**：折中之选，且 `oldCapacity ＞＞ 1` 用位运算比除法快。
+
+扩容后，旧数组被废弃，元素被 `Arrays.copyOf` 复制到新数组。这就是 `ArrayList` 中间插入/删除慢的根源——后续元素要整体搬移。
+
+### 2.4 指定初始容量
+
+如果你大概知道要装多少元素，**预先指定容量**能避免多次扩容：
+
+```java
+List<Integer> list = new ArrayList<>(1000);   // 一次到位
+```
+
+这条建议在批量添加大量元素时尤其重要。否则，从 10 开始扩到 1000，要经历 10→15→22→33→49→73→109→163→244→366→549→823→1234 这么多次复制。
+
+### 2.5 add / remove 的代价
+
+- **尾部 add**：均摊 O(1)——大多数情况直接 `elementData[size++] = e`，偶尔扩容 O(n) 但"摊"到每次操作仍 O(1)。
+- **中间 add**：O(n)——后面所有元素要后移一位。
+- **中间 remove**：O(n)——后面所有元素要前移一位。
+
+```java
+List<Integer> list = new ArrayList<>();
+for (int i = 0; i < 100000; i++) list.add(i);   // O(1) 均摊，快
+
+list.add(0, 999);          // O(n)，10 万个元素都要后移，慢
+list.remove(0);            // O(n)，同理
+```
+
+所以"在 ArrayList 头部插入"是个反模式——它会让每次插入都 O(n)。
+
+## 三、LinkedList：双向链表
+
+### 3.1 穿成串的珠子
+
+`LinkedList` 是另一条思路——它不用连续数组，而用"节点"串起来，每个节点记录"前一个"和"后一个"：
+
+```java
+public class LinkedList<E> extends AbstractSequentialList<E>
+        implements List<E>, Deque<E>, Cloneable, java.io.Serializable {
+    transient int size = 0;
+    transient Node<E> first;   // 头节点
+    transient Node<E> last;    // 尾节点
+
+    private static class Node<E> {
+        E item;
+        Node<E> next;
+        Node<E> prev;
+
+        Node(Node<E> prev, E element, Node<E> next) {
+            this.item = element;
+            this.next = next;
+            this.prev = prev;
+        }
+    }
+}
+```
+
+每个 `Node` 持有三个引用：自己的数据 `item`、前驱 `prev`、后继 `next`。整个链表就像一串手环——每颗珠子都知道左右两颗珠子是谁。
+
+注意 `LinkedList` 还实现了 `Deque`——所以它既能当 List 用，也能当队列、栈用。但通常不推荐用它当队列（`ArrayDeque` 更快）。
+
+### 3.2 头尾操作 O(1)
+
+链表的优势在头尾：插入和删除不用搬移其他元素，只需调整相邻节点的指针。
+
+```java
+public void addFirst(E e) {
+    final Node<E> f = first;
+    final Node<E> newNode = new Node<>(null, e, f);
+    first = newNode;
+    if (f == null) last = newNode;   // 空列表
+    else f.prev = newNode;
+    size++;
+}
+```
+
+`addFirst` 只改了几个引用，O(1)。同理 `addLast`、`removeFirst`、`removeLast` 都是 O(1)。
+
+### 3.3 随机访问 O(n)
+
+但 `LinkedList` 的弱点在随机访问——`get(i)` 要从头（或尾）一个个数过去：
+
+```java
+public E get(int index) {
+    checkElementIndex(index);
+    return node(index).item;
+}
+
+Node<E> node(int index) {
+    // 折半查找：靠头从前往后，靠尾从后往前
+    if (index < (size >> 1)) {
+        Node<E> x = first;
+        for (int i = 0; i < index; i++) x = x.next;
+        return x;
+    } else {
+        Node<E> x = last;
+        for (int i = size - 1; i > index; i--) x = x.prev;
+        return x;
+    }
+}
+```
+
+源码做了个小优化：index 在前半段就从前往后找，在后半段就从后往前找。但平均仍是 O(n)——这就是 `LinkedList` 不实现 `RandomAccess` 的原因。
+
+`LinkedList` 内存开销也比 `ArrayList` 大——每个节点要多存 `prev`、`next` 两个引用（在 64 位 JVM 上每个引用占 4 或 8 字节）。
+
+## 四、ArrayList vs LinkedList 性能对比
+
+| 操作 | ArrayList | LinkedList |
+| --- | --- | --- |
+| `get(i)` 随机访问 | **O(1)** | O(n) |
+| `add(e)` 尾部添加 | **O(1) 均摊** | O(1) |
+| `add(0, e)` 头部插入 | O(n) | **O(1)** |
+| `add(i, e)` 中间插入 | O(n) | O(n)（找位置 O(n)，插本身 O(1)） |
+| `remove(i)` 中间删除 | O(n) | O(n) |
+| 迭代器 `next()` | O(1) | O(1) |
+| 内存开销 | 小（一个数组） | 大（每节点多 2 个引用） |
+
+一个常见误区："LinkedList 插入删除比 ArrayList 快"。**这只在头尾或已有节点引用时成立**。如果按索引插入删除（`add(i, e)`、`remove(i)`），LinkedList 找位置就要 O(n)，并不比 ArrayList 快。
+
+来个直观的性能对比：
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        final int N = 100_000;
+
+        // 1. 尾部添加对比
+        List<Integer> arrayList = new ArrayList<>();
+        List<Integer> linkedList = new LinkedList<>();
+
+        long t1 = System.currentTimeMillis();
+        for (int i = 0; i < N; i++) arrayList.add(i);
+        long t2 = System.currentTimeMillis();
+        for (int i = 0; i < N; i++) linkedList.add(i);
+        long t3 = System.currentTimeMillis();
+
+        System.out.println("=== 尾部添加 " + N + " 个元素 ===");
+        System.out.println("ArrayList:  " + (t2 - t1) + " ms");
+        System.out.println("LinkedList: " + (t3 - t2) + " ms");
+
+        // 2. 随机访问对比
+        t1 = System.currentTimeMillis();
+        for (int i = 0; i < 10000; i++) arrayList.get(i * 10);
+        t2 = System.currentTimeMillis();
+        for (int i = 0; i < 10000; i++) linkedList.get(i * 10);
+        t3 = System.currentTimeMillis();
+
+        System.out.println("\\n=== 随机访问 10000 次 ===");
+        System.out.println("ArrayList:  " + (t2 - t1) + " ms");
+        System.out.println("LinkedList: " + (t3 - t2) + " ms (慢得多)");
+
+        // 3. 头部插入对比（少量，避免 ArrayList 太慢）
+        List<Integer> al = new ArrayList<>();
+        List<Integer> ll = new LinkedList<>();
+        final int M = 50_000;
+
+        t1 = System.currentTimeMillis();
+        for (int i = 0; i < M; i++) al.add(0, i);
+        t2 = System.currentTimeMillis();
+        for (int i = 0; i < M; i++) ll.add(0, i);
+        t3 = System.currentTimeMillis();
+
+        System.out.println("\\n=== 头部插入 " + M + " 次 ===");
+        System.out.println("ArrayList:  " + (t2 - t1) + " ms (慢)");
+        System.out.println("LinkedList: " + (t3 - t2) + " ms (快)");
+
+        System.out.println("\\n结论：ArrayList 适合随机访问，LinkedList 适合头尾增删。");
+    }
+}`} />
+
+跑一遍你就能感受到——随机访问时 `LinkedList` 比 `ArrayList` 慢几个数量级，而头部插入时 `ArrayList` 又被 `LinkedList` 甩开。**没有银弹，选对场景才是关键。**
+
+## 五、ListIterator：双向迭代
+
+`List` 独有的 `ListIterator` 是个升级版迭代器——它不仅能向前，还能向后，还能`set`、`add`：
+
+```java
+public interface ListIterator<E> extends Iterator<E> {
+    boolean hasPrevious();
+    E previous();
+    int nextIndex();
+    int previousIndex();
+    void set(E e);    // 替换最后一次 next/previous 返回的元素
+    void add(E e);    // 在当前位置插入
+}
+```
+
+```java
+List<String> list = new ArrayList<>(List.of("A", "B", "C"));
+ListIterator<String> it = list.listIterator();
+it.next();           // A
+it.next();           // B
+it.set("b");         // 把 B 改成 b
+it.add("X");         // 在 b 后插入 X
+// list 现在是 [A, b, X, C]
+```
+
+`ListIterator` 适合"需要边遍历边修改"的场景。
+
+## 六、CopyOnWriteArrayList：写时复制
+
+### 6.1 读多写少的并发神器
+
+普通 `ArrayList` 是非线程安全的——多线程同时写会数据错乱，连迭代都可能抛 `ConcurrentModificationException`。如果给每个方法加 `synchronized`（像古老的 `Vector`），并发读就被阻塞，性能差。
+
+`CopyOnWriteArrayList`（写时复制列表）走了一条与众不同的路：
+
+- **读**：完全不加锁，直接读内部数组。
+- **写**：先复制出新数组，改新数组，再用新数组替换旧数组。
+
+```java
+// 简化版原理
+public boolean add(E e) {
+    synchronized (lock) {
+        Object[] elements = getArray();
+        Object[] newElements = Arrays.copyOf(elements, elements.length + 1);
+        newElements[elements.length] = e;
+        setArray(newElements);
+        return true;
+    }
+}
+
+public E get(int index) {
+    return get(getArray(), index);   // 无锁读
+}
+```
+
+读永远看到"某一时刻的快照"，写不影响读——这就是"读写分离"。
+
+### 6.2 代价与适用场景
+
+代价很明显：
+
+- **写很慢**：每次写都要复制整个数组，O(n)。
+- **最终一致**：迭代器看到的是创建时的快照，看不到后续修改（fail-safe）。
+- **内存占用**：写时瞬间有两个数组。
+
+所以它适合**读远多于写**的场景：监听器列表、配置缓存、白名单等。如果写也很频繁，性能会很差。
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+public class Main {
+    public static void main(String[] args) {
+        CopyOnWriteArrayList<String> list = new CopyOnWriteArrayList<>();
+        list.add("A");
+        list.add("B");
+        list.add("C");
+
+        // 1. 迭代时修改不会抛异常
+        Iterator<String> it = list.iterator();
+        list.add("D");        // 写时复制，不影响已创建的迭代器
+        System.out.println("迭代器看到的（快照）:");
+        while (it.hasNext()) {
+            System.out.println("  " + it.next());   // A, B, C（没有 D）
+        }
+        System.out.println("实际列表: " + list);     // [A, B, C, D]
+
+        // 2. 用 addIfAbsent 避免重复添加
+        list.addIfAbsent("A");
+        System.out.println("重复 add A 后: " + list);   // 没加进去
+
+        // 3. 适合监听器场景
+        System.out.println("\\n--- 监听器场景模拟 ---");
+        EventBus bus = new EventBus();
+        bus.subscribe(e -> System.out.println("  监听器1 收到: " + e));
+        bus.subscribe(e -> System.out.println("  监听器2 收到: " + e));
+        bus.publish("事件A");
+        bus.publish("事件B");
+    }
+}
+
+class EventBus {
+    private final CopyOnWriteArrayList<java.util.function.Consumer<String>> listeners =
+        new CopyOnWriteArrayList<>();
+
+    void subscribe(java.util.function.Consumer<String> listener) {
+        listeners.add(listener);
+    }
+
+    void publish(String event) {
+        // 读不加锁，遍历安全
+        for (var l : listeners) {
+            l.accept(event);
+        }
+    }
+}`} />
+
+## 七、实战：手写简易 ArrayList
+
+纸上得来终觉浅。我们亲手实现一个简易 `ArrayList`，把扩容、索引操作都写一遍：
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        MyArrayList<String> list = new MyArrayList<>();
+        list.add("A");
+        list.add("B");
+        list.add("C");
+        System.out.println("初始: " + list);
+        System.out.println("size: " + list.size());
+
+        list.add(1, "X");
+        System.out.println("在索引1插入X: " + list);
+
+        list.remove(2);
+        System.out.println("删除索引2: " + list);
+
+        list.set(0, "FIRST");
+        System.out.println("修改索引0: " + list);
+
+        System.out.println("get(1): " + list.get(1));
+        System.out.println("indexOf(FIRST): " + list.indexOf("FIRST"));
+
+        // 测试扩容
+        MyArrayList<Integer> nums = new MyArrayList<>();
+        for (int i = 0; i < 25; i++) nums.add(i);
+        System.out.println("\\n扩容测试: " + nums);
+        System.out.println("size: " + nums.size());
+
+        // 测试迭代
+        System.out.println("\\n--- 迭代 ---");
+        for (String s : list) {
+            System.out.println("  " + s);
+        }
+    }
+}
+
+class MyArrayList<E> implements Iterable<E> {
+    private Object[] elementData;
+    private int size;
+    private static final int DEFAULT_CAPACITY = 10;
+
+    public MyArrayList() {
+        this.elementData = new Object[DEFAULT_CAPACITY];
+    }
+
+    public MyArrayList(int initialCapacity) {
+        if (initialCapacity < 0) throw new IllegalArgumentException();
+        this.elementData = new Object[initialCapacity];
+    }
+
+    public int size() { return size; }
+
+    @SuppressWarnings("unchecked")
+    public E get(int index) {
+        checkIndex(index);
+        return (E) elementData[index];
+    }
+
+    public E set(int index, E element) {
+        checkIndex(index);
+        @SuppressWarnings("unchecked")
+        E old = (E) elementData[index];
+        elementData[index] = element;
+        return old;
+    }
+
+    public boolean add(E e) {
+        ensureCapacity(size + 1);
+        elementData[size++] = e;
+        return true;
+    }
+
+    public void add(int index, E element) {
+        checkIndexForAdd(index);
+        ensureCapacity(size + 1);
+        // 把 index 及之后的元素后移一位
+        System.arraycopy(elementData, index, elementData, index + 1, size - index);
+        elementData[index] = element;
+        size++;
+    }
+
+    @SuppressWarnings("unchecked")
+    public E remove(int index) {
+        checkIndex(index);
+        E old = (E) elementData[index];
+        // 把 index+1 及之后的元素前移一位
+        int numMoved = size - index - 1;
+        if (numMoved > 0) {
+            System.arraycopy(elementData, index + 1, elementData, index, numMoved);
+        }
+        elementData[--size] = null;   // 帮助 GC
+        return old;
+    }
+
+    public int indexOf(Object o) {
+        for (int i = 0; i < size; i++) {
+            if (Objects.equals(o, elementData[i])) return i;
+        }
+        return -1;
+    }
+
+    private void ensureCapacity(int minCapacity) {
+        if (minCapacity > elementData.length) {
+            // 1.5 倍扩容
+            int newCapacity = elementData.length + (elementData.length >> 1);
+            if (newCapacity < minCapacity) newCapacity = minCapacity;
+            elementData = Arrays.copyOf(elementData, newCapacity);
+        }
+    }
+
+    private void checkIndex(int index) {
+        if (index < 0 || index >= size)
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+    }
+
+    private void checkIndexForAdd(int index) {
+        if (index < 0 || index > size)
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+    }
+
+    @Override
+    public Iterator<E> iterator() {
+        return new Iterator<E>() {
+            private int cursor = 0;
+
+            @Override
+            public boolean hasNext() { return cursor < size; }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public E next() {
+                if (cursor >= size) throw new NoSuchElementException();
+                return (E) elementData[cursor++];
+            }
+        };
+    }
+
+    @Override
+    public String toString() {
+        if (size == 0) return "[]";
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < size; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(elementData[i]);
+        }
+        return sb.append("]").toString();
+    }
+}`} />
+
+这个简易版覆盖了 `ArrayList` 的核心：底层数组、1.5 倍扩容、索引检查、`add`/`remove` 的元素搬移、迭代器实现。真实 `ArrayList` 还多了 fail-fast、`subList`、序列化优化等细节，但骨架你已经摸到了。
+
+注意 `remove` 里的 `elementData[--size] = null;`——这一步叫"帮助 GC"（help GC）。虽然引用还在数组里，但设为 `null` 后 GC 就能回收那个对象。如果不设 null，那个槽位虽然不再"逻辑使用"，但数组仍持有引用，对象就无法被回收——这就是经典的"内存泄漏"陷阱。
+
+## 八、本章小结
+
+| 主题 | 要点 |
+| --- | --- |
+| List 契约 | 有序、可重复、可索引 |
+| ArrayList 本质 | `Object[] elementData` + size |
+| 初始容量 | Java 8+ 懒加载，首次 add 才扩到 10 |
+| 扩容 | 1.5 倍，`oldCapacity ＞＞ 1` |
+| ArrayList 优势 | 随机访问 O(1)，内存紧凑 |
+| ArrayList 弱点 | 头部/中间增删 O(n) |
+| LinkedList 本质 | 双向链表，`Node{prev, item, next}` |
+| LinkedList 优势 | 头尾增删 O(1) |
+| LinkedList 弱点 | 随机访问 O(n)，内存开销大 |
+| 选型默认 | 99% 用 ArrayList |
+| ListIterator | 双向迭代，可 set/add |
+| CopyOnWriteArrayList | 写时复制，读无锁，适合读多写少 |
+
+## 结语：选对容器，事半功倍
+
+`List` 是日常用得最多的集合，而 `ArrayList` 几乎是 `List` 的"默认代言人"。理解它的动态数组本质与 1.5 倍扩容，能让你在性能敏感场景下做出正确选择——预估容量、避免头部插入、批量操作用 `addAll`。
+
+`LinkedList` 适合的"频繁头尾操作"场景其实常被 `ArrayDeque` 抢走（后者更快、更省内存）。所以现代 Java 工程里，`LinkedList` 的出场率越来越低——但它代表的"链表"思想，是数据结构的基础，值得理解。
+
+下一章，我们看 `Set`——一个不允许重复的容器，它背后藏着"哈希"与"红黑树"的精妙设计。

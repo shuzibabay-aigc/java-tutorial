@@ -1,0 +1,800 @@
+---
+title: "数据访问层"
+chapter: 71
+stage: "第十三阶段"
+stageName: "Java Web 与 Spring 生态"
+order: 4
+description: "掌握 MyBatis（Mapper/XML/动态 SQL if/choose/foreach）、MyBatis-Plus 增强（BaseMapper/条件构造器）、Spring Data JPA 与 Repository、数据库迁移 Flyway/Liquibase"
+pubDate: 2026-07-03
+tags: ["Java", "MyBatis", "MyBatis-Plus", "JPA", "Flyway", "数据库迁移"]
+---
+
+# 数据访问层
+
+上一章我们用 Spring Boot 写了 REST API，但数据从哪来？真实应用的数据存在数据库——需要一个"数据访问层"（Data Access Layer，DAO/Repository）把对象和数据库表互转。这一章看 Java 主流的三个 ORM 框架——MyBatis、MyBatis-Plus、Spring Data JPA，以及数据库迁移工具 Flyway/Liquibase。
+
+## 一、为什么需要 ORM
+
+直接 JDBC 写 SQL 太繁琐——每条查询都要：建 PreparedStatement、设参数、执行、遍历 ResultSet、手动 `rs.getInt("id")` 映射成对象。重复劳动。
+
+**ORM**（Object-Relational Mapping，对象关系映射）解决这个——把数据库表自动映射成 Java 对象，让你操作对象就行。Java 生态主流三个：
+
+| 框架 | 风格 | 学习曲线 |
+| --- | --- | --- |
+| **MyBatis** | 半自动，SQL 自己写 | 低，灵活 |
+| **MyBatis-Plus** | MyBatis 增强，CRUD 零代码 | 低 |
+| **Spring Data JPA** | 全自动，SQL 自动生成 | 高，抽象深 |
+
+国内主流 MyBatis 系列（灵活、可控），国外 JPA 多（抽象、规范）。
+
+## 二、MyBatis
+
+MyBatis 是 SQL Mapper 框架——你写 SQL，它管参数映射和结果映射。半自动 = SQL 灵活可控 + 对象映射自动。
+
+### 2.1 Mapper 接口与 XML
+
+```java
+public interface UserMapper {
+    User findById(Long id);
+    List<User> findByAgeRange(@Param("min") int min, @Param("max") int max);
+    int insert(User user);
+    int update(User user);
+    int deleteById(Long id);
+}
+```
+
+```xml
+<!-- src/main/resources/mapper/UserMapper.xml -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.mapper.UserMapper">
+
+    <!-- 结果映射: 列名 -> 字段 -->
+    <resultMap id="userMap" type="com.example.entity.User">
+        <id property="id" column="user_id"/>
+        <result property="name" column="user_name"/>
+        <result property="age" column="user_age"/>
+    </resultMap>
+
+    <select id="findById" parameterType="long" resultMap="userMap">
+        SELECT user_id, user_name, user_age FROM users WHERE user_id = #{id}
+    </select>
+
+    <select id="findByAgeRange" resultMap="userMap">
+        SELECT * FROM users
+        WHERE user_age BETWEEN #{min} AND #{max}
+        ORDER BY user_age
+    </select>
+
+    <insert id="insert" parameterType="com.example.entity.User"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO users(user_name, user_age) VALUES(#{name}, #{age})
+    </insert>
+
+    <update id="update" parameterType="com.example.entity.User">
+        UPDATE users SET user_name=#{name}, user_age=#{age} WHERE user_id=#{id}
+    </update>
+
+    <delete id="deleteById" parameterType="long">
+        DELETE FROM users WHERE user_id = #{id}
+    </delete>
+
+</mapper>
+```
+
+要点：
+
+- `namespace` 必须是 Mapper 接口的全限定名——XML 和接口绑定靠它。
+- `#{xxx}` 是预编译占位符（PreparedStatement 的 `?`），防 SQL 注入。
+- `${xxx}` 是字符串拼接，**有 SQL 注入风险**，只在表名/列名等不能用 `?` 的地方用，且必须校验。
+- `resultMap` 处理列名和字段名不一致的情况。
+- `useGeneratedKeys="true" keyProperty="id"` 自动回填自增主键。
+
+### 2.2 注解版
+
+简单 SQL 可以用注解，避免 XML：
+
+```java
+public interface UserMapper {
+    @Select("SELECT * FROM users WHERE user_id = #{id}")
+    User findById(Long id);
+
+    @Insert("INSERT INTO users(user_name, user_age) VALUES(#{name}, #{age})")
+    @Options(useGeneratedKeys = true, keyProperty = "id")
+    int insert(User user);
+
+    @Update("UPDATE users SET user_name=#{name} WHERE user_id=#{id}")
+    int updateName(@Param("id") Long id, @Param("name") String name);
+}
+```
+
+注解版适合简单 SQL——复杂动态 SQL 还得靠 XML。
+
+### 2.3 动态 SQL
+
+MyBatis 的杀手锏——根据条件动态拼接 SQL。XML 里有 `＜if＞`/`＜choose＞`/`＜foreach＞`/`＜where＞`/`＜set＞` 等标签：
+
+```xml
+<!-- 多条件查询: 条件可能有可能没有 -->
+<select id="search" resultMap="userMap">
+    SELECT * FROM users
+    <where>
+        <if test="name != null and name != ''">
+            AND user_name LIKE CONCAT('%', #{name}, '%')
+        </if>
+        <if test="minAge != null">
+            AND user_age >= #{minAge}
+        </if>
+        <if test="maxAge != null">
+            AND user_age ＜= #{maxAge}
+        </if>
+        <if test="city != null">
+            AND city = #{city}
+        </if>
+    </where>
+    ORDER BY user_id DESC
+</select>
+```
+
+`＜where＞` 标签智能处理——第一个条件前的 `AND` 自动去掉，避免 `WHERE AND ...` 语法错。
+
+```xml
+<!-- choose: 类似 switch-case -->
+<select id="findByCondition" resultMap="userMap">
+    SELECT * FROM users
+    <where>
+        <choose>
+            <when test="searchType == 'name'">
+                user_name = #{keyword}
+            </when>
+            <when test="searchType == 'phone'">
+                phone = #{keyword}
+            </when>
+            <otherwise>
+                1 = 1
+            </otherwise>
+        </choose>
+    </where>
+</select>
+
+<!-- foreach: 批量查询 IN -->
+<select id="findByIds" resultMap="userMap">
+    SELECT * FROM users WHERE user_id IN
+    <foreach collection="ids" item="id" open="(" separator="," close=")">
+        #{id}
+    </foreach>
+</select>
+
+<!-- 批量插入 -->
+<insert id="batchInsert">
+    INSERT INTO users(user_name, user_age) VALUES
+    <foreach collection="users" item="u" separator=",">
+        (#{u.name}, #{u.age})
+    </foreach>
+</insert>
+
+<!-- set: 动态 update, 只更新非空字段 -->
+<update id="updateSelective">
+    UPDATE users
+    <set>
+        <if test="name != null">user_name = #{name},</if>
+        <if test="age != null">user_age = #{age},</if>
+    </set>
+    WHERE user_id = #{id}
+</update>
+```
+
+`＜foreach＞` 用于 IN 查询和批量插入——这是 MyBatis 比 JPA 灵活的体现。
+
+### 2.4 一对多 / 多对一
+
+```xml
+<!-- 用户和订单: 一对多 -->
+<resultMap id="userWithOrders" type="User">
+    <id property="id" column="user_id"/>
+    <result property="name" column="user_name"/>
+    <!-- 一对多: 一个用户多个订单 -->
+    <collection property="orders" ofType="Order">
+        <id property="id" column="order_id"/>
+        <result property="amount" column="amount"/>
+    </collection>
+</resultMap>
+
+<select id="findUserWithOrders" resultMap="userWithOrders">
+    SELECT u.user_id, u.user_name, o.order_id, o.amount
+    FROM users u
+    LEFT JOIN orders o ON u.user_id = o.user_id
+    WHERE u.user_id = #{id}
+</select>
+```
+
+`＜association＞` 处理多对一（一个用户属于一个部门），`＜collection＞` 处理一对多。
+
+## 三、MyBatis-Plus 增强
+
+MyBatis-Plus 在 MyBatis 基础上做增强——CRUD 零代码，复杂查询用条件构造器。
+
+### 3.1 BaseMapper 自带 CRUD
+
+```java
+@TableName("users")
+@Data
+public class User {
+    @TableId(type = IdType.AUTO)
+    private Long id;
+    private String name;
+    private Integer age;
+}
+
+@Mapper
+public interface UserMapper extends BaseMapper<User> {
+    // 不用写任何方法, BaseMapper 自带:
+    // insert / deleteById / delete / updateById / selectById
+    // selectList / selectPage / selectCount ...
+}
+```
+
+```java
+@Service
+public class UserService {
+    @Autowired
+    private UserMapper userMapper;
+
+    public User get(Long id) {
+        return userMapper.selectById(id);   // 一行搞定
+    }
+
+    public List<User> list() {
+        return userMapper.selectList(null);   // null = 无条件
+    }
+
+    public User add(User u) {
+        userMapper.insert(u);
+        return u;   // id 已回填
+    }
+}
+```
+
+零 SQL——这就是 MyBatis-Plus 的魅力。简单 CRUD 不用写 XML 不用写 SQL。
+
+### 3.2 条件构造器
+
+复杂查询用 `LambdaQueryWrapper`：
+
+```java
+// 查询: name 包含 "张" 且 age >= 18, 按年龄倒序
+List<User> users = userMapper.selectList(
+    new LambdaQueryWrapper<User>()
+        .like(User::getName, "张")         // name LIKE '%张%'
+        .ge(User::getAge, 18)              // age >= 18
+        .orderByDesc(User::getAge)
+);
+
+// 链式写法
+List<User> result = new LambdaQueryChainWrapper<>(userMapper)
+    .eq(User::getAge, 20)
+    .list();
+
+// 更新: name 改为 "新名字", age 改为 25, where id = 1
+userMapper.update(null,
+    new LambdaUpdateWrapper<User>()
+        .eq(User::getId, 1L)
+        .set(User::getName, "新名字")
+        .set(User::getAge, 25)
+);
+
+// 删除: age < 18 的
+userMapper.delete(new LambdaQueryWrapper<User>().lt(User::getAge, 18));
+```
+
+`LambdaQueryWrapper` 用方法引用（`User::getName`）避免硬编码字段名——重构改字段名时编译器报错。
+
+### 3.3 分页插件
+
+```java
+@Configuration
+public class MybatisPlusConfig {
+    @Bean
+    public MybatisPlusInterceptor mybatisPlusInterceptor() {
+        MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
+        interceptor.addInnerInterceptor(new PaginationInnerInterceptor(DbType.MYSQL));
+        return interceptor;
+    }
+}
+
+// 使用
+Page<User> page = userMapper.selectPage(
+    new Page<>(1, 10),   // 第 1 页, 每页 10 条
+    new LambdaQueryWrapper<User>().ge(User::getAge, 18)
+);
+page.getRecords();    // 当前页数据
+page.getTotal();      // 总记录数
+page.getPages();      // 总页数
+```
+
+分页自动加 `LIMIT` 和 `COUNT` SQL——这是 MyBatis-Plus 比原生 MyBatis 方便的地方。
+
+### 3.4 代码生成器
+
+MyBatis-Plus 能根据数据库表自动生成 Entity/Mapper/Service/Controller——一键搞定样板代码：
+
+```java
+AutoGenerator generator = new AutoGenerator(new FastAutoGeneratorCreate(
+    "jdbc:mysql://localhost:3306/test", "root", "123456"));
+generator.globalConfig(builder -> builder.author("作者").outputDir("src/main/java"));
+generator.packageConfig(builder -> builder.parent("com.example").pathInfo(...));
+generator.strategyConfig(builder -> builder.addInclude("users","orders"));
+generator.execute();
+```
+
+## 四、Spring Data JPA
+
+JPA（Java Persistence API）是 Java 的 ORM 规范，Hibernate 是实现。Spring Data JPA 在 JPA 之上提供 Repository 抽象——方法名即查询。
+
+### 4.1 Entity
+
+```java
+@Entity
+@Table(name = "users")
+@Data
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "user_name", length = 50, nullable = false)
+    private String name;
+
+    @Column(name = "user_age")
+    private Integer age;
+
+    @Temporal(TemporalType.TIMESTAMP)
+    @Column(name = "created_at")
+    private LocalDateTime createdAt;
+
+    // 一对多: 一个用户多个订单
+    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL)
+    private List<Order> orders;
+}
+
+@Entity
+@Table(name = "orders")
+@Data
+public class Order {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private BigDecimal amount;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id")
+    private User user;   // 多对一
+}
+```
+
+### 4.2 Repository 接口
+
+```java
+public interface UserRepository extends JpaRepository<User, Long> {
+    // 方法名即查询
+    List<User> findByName(String name);
+    List<User> findByAgeGreaterThan(int age);
+    Optional<User> findByEmail(String email);
+    List<User> findByNameAndAge(String name, int age);
+    List<User> findByNameLikeOrderByAgeDesc(String keyword);
+
+    // 自定义查询 (JPQL)
+    @Query("SELECT u FROM User u WHERE u.age BETWEEN :min AND :max")
+    List<User> findByAgeRange(@Param("min") int min, @Param("max") int max);
+
+    // 原生 SQL
+    @Query(value = "SELECT * FROM users WHERE age > :age", nativeQuery = true)
+    List<User> findOlderThan(@Param("age") int age);
+
+    // 修改
+    @Modifying
+    @Query("UPDATE User u SET u.age = :age WHERE u.id = :id")
+    int updateAge(@Param("id") Long id, @Param("age") int age);
+
+    // 分页
+    Page<User> findByAgeGreaterThan(int age, Pageable pageable);
+}
+```
+
+方法名解析规则——`findBy` + 字段 + 操作符：
+
+| 关键字 | SQL |
+| --- | --- |
+| `findByName` | `WHERE name = ?` |
+| `findByNameAndAge` | `WHERE name = ? AND age = ?` |
+| `findByNameOrAge` | `WHERE name = ? OR age = ?` |
+| `findByAgeGreaterThan` | `WHERE age ＞ ?` |
+| `findByAgeBetween` | `WHERE age BETWEEN ? AND ?` |
+| `findByNameLike` | `WHERE name LIKE ?` |
+| `findByNameNotNull` | `WHERE name IS NOT NULL` |
+| `findByAgeOrderByAgeDesc` | `ORDER BY age DESC` |
+
+简单查询零 SQL——这是 JPA 的优雅之处。复杂查询用 `@Query`。
+
+### 4.3 JPA vs MyBatis 选型
+
+| 对比 | JPA | MyBatis |
+| --- | --- | --- |
+| 抽象层级 | 高（操作对象） | 中（写 SQL） |
+| 灵活性 | 低（SQL 自动生成） | 高（SQL 自己写） |
+| 学习曲线 | 陡（N+1、懒加载、缓存机制） | 平缓 |
+| 复杂查询 | 难写 | 容易 |
+| 性能调优 | 难（隐藏 SQL） | 易（看 SQL） |
+| 国内使用 | 少 | **主流** |
+| 国外使用 | **主流** | 少 |
+
+**经验**——
+
+- 业务复杂、SQL 要求高 → MyBatis（国内主流）。
+- CRUD 占多数、表关系多 → JPA（少写代码）。
+- 新项目、团队熟悉 → 看团队偏好。
+
+## 五、数据库迁移：Flyway / Liquibase
+
+数据库 schema 会变——加表、加列、改索引。手动改数据库容易乱（生产改了，测试没改）。**数据库迁移工具**——把 schema 变更写成版本化的脚本，自动按顺序执行。
+
+### 5.1 Flyway
+
+Spring Boot 集成 Flyway 零配置——把 SQL 脚本放 `src/main/resources/db/migration/`，启动自动执行：
+
+```xml
+<dependency>
+    <groupId>org.flywaydb</groupId>
+    <artifactId>flyway-core</artifactId>
+</dependency>
+```
+
+```
+src/main/resources/db/migration/
+├── V1__create_users.sql
+├── V2__add_email_column.sql
+├── V3__create_orders.sql
+└── V4__add_index_on_users.sql
+```
+
+文件名格式——`V{版本号}__{描述}.sql`：
+
+```sql
+-- V1__create_users.sql
+CREATE TABLE users (
+    user_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_name VARCHAR(50) NOT NULL,
+    user_age INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- V2__add_email_column.sql
+ALTER TABLE users ADD COLUMN email VARCHAR(100);
+CREATE INDEX idx_users_email ON users(email);
+
+-- V3__create_orders.sql
+CREATE TABLE orders (
+    order_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    amount DECIMAL(10, 2),
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+```
+
+Flyway 在数据库里建 `flyway_schema_history` 表，记录已执行版本——启动时对比，只跑新的。**已执行的脚本不能改**——改了 Flyway 校验失败。
+
+### 5.2 Liquibase
+
+Liquibase 用 XML/YAML/JSON 描述变更，不直接写 SQL——更数据库无关：
+
+```xml
+<!-- src/main/resources/db/changelog/db.changelog-master.xml -->
+<databaseChangeLog>
+    <changeSet id="1" author="me">
+        <createTable tableName="users">
+            <column name="user_id" type="bigint" autoIncrement="true">
+                <constraints primaryKey="true"/>
+            </column>
+            <column name="user_name" type="varchar(50)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="user_age" type="int"/>
+        </createTable>
+    </changeSet>
+
+    <changeSet id="2" author="me">
+        <addColumn tableName="users">
+            <column name="email" type="varchar(100)"/>
+        </addColumn>
+    </changeSet>
+</databaseChangeLog>
+```
+
+Liquibase 优势——同一份变更能在 MySQL/PostgreSQL/Oracle 上跑（数据库无关）。劣势——XML 啰嗦。
+
+### 5.3 Flyway vs Liquibase
+
+| 对比 | Flyway | Liquibase |
+| --- | --- | --- |
+| 变更描述 | 直接 SQL | XML/YAML/JSON |
+| 数据库无关 | 否（写具体 SQL） | 是 |
+| 学习曲线 | 简单 | 略陡 |
+| 回滚 | 付费版 | 支持回滚 |
+| Spring Boot 集成 | 好 | 好 |
+
+**经验**——简单项目用 Flyway（直接 SQL 直观）；多数据库支持用 Liquibase。
+
+## 六、实战：MyBatis 风格 DAO 演示
+
+由于 MyBatis/JPA 需要 Spring 容器，Piston 跑不了。下面用纯 Java SE 模拟一个**MyBatis 风格的 DAO 层**——演示动态 SQL、结果映射、分页的核心思想。
+
+<CodeRunner code={`import java.util.*;
+import java.util.function.*;
+import java.util.stream.*;
+
+// === 实体 ===
+class User {
+    Long id;
+    String name;
+    Integer age;
+    String city;
+    public User() {}
+    public User(Long id, String name, Integer age, String city) {
+        this.id = id; this.name = name; this.age = age; this.city = city;
+    }
+    public String toString() {
+        return "User(id=" + id + ", name=" + name + ", age=" + age + ", city=" + city + ")";
+    }
+}
+
+// === 模拟数据库 ===
+class MockDb {
+    private static final List<User> USERS = new ArrayList<>(List.of(
+        new User(1L, "张三", 20, "北京"),
+        new User(2L, "李四", 22, "上海"),
+        new User(3L, "张伟", 25, "北京"),
+        new User(4L, "王五", 30, "广州"),
+        new User(5L, "张丽", 18, "北京"),
+        new User(6L, "赵六", 28, "深圳"),
+        new User(7L, "张强", 35, "上海")
+    ));
+
+    public static List<User> all() { return new ArrayList<>(USERS); }
+}
+
+// === MyBatis 风格动态 SQL 构造器 ===
+class SqlBuilder {
+    private final List<String> conditions = new ArrayList<>();
+    private final Map<String, Object> params = new HashMap<>();
+    private String orderBy = "";
+
+    // <if test="name != null"> AND name LIKE %x% </if>
+    public SqlBuilder ifLike(String column, String value) {
+        if (value != null && !value.isEmpty()) {
+            conditions.add(column + " LIKE '%" + value + "%'");
+        }
+        return this;
+    }
+
+    public SqlBuilder ifGe(String column, Integer value) {
+        if (value != null) {
+            conditions.add(column + " >= " + value);
+        }
+        return this;
+    }
+
+    public SqlBuilder ifLe(String column, Integer value) {
+        if (value != null) {
+            conditions.add(column + " <= " + value);
+        }
+        return this;
+    }
+
+    public SqlBuilder ifEq(String column, String value) {
+        if (value != null && !value.isEmpty()) {
+            conditions.add(column + " = '" + value + "'");
+        }
+        return this;
+    }
+
+    public SqlBuilder orderByDesc(String column) {
+        this.orderBy = " ORDER BY " + column + " DESC";
+        return this;
+    }
+
+    // 生成 SQL (模拟 <where> 标签: 自动处理第一个 AND)
+    public String build() {
+        String where = conditions.isEmpty() ? "" :
+            " WHERE " + String.join(" AND ", conditions);
+        return "SELECT * FROM users" + where + orderBy;
+    }
+
+    public List<String> conditions() { return conditions; }
+}
+
+// === MyBatis 风格 Mapper (模拟) ===
+class UserMapper {
+    // findById: 简单查询
+    public User findById(Long id) {
+        System.out.println("  [SQL] SELECT * FROM users WHERE id = " + id);
+        return MockDb.all().stream()
+            .filter(u -> u.id.equals(id))
+            .findFirst().orElse(null);
+    }
+
+    // search: 多条件动态查询 (模拟 MyBatis <if> + <where>)
+    public List<User> search(String name, Integer minAge, Integer maxAge, String city) {
+        SqlBuilder sb = new SqlBuilder()
+            .ifLike("name", name)
+            .ifGe("age", minAge)
+            .ifLe("age", maxAge)
+            .ifEq("city", city)
+            .orderByDesc("age");
+
+        System.out.println("  [SQL] " + sb.build());
+
+        // 模拟执行 (实际 MyBatis 解析条件映射到 stream 过滤)
+        Stream<User> stream = MockDb.all().stream();
+        if (name != null && !name.isEmpty()) {
+            stream = stream.filter(u -> u.name.contains(name));
+        }
+        if (minAge != null) stream = stream.filter(u -> u.age >= minAge);
+        if (maxAge != null) stream = stream.filter(u -> u.age <= maxAge);
+        if (city != null && !city.isEmpty()) stream = stream.filter(u -> u.city.equals(city));
+        return stream.sorted(Comparator.comparing((User u) -> u.age).reversed())
+            .collect(Collectors.toList());
+    }
+
+    // foreach 批量查询 (模拟 SQL: WHERE id IN (?,?,?))
+    public List<User> findByIds(List<Long> ids) {
+        String inClause = ids.stream().map(String::valueOf).collect(Collectors.joining(","));
+        System.out.println("  [SQL] SELECT * FROM users WHERE id IN (" + inClause + ")");
+        Set<Long> idSet = new HashSet<>(ids);
+        return MockDb.all().stream().filter(u -> idSet.contains(u.id)).collect(Collectors.toList());
+    }
+
+    // 分页 (模拟 LIMIT offset, size)
+    public Page<User> page(int pageNum, int pageSize, String city) {
+        List<User> filtered = MockDb.all().stream()
+            .filter(u -> city == null || u.city.equals(city))
+            .collect(Collectors.toList());
+        int total = filtered.size();
+        int from = (pageNum - 1) * pageSize;
+        int to = Math.min(from + pageSize, total);
+        List<User> records = from < total
+            ? filtered.subList(from, to) : Collections.emptyList();
+        System.out.println("  [SQL] SELECT * FROM users" +
+            (city != null ? " WHERE city='" + city + "'" : "") +
+            " LIMIT " + pageSize + " OFFSET " + from);
+        return new Page<>(records, total, pageNum, pageSize);
+    }
+}
+
+class Page<T> {
+    List<T> records;
+    long total;
+    int pageNum, pageSize, pages;
+    public Page(List<T> records, long total, int pageNum, int pageSize) {
+        this.records = records; this.total = total;
+        this.pageNum = pageNum; this.pageSize = pageSize;
+        this.pages = (int) Math.ceil((double) total / pageSize);
+    }
+    public String toString() {
+        return "Page(page=" + pageNum + "/" + pages + ", total=" + total
+            + ", records=" + records + ")";
+    }
+}
+
+// === MyBatis-Plus 风格条件构造器 (LambdaQueryWrapper) ===
+class LambdaQueryWrapper<T> {
+    private final List<Predicate<T>> predicates = new ArrayList<>();
+    private Comparator<T> comparator;
+
+    public LambdaQueryWrapper<T> like(Function<T, String> getter, String val) {
+        if (val != null) predicates.add(t -> getter.apply(t).contains(val));
+        return this;
+    }
+    public LambdaQueryWrapper<T> ge(Function<T, Integer> getter, int val) {
+        predicates.add(t -> getter.apply(t) >= val);
+        return this;
+    }
+    public LambdaQueryWrapper<T> eq(Function<T, String> getter, String val) {
+        if (val != null) predicates.add(t -> getter.apply(t).equals(val));
+        return this;
+    }
+    public LambdaQueryWrapper<T> orderByDesc(Function<T, Integer> getter) {
+        comparator = Comparator.comparing(getter).reversed();
+        return this;
+    }
+    public List<T> execute(List<T> source) {
+        Stream<T> s = source.stream();
+        for (Predicate<T> p : predicates) s = s.filter(p);
+        if (comparator != null) s = s.sorted(comparator);
+        return s.collect(Collectors.toList());
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== 数据访问层: MyBatis 风格演示 ===\\n");
+
+        UserMapper mapper = new UserMapper();
+
+        // 1. 简单查询
+        System.out.println("--- 1. findById ---");
+        System.out.println("  结果: " + mapper.findById(1L));
+
+        // 2. 动态 SQL: 多条件查询
+        System.out.println("\\n--- 2. 动态 SQL: 搜索姓张的 ---");
+        List<User> zhangs = mapper.search("张", null, null, null);
+        System.out.println("  找到 " + zhangs.size() + " 个: " + zhangs);
+
+        // 3. 动态 SQL: 多条件组合
+        System.out.println("\\n--- 3. 动态 SQL: 北京 18-25 岁 ---");
+        List<User> youngBeijing = mapper.search(null, 18, 25, "北京");
+        System.out.println("  找到 " + youngBeijing.size() + " 个: " + youngBeijing);
+
+        // 4. foreach 批量查询
+        System.out.println("\\n--- 4. foreach 批量查询 ---");
+        List<User> batch = mapper.findByIds(List.of(1L, 3L, 5L, 100L));
+        System.out.println("  找到 " + batch.size() + " 个");
+
+        // 5. 分页
+        System.out.println("\\n--- 5. 分页 ---");
+        Page<User> page1 = mapper.page(1, 3, "北京");
+        System.out.println("  " + page1);
+        Page<User> page2 = mapper.page(2, 3, "北京");
+        System.out.println("  " + page2);
+
+        // 6. MyBatis-Plus 风格 LambdaQueryWrapper
+        System.out.println("\\n--- 6. MyBatis-Plus 条件构造器 ---");
+        LambdaQueryWrapper<User> wrapper = new LambdaQueryWrapper<User>()
+            .like(User::getName, "张")
+            .ge(User::getAge, 20)
+            .orderByDesc(u -> u.age);
+        List<User> result = wrapper.execute(MockDb.all());
+        System.out.println("  张姓且>=20岁: " + result);
+
+        System.out.println("\\n=== 数据访问层关键点 ===");
+        System.out.println("MyBatis: SQL 自己写 + 动态 SQL (if/choose/foreach/where)");
+        System.out.println("MyBatis-Plus: BaseMapper 零 CRUD + LambdaQueryWrapper 条件构造器");
+        System.out.println("Spring Data JPA: 方法名即 SQL, @Query 写 JPQL");
+        System.out.println("Flyway: SQL 脚本版本化迁移");
+        System.out.println("Liquibase: XML 数据库无关迁移");
+    }
+}`} />
+
+> **观察重点**：
+> - **动态 SQL 根据参数有无自动拼接**——`search("张", null, null, null)` 只生成 `WHERE name LIKE '%张%'`。
+> - **`＜where＞` 标签智能去掉前导 AND**——这是 MyBatis 比 JDBC 字符串拼接安全的地方。
+> - **`＜foreach＞` 生成 IN 子句**——批量查询的标准写法。
+> - **分页自动 LIMIT/OFFSET**——MyBatis-Plus 分页插件的能力。
+> - **LambdaQueryWrapper 用方法引用**——避免硬编码字段名。
+
+## 七、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| MyBatis | 半自动 ORM，SQL 灵活 |
+| Mapper XML | `#{}` 占位、`＜if＞`/`＜where＞`/`＜foreach＞` 动态 SQL |
+| MyBatis-Plus | `BaseMapper` 零 CRUD + `LambdaQueryWrapper` |
+| Spring Data JPA | 方法名解析成 SQL，`@Query` 写 JPQL |
+| 实体映射 | `@Entity`/`@Table`/`@Id`/`@Column` |
+| 关联映射 | `@OneToMany`/`@ManyToOne` |
+| Flyway | SQL 脚本版本化迁移 |
+| Liquibase | XML 数据库无关迁移 |
+
+**记忆口诀**：
+
+- **MyBatis 半自动**——SQL 自己写，映射自动。
+- **`#{} 防 ${}`**——预编译 vs 字符串拼接。
+- **动态 SQL 四标签**——`if`/`choose`/`foreach`/`where`。
+- **MyBatis-Plus BaseMapper**——CRUD 零代码。
+- **JPA 方法名即 SQL**——`findByAgeGreaterThan` 自动解析。
+- **Flyway 版本化 SQL**——`V1__xxx.sql` 顺序执行。
+
+## 结语：从数据访问到安全
+
+这一章我们看了三个 ORM 框架——MyBatis 灵活、MyBatis-Plus 高效、JPA 优雅，以及数据库迁移工具。下一章是 Spring 生态的最后一块——**安全与认证**，从 Spring Security 到 JWT 到 OAuth 2.0。

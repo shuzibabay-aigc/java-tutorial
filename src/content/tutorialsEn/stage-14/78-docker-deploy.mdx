@@ -1,0 +1,620 @@
+---
+title: "Docker and Deployment"
+chapter: 78
+stage: "Stage 14"
+stageName: "Advanced Topics and Distributed Systems"
+order: 6
+description: "Master container vs virtual machine differences, Docker images and containers, writing Dockerfiles, multi-stage builds, Docker Compose orchestration, Kubernetes basics, and CI/CD pipelines"
+pubDate: 2026-07-03
+tags: ["Java", "Docker", "Containerization", "Dockerfile", "Docker Compose", "Kubernetes", "CI/CD"]
+---
+
+# Docker and Deployment
+
+"But it works on my machine!" — the classic line developers use to pass the buck to ops. Your machine has JDK 21, MySQL 8, Redis 7, and a pile of environment variables; the server has none of them, so of course the program won't run.
+
+**Docker** smashes that excuse to pieces — it packages your program along with everything it depends on (OS libraries, runtimes, configs) into a **container** that runs identically on any machine with Docker installed. "Works on my machine" now equals "works anywhere."
+
+This chapter looks at what Docker is, how to package a Java app with Docker, how Docker Compose orchestrates multiple services, and how Kubernetes manages a whole swarm of containers.
+
+## I. Containers vs Virtual Machines
+
+Containerization isn't a new idea — Linux's LXC and Solaris's Zones have been around for ages. Docker just made it easy.
+
+### 1.1 Virtual Machines
+
+A virtual machine (VM) — a Hypervisor simulates multiple complete operating systems on a physical machine. Each VM has its own kernel, system libraries, and applications.
+
+```
+Physical machine
+ └ Hypervisor
+   ├ VM1: full OS (kernel + libs + apps)
+   ├ VM2: full OS (kernel + libs + apps)
+   └ VM3: full OS (kernel + libs + apps)
+```
+
+Pros — thorough isolation. Cons — each VM runs a full OS; several GB of memory vanish just like that, and startup is slow.
+
+### 1.2 Containers
+
+Containers — all containers **share the host kernel**; only processes, filesystems, and networks are isolated. No kernel of their own.
+
+```
+Physical machine
+ └ Host kernel (Linux)
+   ├ Container 1: libs + apps
+   ├ Container 2: libs + apps
+   └ Container 3: libs + apps
+```
+
+- **Lightweight** — a container is just tens of MB, not GBs like a VM.
+- **Fast startup** — seconds to start (VMs take minutes).
+- **High density** — running hundreds of containers on one machine is no problem.
+
+Containers are built on the Linux kernel's **Namespace** (isolating views) and **Cgroup** (limiting resources) — Namespace makes a container think it owns the system, while Cgroup limits how much CPU/memory it can use.
+
+## II. Core Docker Concepts
+
+### 2.1 Images and Containers
+
+- **Image** — a read-only template containing the app and its dependencies. Like a "class" in OOP.
+- **Container** — a running instance of an image, read-write. Like an "object."
+
+```bash
+docker pull openjdk:21           # Pull an image
+docker images                    # List images
+docker run -it openjdk:21 java -version   # Run a container
+docker ps                        # List running containers
+docker stop <container-id>       # Stop
+docker rm <container-id>         # Remove
+```
+
+### 2.2 Image Layering
+
+An image is built up layer by layer — a base image layer + a dependencies layer + an app layer. Each layer is read-only, and multiple images share lower layers to save space.
+
+```
+Image layers (bottom to top):
+  ├ debian:bookworm-slim   (base OS, 80MB)
+  ├ openjdk:21-slim        (+ JDK, 200MB)
+  ├ app.jar                (+ app, 30MB)
+  └ config files           (+ config, 1KB)
+```
+
+On startup, a container adds a **writable layer** on top — all modifications land here; the image itself never changes.
+
+### 2.3 Dockerfile: The Image "Recipe"
+
+A Dockerfile is a text file describing how to build an image:
+
+```dockerfile
+# Base image
+FROM openjdk:21-slim
+
+# Working directory
+WORKDIR /app
+
+# Copy the jar
+COPY target/myapp.jar /app/app.jar
+
+# Expose a port
+EXPOSE 8080
+
+# Startup command
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+```
+
+Build and run:
+
+```bash
+docker build -t myapp:1.0 .       # Build the image
+docker run -d -p 8080:8080 myapp:1.0   # Run in background, map ports
+```
+
+## III. Docker Best Practices for Java Apps
+
+### 3.1 Multi-Stage Builds
+
+Separate "build" from "run" — the build stage uses a Maven image to package, and the runtime stage copies only the jar into a slim JRE image. The final image is much smaller.
+
+```dockerfile
+# Stage 1: build
+FROM maven:3.9-eclipse-temurin-21 AS builder
+WORKDIR /build
+COPY pom.xml .
+RUN mvn dependency:go-offline           # Download dependencies first (cache-friendly)
+COPY src ./src
+RUN mvn package -DskipTests
+
+# Stage 2: runtime
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+COPY --from=builder /build/target/*.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+Stage 1 uses the 600MB Maven image to build; stage 2 copies only the resulting jar into the 150MB JRE image. The final image is about 180MB — half the size of a single-stage build.
+
+### 3.2 Spring Boot Layering
+
+Spring Boot 2.3+ supports layered jars — splitting dependencies, application code, and resources into separate layers. Each layer gets its own COPY in the Docker build; when dependencies haven't changed, the cache hits and the build is fast.
+
+```dockerfile
+FROM eclipse-temurin:21-jre as layers
+WORKDIR /app
+COPY target/*.jar app.jar
+RUN java -Djarmode=layertools -jar app.jar extract
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=layers /app/dependencies/ ./
+COPY --from=layers /app/spring-boot-loader/ ./
+COPY --from=layers /app/snapshot-dependencies/ ./
+COPY --from=layers /app/application/ ./
+ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+```
+
+When you change only code, only the application layer is rebuilt; the dependency layer hits the cache — the build drops from 2 minutes to 20 seconds.
+
+### 3.3 JVM Containerization Caveats
+
+- **Memory-limit awareness** — Java 10+ auto-detects cgroup memory limits. Set `-XX:MaxRAMPercentage=75.0` so the JVM uses 75% of container memory.
+- **Don't swap** — container swap is slow and makes JVM GC stall. Set `--memory-swap` equal to the memory limit.
+- **Use ZGC/Shenandoah** — low-latency GCs suit containers better.
+
+```dockerfile
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-XX:+UseZGC", "-jar", "app.jar"]
+```
+
+## IV. Docker Compose: Multi-Container Orchestration
+
+With dozens of microservice containers, manual `docker run` is impractical. **Docker Compose** uses a YAML file to describe all services and brings them all up with a single command.
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    depends_on:
+      - mysql
+      - redis
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/mydb
+      SPRING_REDIS_HOST: redis
+
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: mydb
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  mysql_data:
+```
+
+```bash
+docker-compose up -d        # Start all services (in background)
+docker-compose logs -f app  # Follow the app logs
+docker-compose down         # Stop and remove
+```
+
+Compose automatically creates a network so services can reach each other by service name (`mysql`, `redis`) — far more convenient than IPs.
+
+## V. Kubernetes: The King of Container Orchestration
+
+Docker Compose is fine for a single machine. When you have dozens of machines and thousands of containers, you need **Kubernetes (K8s)** — Google's open-source container-orchestration platform.
+
+### 5.1 Core Concepts
+
+- **Pod** — K8s's smallest schedulable unit; one or more tightly-coupled containers.
+- **Deployment** — manages Pod replicas, ensuring N instances are always running.
+- **Service** — gives a set of Pods a stable entry point (Pod IPs change; the Service IP doesn't).
+- **Ingress** — the HTTP-layer entry; routes by domain/path to a Service.
+- **ConfigMap / Secret** — configuration and sensitive data.
+
+```
+User → Ingress → Service → Pod (container)
+                     ↑
+              Deployment manages Pod replicas
+```
+
+### 5.2 Deploying a Java App
+
+```yaml
+# deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  replicas: 3                    # 3 replicas
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          image: myapp:1.0
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+spec:
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: LoadBalancer
+```
+
+```bash
+kubectl apply -f deployment.yaml   # Deploy
+kubectl get pods                   # List Pods
+kubectl scale deployment myapp --replicas=5   # Scale to 5
+kubectl rollout restart deployment myapp      # Rolling update
+```
+
+K8s's killer features — **self-healing** and **elastic scaling**. A Pod dies, it restarts automatically; traffic spikes, it scales up; traffic ebbs, it scales down.
+
+## VI. CI/CD: The Automated Pipeline
+
+**CI/CD** (Continuous Integration / Continuous Deployment) — after code is pushed, build, test, and deploy automatically.
+
+```
+push code → CI server → compile → unit test → build image → push to registry → CD deploys to K8s
+```
+
+Mainstream tools — **GitHub Actions**, **GitLab CI**, **Jenkins**.
+
+GitHub Actions example (`.github/workflows/build.yml`):
+
+```yaml
+name: Build and Deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      - name: Build with Maven
+        run: mvn package -DskipTests
+      - name: Build Docker image
+        run: docker build -t myapp:${{ github.sha }} .
+      - name: Push to registry
+        run: |
+          docker login -u ${{ secrets.REGISTRY_USER }} -p ${{ secrets.REGISTRY_PASS }}
+          docker push myapp:${{ github.sha }}
+      - name: Deploy to K8s
+        run: |
+          kubectl set image deployment/myapp myapp=myapp:${{ github.sha }}
+```
+
+Every push to the main branch triggers an automatic build, image build, registry push, and rolling deploy — the developer just pushes; ops is fully automated.
+
+## VII. Hands-on: Simulating Docker with Java SE
+
+The Piston online environment can't run Docker. We'll use Java SE to simulate Docker's core concepts — image layering, container lifecycle, port mapping, and Compose orchestration.
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+
+// 模拟 Docker: 镜像分层 + 容器生命周期 + Compose 编排
+class MiniDocker {
+    // 镜像: 名字 -> 层列表
+    private final Map<String, List<String>> images = new LinkedHashMap<>();
+    // 容器: id -> 状态
+    private final Map<String, Container> containers = new ConcurrentHashMap<>();
+    // 容器端口映射
+    private final Map<Integer, String> portMap = new ConcurrentHashMap<>();
+    private int containerCounter = 0;
+
+    static class Container {
+        final String id;
+        final String image;
+        volatile String status;   // created / running / stopped / exited
+        final int hostPort;
+        final int containerPort;
+        final Map<String, String> env = new LinkedHashMap<>();
+        final List<String> layers;
+        Container(String id, String image, int hostPort, int containerPort, List<String> layers) {
+            this.id = id; this.image = image;
+            this.hostPort = hostPort; this.containerPort = containerPort;
+            this.layers = layers;
+            this.status = "created";
+        }
+    }
+
+    // 构建镜像 (Dockerfile 的 FROM + COPY + RUN 模拟)
+    public void build(String tag, String... layers) {
+        List<String> layerList = new ArrayList<>();
+        for (String layer : layers) {
+            layerList.add(layer);
+            System.out.println("  Step: " + layer);
+        }
+        images.put(tag, layerList);
+        System.out.println("  ✓ 构建镜像 " + tag + " (" + layerList.size() + " 层)");
+    }
+
+    // 运行容器
+    public String run(String image, int hostPort, int containerPort, Map<String, String> env) {
+        if (!images.containsKey(image)) {
+            System.out.println("  镜像 " + image + " 不存在");
+            return null;
+        }
+        String id = "c" + (++containerCounter);
+        Container c = new Container(id, image, hostPort, containerPort, images.get(image));
+        if (env != null) c.env.putAll(env);
+        if (hostPort > 0) {
+            if (portMap.containsKey(hostPort)) {
+                System.out.println("  端口 " + hostPort + " 已被占用");
+                return null;
+            }
+            portMap.put(hostPort, id);
+        }
+        containers.put(id, c);
+        c.status = "running";
+        System.out.println("  → 启动容器 " + id + " (镜像: " + image
+            + ", 端口: " + hostPort + "->" + containerPort + ")");
+        return id;
+    }
+
+    public void stop(String id) {
+        Container c = containers.get(id);
+        if (c != null) {
+            c.status = "stopped";
+            if (c.hostPort > 0) portMap.remove(c.hostPort);
+            System.out.println("  ■ 停止容器 " + id);
+        }
+    }
+
+    public void rm(String id) {
+        Container c = containers.remove(id);
+        if (c != null) {
+            if (c.hostPort > 0) portMap.remove(c.hostPort);
+            System.out.println("  ✗ 删除容器 " + id);
+        }
+    }
+
+    public void ps() {
+        System.out.println("  容器列表:");
+        System.out.println("  ID    镜像                状态      端口");
+        for (Container c : containers.values()) {
+            System.out.printf("  %-5s %-20s %-9s %d->%d%n",
+                c.id, c.image, c.status, c.hostPort, c.containerPort);
+        }
+    }
+
+    public void images() {
+        System.out.println("  镜像列表:");
+        for (Map.Entry<String, List<String>> e : images.entrySet()) {
+            System.out.println("  " + e.getKey() + " (" + e.getValue().size() + " 层)");
+        }
+    }
+
+    // 模拟访问容器
+    public void curl(int hostPort, String path) {
+        String cid = portMap.get(hostPort);
+        if (cid == null) {
+            System.out.println("  端口 " + hostPort + " 无容器监听");
+            return;
+        }
+        Container c = containers.get(cid);
+        if (!"running".equals(c.status)) {
+            System.out.println("  容器 " + cid + " 未运行");
+            return;
+        }
+        System.out.println("  GET localhost:" + hostPort + path + " -> 容器 " + cid
+            + " 响应: 200 OK (来自 " + c.image + ")");
+    }
+
+    public Collection<Container> getContainers() { return containers.values(); }
+}
+
+// 模拟 Docker Compose 编排
+class MiniCompose {
+    private final MiniDocker docker;
+    static class ServiceDef {
+        String name, image;
+        int hostPort, containerPort;
+        Map<String, String> env = new LinkedHashMap<>();
+        List<String> dependsOn = new ArrayList<>();
+        ServiceDef(String name, String image, int hostPort, int containerPort) {
+            this.name = name; this.image = image;
+            this.hostPort = hostPort; this.containerPort = containerPort;
+        }
+    }
+    private final List<ServiceDef> services = new ArrayList<>();
+
+    public MiniCompose(MiniDocker docker) { this.docker = docker; }
+
+    public void addService(ServiceDef s) { services.add(s); }
+
+    public void up() {
+        System.out.println("  启动 Compose 编排:");
+        for (ServiceDef s : services) {
+            for (String dep : s.dependsOn) {
+                System.out.println("    " + s.name + " 等待 " + dep + " 就绪...");
+            }
+            System.out.println("    [" + s.name + "]");
+            docker.run(s.image, s.hostPort, s.containerPort, s.env);
+        }
+    }
+
+    public void down() {
+        System.out.println("  停止 Compose 编排:");
+        for (ServiceDef s : services) {
+            // 简化: 找到匹配的容器停止
+            for (MiniDocker.Container c : docker.getContainers()) {
+                if (c.image.equals(s.image)) {
+                    docker.stop(c.id);
+                    docker.rm(c.id);
+                }
+            }
+        }
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Docker 与部署模拟 ===\\n");
+
+        MiniDocker docker = new MiniDocker();
+
+        // 1. 构建镜像 (多阶段构建模拟)
+        System.out.println("--- 1. 构建镜像 (Dockerfile 多阶段) ---");
+        docker.build("myapp:1.0",
+            "FROM eclipse-temurin:21-jre-alpine AS base",
+            "WORKDIR /app",
+            "COPY target/app.jar /app/app.jar",
+            "EXPOSE 8080",
+            "ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]");
+
+        docker.build("mysql:8",
+            "FROM oraclelinux:8",
+            "INSTALL mysql",
+            "EXPOSE 3306");
+
+        docker.build("redis:7",
+            "FROM alpine:3.18",
+            "INSTALL redis",
+            "EXPOSE 6379");
+
+        System.out.println();
+        docker.images();
+
+        // 2. 运行容器
+        System.out.println("\\n--- 2. 运行容器 (docker run) ---");
+        Map<String, String> appEnv = new LinkedHashMap<>();
+        appEnv.put("SPRING_DATASOURCE_URL", "jdbc:mysql://mysql:3306/mydb");
+        appEnv.put("SPRING_REDIS_HOST", "redis");
+        docker.run("myapp:1.0", 8080, 8080, appEnv);
+        docker.run("mysql:8", 3306, 3306, null);
+        docker.run("redis:7", 6379, 6379, null);
+
+        System.out.println("\\n--- 3. 查看容器 (docker ps) ---");
+        docker.ps();
+
+        // 4. 访问容器
+        System.out.println("\\n--- 4. 访问容器 (curl) ---");
+        docker.curl(8080, "/api/users");
+        docker.curl(8080, "/api/orders");
+
+        // 5. 停止 + 重启
+        System.out.println("\\n--- 5. 容器生命周期 ---");
+        docker.stop("c1");
+        docker.ps();
+        docker.curl(8080, "/api/users");   // 应该访问失败
+
+        // 6. Docker Compose 编排
+        System.out.println("\\n--- 6. Docker Compose 编排 ---");
+        MiniCompose compose = new MiniCompose(docker);
+        MiniCompose.ServiceDef app = new MiniCompose.ServiceDef("app", "myapp:1.0", 9090, 8080);
+        app.dependsOn.add("mysql");
+        app.dependsOn.add("redis");
+        MiniCompose.ServiceDef mysql = new MiniCompose.ServiceDef("mysql", "mysql:8", 3307, 3306);
+        MiniCompose.ServiceDef redis = new MiniCompose.ServiceDef("redis", "redis:7", 6380, 6379);
+        compose.addService(mysql);
+        compose.addService(redis);
+        compose.addService(app);
+        compose.up();
+
+        System.out.println();
+        docker.ps();
+
+        // 7. 模拟滚动更新 (K8s 滚动更新思路)
+        System.out.println("\\n--- 7. 滚动更新 (K8s 思路) ---");
+        System.out.println("  当前版本: v1, 副本数 3");
+        docker.build("myapp:2.0",
+            "FROM eclipse-temurin:21-jre-alpine",
+            "COPY target/app-v2.jar /app/app.jar",
+            "EXPOSE 8080",
+            "ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]");
+        System.out.println("  滚动更新: v1 → v2");
+        System.out.println("    Step 1: 启动 1 个 v2 容器 (此时 v1×3 + v2×1)");
+        docker.run("myapp:2.0", 8081, 8080, appEnv);
+        System.out.println("    Step 2: 停止 1 个 v1 容器 (此时 v1×2 + v2×1)");
+        docker.stop("c1");
+        System.out.println("    Step 3: 启动 1 个 v2 容器 (此时 v1×2 + v2×2)");
+        docker.run("myapp:2.0", 8082, 8080, appEnv);
+        System.out.println("    Step 4: 停止 1 个 v1 容器 (此时 v1×1 + v2×2)");
+        System.out.println("    Step 5: 重复直到 v1 全部下线, v2×3");
+        System.out.println("  ✓ 滚动更新完成, 零停机");
+
+        System.out.println("\\n--- 8. 最终容器列表 ---");
+        docker.ps();
+    }
+}`} />
+
+> **What to watch for**: images are built in layers, each layer one step; containers have a `created/running/stopped` lifecycle; port mapping lets the outside reach a container; Compose starts multiple services in dependency order; rolling updates replace instances one by one, guaranteeing zero downtime.
+
+## VIII. The Evolution of Deployment Architectures
+
+```
+Physical machine → Virtual machine → Container → K8s → Serverless
+```
+
+| Stage | Unit | Characteristics |
+| --- | --- | --- |
+| Physical | Whole machine | Poor isolation, resource waste |
+| VM | VM | Good isolation, heavy |
+| Container | Container | Lightweight, seconds to start |
+| K8s | Pod | Auto-scheduling, self-healing, elastic scaling |
+| Serverless | Function | Billed per invocation, no servers to manage |
+
+## IX. Chapter Summary
+
+| Topic | Key Point |
+| --- | --- |
+| Container vs VM | Containers share the kernel — lightweight, seconds to start; VMs isolate thoroughly but are heavy |
+| Image | Read-only layered template, like a "class" |
+| Container | A running instance of an image, like an "object" |
+| Dockerfile | Image build recipe: FROM/COPY/RUN/ENTRYPOINT |
+| Multi-stage build | Build stage + runtime stage, small final image |
+| Docker Compose | Single-machine multi-container orchestration, described in YAML |
+| Kubernetes | Cluster-level container orchestration: Pod/Deployment/Service |
+| CI/CD | Automated build-test-deploy pipeline |
+
+## Memory Hooks
+
+- **Container vs VM** — containers share the kernel and are light; VMs each carry a kernel and are heavy.
+- **Image-container relationship** — an image is a class; a container is an object.
+- **Dockerfile four-piece set** — FROM for the base, COPY to copy, RUN to execute, ENTRYPOINT to start.
+- **Multi-stage build** — big image for building, small image for running.
+- **K8s big three** — Pod runs containers, Deployment manages replicas, Service provides the entry point.
+
+## Conclusion
+
+Docker has pushed "environmental consistency" to the limit — build once, run anywhere. K8s has automated "managing containers" — self-healing, elastic scaling, rolling updates. Add a CI/CD pipeline, and the journey from code to production is fully automated.
+
+This is the last chapter of Stage 14. Looking back — design patterns taught you to write good code, data structures and algorithms taught you to think clearly, and Redis/message queues/microservices/Docker taught you to build distributed systems. From single machine to distributed, from code to deployment, you now have the core knowledge system of a Java engineer.
+
+The next stage steps into **comprehensive hands-on practice** — building a complete to-do CLI project by hand, putting everything you've learned — IO, collections, concurrency, reflection — to work. Then the final stage — interview-question deep dives, turning scattered knowledge into interview-ready weapons.

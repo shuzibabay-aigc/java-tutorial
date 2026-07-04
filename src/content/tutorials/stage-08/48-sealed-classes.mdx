@@ -1,0 +1,476 @@
+---
+title: "Sealed Classes 密封类"
+chapter: 48
+stage: "第八阶段"
+stageName: "现代 Java 特性"
+order: 3
+description: "掌握 Sealed Classes 密封类、permits 关键字、子类 final/sealed/non-sealed 的要求、与 Record+模式匹配的组合拳、代数数据类型 ADT 的建模"
+pubDate: 2026-07-03
+tags: ["Java", "Sealed Class", "密封类", "ADT", "JDK 17"]
+---
+
+# Sealed Classes 密封类
+
+这一章我们看 **Sealed Classes（密封类）**——Java 17 正式发布的特性（JEP 409）。它和上一章的 Records 是"亲兄弟"——Record 解决"封闭的值对象"，Sealed 解决"封闭的继承层次"。两者配合 Pattern Matching，让 Java 第一次能优雅地建模函数式语言的核心概念——**代数数据类型（Algebraic Data Type，ADT）**。
+
+## 一、为什么需要密封类：开放继承的代价
+
+### 1.1 Java 传统的"开放继承"
+
+Java 的类继承默认是**开放**的——任何 `public class` 都能被任意 `extends`（只要不是 `final`）。这种"开放"在框架里是好事（可扩展），但在领域建模里经常是灾难：
+
+```java
+// 你定义了一个 Shape 类
+public class Shape { ... }
+
+// 你以为只有 Circle/Square/Triangle 三个子类
+// 但别人可以这样:
+class WeirdShape extends Shape { ... }   // 你控制不了
+class MaliciousShape extends Shape { ... }
+```
+
+问题：
+
+- **switch 不敢省 default**——你不知道未来会不会冒出 `WeirdShape`，`switch` 必须写 `default`，编译器无法帮你检查"穷举所有情况"。
+- **equals/hashCode 难写**——`Shape.equals` 要不要考虑子类？怎么判断"是同类"？
+- **领域约束被破坏**——业务规则"只有三种形状"在代码层面无法表达，全靠口头约定。
+
+### 1.2 密封类要解决什么
+
+**Sealed Classes** 让你**显式声明"哪些类可以继承我"**——把继承权"封死"在白名单里：
+
+```java
+public sealed class Shape permits Circle, Square, Triangle {}
+```
+
+`Shape` 现在只允许 `Circle`、`Square`、`Triangle` 三个类继承——别的类 `extends Shape` 直接编译错。这把"封闭的继承层次"作为语言特性固化下来。
+
+### 1.3 历史背景
+
+Sealed Classes 是 Java 17 正式发布的（JEP 409），经历了 Java 15 预览、Java 16 二次预览、Java 17 转正。它和 Records、Pattern Matching 是一组配套设计——三者协同构成 Java 的"现代数据建模"。
+
+## 二、密封类的定义：sealed + permits
+
+### 2.1 基本语法
+
+```java
+public sealed class Shape permits Circle, Square, Triangle {}
+//                ^^^^^^                ^^^^^^^^^^^^^^^^^^^^^^^^^
+//                声明为密封类           允许继承的子类列表
+```
+
+`sealed` 是修饰符，`permits` 后面跟子类列表（逗号分隔）。子类必须在**同一个模块或同一个包**里——这是密封类的硬性约束。
+
+### 2.2 子类的"三选一"修饰
+
+`permits` 列表里的子类，**必须**用下面三种修饰之一：
+
+| 修饰 | 含义 | 能否再被继承 |
+| --- | --- | --- |
+| `final` | 最终类，不能被继承 | 否 |
+| `sealed` | 密封类，继续 `permits` 自己的子类 | 是，但必须声明白名单 |
+| `non-sealed` | 非密封类，回到开放继承 | 是，任意继承 |
+
+```java
+public sealed class Shape permits Circle, Square, Triangle {}
+
+final class Circle extends Shape {}            // 终结, 不能再继承
+sealed class Square extends Shape permits FilledSquare, OutlinedSquare {}
+non-sealed class Triangle extends Shape {}     // 开放, 任意类可继承
+
+// Square 的子类
+final class FilledSquare extends Square {}
+final class OutlinedSquare extends Square {}
+
+// Triangle 是 non-sealed, 任意类可继承
+class RightTriangle extends Triangle {}
+class IsoscelesTriangle extends Triangle {}
+```
+
+**为什么强制三选一？** 因为如果不强制，子类默认开放继承，密封性就被悄悄破坏了。Java 选择"显式比隐式好"——你想开放就 `non-sealed`，想封死就 `final`，想半封就 `sealed`，必须明说。
+
+### 2.3 省略 permits：同文件子类
+
+如果子类和密封类在**同一个源文件**里，可以省略 `permits`——编译器自动找同文件的直接子类：
+
+```java
+// Shape.java
+public sealed class Shape {}   // 省略 permits
+
+final class Circle extends Shape {}
+final class Square extends Shape {}
+final class Triangle extends Shape {}
+```
+
+编译器自动推断 `Shape permits Circle, Square, Triangle`。这是 Java 17 之后常见的紧凑写法。
+
+### 2.4 接口也可以密封
+
+`sealed` 不仅能修饰类，还能修饰**接口**：
+
+```java
+public sealed interface Currency permits CNY, USD, EUR {}
+
+record CNY(long fen) implements Currency {}
+record USD(long cents) implements Currency {}
+record EUR(long cents) implements Currency {}
+```
+
+接口 + Record + Sealed 的组合，是建模 ADT 的标准范式（后面详讲）。
+
+## 三、密封类的约束
+
+### 3.1 同模块或同包
+
+`permits` 列表里的子类，必须和密封类在**同一个模块**里（如果密封类在命名模块），或者**同一个包**里（如果在不命名模块）。这是为了防止"第三方恶意添加子类"。
+
+```java
+// 模块 A
+module A { exports com.example; }
+public sealed class Shape permits com.example.Circle, com.other.Square {}  // 错! Square 不在模块 A
+```
+
+### 3.2 子类必须直接 extends
+
+`permits` 列表里的类必须**直接**继承密封类——不能是"孙子类"。如果 `Shape permits Circle`，那 `Circle` 必须 `extends Shape`，不能 `Circle extends Ellipse extends Shape`。
+
+### 3.3 子类必须显式声明
+
+子类**必须**用 `final`/`sealed`/`non-sealed` 修饰——不能省略。漏了就编译错。
+
+```java
+sealed class Shape permits Circle {}
+class Circle extends Shape {}   // 编译错! 必须是 final/sealed/non-sealed
+```
+
+## 四、代数数据类型（ADT）：函数式语言的核心
+
+### 4.1 什么是 ADT
+
+**代数数据类型（Algebraic Data Type，ADT）** 是函数式语言（Haskell、OCaml、Scala）的核心特性——用"积类型（Product Type）"和"和类型（Sum Type）"组合出复杂的数据结构。
+
+- **积类型**：`Point(int x, int y)` ——一个点 = x **和** y。两者都有，"乘法"组合。
+- **和类型**：`Shape = Circle | Square | Triangle` ——一个形状 = 圆 **或** 方 **或** 三角。"加法"组合。
+
+Java 之前没有"和类型"——任何 `class` 都能被任意继承，无法表达"Shape **只有这三种**"。Sealed Classes 让 Java 终于有了"和类型"。
+
+### 4.2 Java 建模 ADT 的范式
+
+```java
+// 和类型: Shape 只有这三种
+public sealed interface Shape permits Circle, Rectangle, Triangle {}
+
+// 积类型: 每种形状有自己的属性
+record Circle(double radius) implements Shape {}
+record Rectangle(double width, double height) implements Shape {}
+record Triangle(double a, double b, double c) implements Shape {}
+```
+
+这就是经典的 ADT 建模——`sealed interface` 定义"和类型"，`record` 定义"积类型"。每个 `record` 是不可变的值对象，整个继承层次是封闭的。
+
+### 4.3 ADT 的好处：穷举检查
+
+ADT 最大的好处是 **switch 穷举检查（exhaustiveness）**——编译器能检查"是否处理了所有情况"：
+
+```java
+double area(Shape shape) {
+    return switch (shape) {
+        case Circle(double r) -> Math.PI * r * r;
+        case Rectangle(double w, double h) -> w * h;
+        // case Triangle 漏了! 编译器警告: 没有穷举
+    };
+}
+```
+
+如果将来加 `case Pentagon`，所有 switch 都会编译警告——逼迫你更新所有处理 Shape 的地方。这是 ADT + Pattern Matching 的"编译期保证"，传统 Java 做不到。
+
+## 五、Sealed + Record + Pattern Matching：组合拳
+
+下面这个例子展示三者的经典组合——建模一个表达式树（AST），求值时用 Pattern Matching 解构。这是编译器、规则引擎、配置系统的经典场景。
+
+```java
+// 抽象表达式: 只有三种
+sealed interface Expr permits Num, Add, Mul {}
+
+record Num(double value) implements Expr {}
+record Add(Expr left, Expr right) implements Expr {}
+record Mul(Expr left, Expr right) implements Expr {}
+
+// 求值
+double eval(Expr expr) {
+    return switch (expr) {
+        case Num(double v) -> v;
+        case Add(Expr l, Expr r) -> eval(l) + eval(r);
+        case Mul(Expr l, Expr r) -> eval(l) * eval(r);
+        // 不需要 default! 编译器知道只有这三种
+    };
+}
+
+// 表达式: (3 + 4) * 5
+Expr expr = new Mul(new Add(new Num(3), new Num(4)), new Num(5));
+System.out.println(eval(expr));   // 35.0
+```
+
+**`eval` 不需要 `default`**——`Expr` 是 sealed，编译器知道只有 `Num`/`Add`/`Mul` 三种。这是 ADT + Pattern Matching 的威力——编译期保证穷举，未来加 `Sub` 子类会立刻报错提醒你。
+
+## 六、Sealed vs Final vs Abstract
+
+| 修饰 | 继承性 | 何时用 |
+| --- | --- | --- |
+| `final` | 完全封闭，不能继承 | 单一不可变值（如 String） |
+| `sealed` | 白名单封闭，指定子类可继承 | 领域建模的"和类型"，子类已知 |
+| `non-sealed` | 开放继承 | 在密封层次里"放开口子" |
+| （无修饰） | 默认开放继承 | 传统 Java 类 |
+| `abstract` | 必须被继承才能用 | 模板方法、抽象基类 |
+
+Sealed 不是替代 `final`/`abstract`，而是**填上中间的空白**——介于"完全开放"和"完全封闭"之间的"白名单封闭"。
+
+## 七、实战：用 Sealed + Record 建模领域
+
+下面的例子演示用 Sealed + Record 建模一个"支付方式"的 ADT，配合 switch 模式匹配做不同支付的处理。这是真实业务里 ADT 的典型应用。
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    // === 1. 用 sealed + record 建模支付方式 ADT ===
+    public sealed interface PaymentMethod permits Cash, CreditCard, Alipay, WechatPay {}
+
+    public record Cash(double amount) implements PaymentMethod {
+        public Cash {
+            if (amount < 0) throw new IllegalArgumentException("现金不能为负");
+        }
+    }
+    public record CreditCard(String cardNo, String holder, double amount) implements PaymentMethod {
+        public CreditCard {
+            if (cardNo == null || cardNo.length() < 12) {
+                throw new IllegalArgumentException("卡号无效");
+            }
+            if (amount < 0) throw new IllegalArgumentException("金额不能为负");
+        }
+    }
+    public record Alipay(String userId, double amount) implements PaymentMethod {}
+    public record WechatPay(String openId, double amount) implements PaymentMethod {}
+
+    // === 2. 用 sealed + record 建模支付结果 ===
+    public sealed interface PaymentResult permits Success, Failure, Pending {}
+
+    public record Success(String txnId, double paid) implements PaymentResult {}
+    public record Failure(String reason) implements PaymentResult {}
+    public record Pending(String txnId, String statusUrl) implements PaymentResult {}
+
+    // === 3. 处理函数: 穷举所有 PaymentMethod ===
+    public static PaymentResult process(PaymentMethod method) {
+        return switch (method) {
+            case Cash(double amt) -> {
+                System.out.println("  收取现金 " + amt);
+                yield new Success("CASH-" + System.nanoTime(), amt);
+            }
+            case CreditCard(String card, String holder, double amt) -> {
+                System.out.println("  刷卡: " + holder + " (" + maskCard(card) + ") 金额 " + amt);
+                if (amt > 10000) {
+                    yield new Failure("单笔超限");
+                }
+                yield new Success("CC-" + System.nanoTime(), amt);
+            }
+            case Alipay(String user, double amt) -> {
+                System.out.println("  支付宝: " + user + " 金额 " + amt);
+                yield new Pending("ALI-" + System.nanoTime(), "https://alipay.com/status");
+            }
+            case WechatPay(String openId, double amt) -> {
+                System.out.println("  微信支付: " + openId + " 金额 " + amt);
+                yield new Success("WX-" + System.nanoTime(), amt);
+            }
+            // 不需要 default! 编译器知道只有这四种
+        };
+    }
+
+    // === 4. 处理结果: 穷举所有 PaymentResult ===
+    public static String describe(PaymentResult r) {
+        return switch (r) {
+            case Success(String id, double paid) -> "成功: 交易号 " + id + ", 实付 " + paid;
+            case Failure(String reason) -> "失败: " + reason;
+            case Pending(String id, String url) -> "处理中: 交易号 " + id + ", 状态页 " + url;
+        };
+    }
+
+    static String maskCard(String card) {
+        return card.substring(0, 4) + "****" + card.substring(card.length() - 4);
+    }
+
+    public static void main(String[] args) {
+        System.out.println("=== Sealed Classes + Record 建模 ADT 演示 ===\\n");
+
+        // 1. 演示 ADT 建模
+        System.out.println("--- 1. 支付方式 ADT ---");
+        List<PaymentMethod> methods = List.of(
+            new Cash(88.50),
+            new CreditCard("6225881234567890", "张三", 580.00),
+            new CreditCard("6225881234567890", "李四", 58000.00),  // 超限
+            new Alipay("user-alice", 199.99),
+            new WechatPay("wx-openid-001", 9.90)
+        );
+
+        for (PaymentMethod m : methods) {
+            System.out.println("支付方式: " + m);
+            PaymentResult result = process(m);
+            System.out.println("  -> " + describe(result));
+            System.out.println();
+        }
+
+        // 2. 演示穷举检查 - 用反射看 sealed 的 permits
+        System.out.println("--- 2. 反射查看 sealed 信息 ---");
+        System.out.println("PaymentMethod 是否密封: " + PaymentMethod.class.isSealed());
+        System.out.println("PaymentMethod 的 permitted subclasses:");
+        for (Class<?> c : PaymentMethod.class.getPermittedSubclasses()) {
+            System.out.println("  - " + c.getSimpleName()
+                + " (isRecord: " + c.isRecord() + ")");
+        }
+
+        // 3. 表达式树 (AST) - 经典 ADT 用法
+        System.out.println("\\n--- 3. 表达式树 ADT ---");
+        // (3 + 4) * (5 - 2)  = 21
+        Expr expr = new Mul(
+            new Add(new Num(3), new Num(4)),
+            new Sub(new Num(5), new Num(2))
+        );
+        System.out.println("表达式: (3 + 4) * (5 - 2)");
+        System.out.println("求值: " + eval(expr));
+        System.out.println("格式化: " + format(expr));
+
+        // 4. 演示 sealed 继承层次: Square 子类
+        System.out.println("\\n--- 4. 多层 sealed 继承 ---");
+        Shape s1 = new Circle(5);
+        Shape s2 = new FilledSquare(3);
+        Shape s3 = new RightTriangle(3, 4);
+        for (Shape s : List.of(s1, s2, s3)) {
+            System.out.println(s + " -> 面积 " + area(s));
+        }
+
+        // 5. 验证 non-sealed 子类开放继承
+        System.out.println("\\n--- 5. non-sealed 开放继承 ---");
+        Triangle rt = new RightTriangle(6, 8);
+        Triangle it = new IsoscelesTriangle(5);
+        System.out.println("RightTriangle 是否能 new: " + (rt != null));
+        System.out.println("IsoscelesTriangle 是否能 new: " + (it != null));
+        System.out.println("RightTriangle extends Triangle: " + (rt instanceof Triangle));
+    }
+
+    // === 表达式 ADT (用于演示加法/乘法/减法) ===
+    sealed interface Expr permits Num, Add, Mul, Sub {}
+    record Num(double value) implements Expr {}
+    record Add(Expr left, Expr right) implements Expr {}
+    record Mul(Expr left, Expr right) implements Expr {}
+    record Sub(Expr left, Expr right) implements Expr {}
+
+    static double eval(Expr e) {
+        return switch (e) {
+            case Num(double v) -> v;
+            case Add(Expr l, Expr r) -> eval(l) + eval(r);
+            case Mul(Expr l, Expr r) -> eval(l) * eval(r);
+            case Sub(Expr l, Expr r) -> eval(l) - eval(r);
+        };
+    }
+
+    static String format(Expr e) {
+        return switch (e) {
+            case Num(double v) -> String.valueOf(v);
+            case Add(Expr l, Expr r) -> "(" + format(l) + " + " + format(r) + ")";
+            case Mul(Expr l, Expr r) -> "(" + format(l) + " * " + format(r) + ")";
+            case Sub(Expr l, Expr r) -> "(" + format(l) + " - " + format(r) + ")";
+        };
+    }
+
+    // === Shape ADT: 演示多层 sealed 继承 ===
+    public sealed interface Shape permits Circle, Square, Triangle {}
+    public record Circle(double radius) implements Shape {}
+    public sealed abstract static class Square implements Shape permits FilledSquare, OutlinedSquare {}
+    public record FilledSquare(double side) extends Square {}
+    public record OutlinedSquare(double side) extends Square {}
+    public non-sealed static class Triangle implements Shape {}
+    public static class RightTriangle extends Triangle {
+        final double a, b;
+        RightTriangle(double a, double b) { this.a = a; this.b = b; }
+        public String toString() { return "RightTriangle[" + a + "," + b + "]"; }
+    }
+    public static class IsoscelesTriangle extends Triangle {
+        final double side;
+        IsoscelesTriangle(double side) { this.side = side; }
+        public String toString() { return "IsoscelesTriangle[" + side + "]"; }
+    }
+
+    static double area(Shape s) {
+        return switch (s) {
+            case Circle(double r) -> Math.PI * r * r;
+            case FilledSquare(double side) -> side * side;
+            case OutlinedSquare(double side) -> side * side;
+            case RightTriangle rt -> 0.5 * rt.a * rt.b;
+            case IsoscelesTriangle it -> Math.sqrt(3) / 4 * it.side * it.side;
+            case Triangle t -> 0;   // 通用 Triangle, non-sealed 开放, 必须有 default
+        };
+    }
+}`} />
+
+> **观察重点**：
+> - **`process` 和 `describe` 都没有 `default`**——`switch` 穷举了所有 `permits` 的子类，编译器认可。
+> - **`CreditCard` 紧凑构造器校验卡号**——ADT 的每个子类可以有自己的不变量。
+> - **`PaymentMethod.class.isSealed()`**——反射能查 sealed 状态，`getPermittedSubclasses()` 拿白名单。
+> - **`Square` 是 `sealed abstract`**——可以同时密封和抽象，让 `Square` 自己也是封闭层次的一部分。
+> - **`Triangle` 是 `non-sealed`**——它的子类 `RightTriangle`/`IsoscelesTriangle` 不在 `Shape.permits` 列表里，但能"穿透"上来——`case Triangle t` 必须作为兜底，因为它的子类不可枚举。
+
+## 八、和 Pattern Matching 的协作
+
+这一章反复出现的 `switch` 模式匹配是 Java 21 的特性（下一章详讲）。Sealed Classes 是 Pattern Matching 的"最佳搭档"：
+
+- **Sealed 提供"封闭"**——编译器知道所有子类。
+- **Pattern Matching 提供"解构"**——直接拿到组件。
+- **穷举检查**——switch 漏掉任何一种，编译器警告。
+
+没有 Sealed 的 switch 必须写 `default`（因为可能有未知子类），有了 Sealed 才能享受"省略 default + 编译期穷举"。
+
+## 九、Sealed 的实际应用场景
+
+| 场景 | 例子 |
+| --- | --- |
+| 领域建模 | 支付方式、订单状态、用户角色——业务上"封闭枚举"的概念 |
+| AST（抽象语法树） | 表达式树、JSON/HTML 节点、规则引擎的规则 |
+| 状态机 | 有限状态机的状态集——`sealed interface State permits Idle, Running, Paused, Done` |
+| API 返回值 | `sealed interface ApiResult permits Success, Error＜T＞` |
+| 配置项 | `sealed interface Config permits YamlConfig, JsonConfig, EnvConfig` |
+
+**何时不用 Sealed**：
+
+- 子类是开放的、第三方可扩展的（如 Spring 的 `BeanPostProcessor`）。
+- 框架的扩展点——故意开放给用户继承。
+- 子类数量爆炸——sealed 适合"少而稳定"的层次。
+
+## 十、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| `sealed class` | 声明密封类，`permits` 指定白名单子类 |
+| `permits` | 列出允许继承的子类 |
+| 子类三选一 | `final` / `sealed` / `non-sealed`，必须显式声明 |
+| 同模块/同包 | 子类必须和密封类同模块或同包 |
+| 接口也能 sealed | `sealed interface` |
+| ADT | 代数数据类型 = 和类型（sealed）+ 积类型（record） |
+| 穷举检查 | switch 模式匹配可省略 default，编译器检查穷举 |
+| 反射 API | `isSealed()`、`getPermittedSubclasses()` |
+
+**记忆口诀**：
+
+- **sealed 是"白名单继承"**——只许 state-permits 的子类继承。
+- **permits 是"邀请函"**——被邀请的子类才能进门。
+- **子类三选一**——`final` 封死、`sealed` 半封、`non-sealed` 放开。
+- **同模块同包**——子类必须和密封类"住一起"。
+- **sealed + record = ADT**——和类型 + 积类型，函数式建模。
+- **穷举检查**——编译器帮你查 switch 漏没漏。
+
+## 结语：Java 的函数式建模终于成熟
+
+Sealed Classes 是 Java 在"领域建模"上的重要补完——它和 Records、Pattern Matching 三者构成现代 Java 数据建模的"三件套"：
+
+- **Records** —— 不可变值对象（积类型）。
+- **Sealed Classes** —— 封闭继承层次（和类型）。
+- **Pattern Matching** —— 解构 + 穷举检查（用 ADT）。
+
+这三者协同，让 Java 第一次能像 Scala、Haskell 一样优雅地建模代数数据类型。下一章我们详细讲 **Pattern Matching 模式匹配**——把这三件套的"最后一块拼图"讲透，看看 instanceof 和 switch 如何配合密封类和 Record，把丑陋的 if-else 链变成优雅的 switch 表达式。我们下一章见。

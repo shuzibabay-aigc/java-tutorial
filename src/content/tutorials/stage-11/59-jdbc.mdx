@@ -1,0 +1,517 @@
+---
+title: "JDBC 详解"
+chapter: 59
+stage: "第十一阶段"
+stageName: "数据库与网络"
+order: 1
+description: "掌握 JDBC 架构与驱动类型、DriverManager、Statement vs PreparedStatement、ResultSet、批处理、自增主键、事务管理与 Savepoint，并实现通用 DAO 封装"
+pubDate: 2026-07-03
+tags: ["Java", "JDBC", "数据库", "PreparedStatement", "事务"]
+---
+
+# JDBC 详解
+
+欢迎来到第十一阶段——**数据库与网络**。前十个阶段我们的程序都在 JVM 里转悠——读写文件、操作内存。但真实世界的应用要和数据库打交道、要联网通信。这一阶段我们打开两扇门：数据库（JDBC、连接池）和网络（Socket、HttpClient）。第一扇门就是 JDBC——Java 访问数据库的"母语"。
+
+JDBC（Java Database Connectivity）是 Java 访问关系型数据库的标准 API。无论是 MySQL、PostgreSQL、Oracle 还是 SQLite，只要厂商提供了 JDBC 驱动，Java 代码就能用同一套 API 操作——这就是"一套代码，多个数据库"的抽象。
+
+## 一、JDBC 架构与驱动类型
+
+JDBC 是个双层架构：
+
+- **JDBC API**（`java.sql` 包）—— 应用面向它编程，与厂商无关。
+- **JDBC Driver API** —— 厂商实现它，把 JDBC 调用翻译成具体数据库的协议。
+
+驱动分 4 种类型（了解即可，现代都用 Type 4）：
+
+| 类型 | 原理 | 现状 |
+| --- | --- | --- |
+| **Type 1** | JDBC-ODBC 桥 | 已淘汰（Java 8 移除） |
+| **Type 2** | 部分 Java + 本地库 | 少见 |
+| **Type 3** | 纯 Java，通过网络中间件 | 少见 |
+| **Type 4** | 纯 Java，直连数据库 | **主流**（MySQL/PG 驱动都是） |
+
+Type 4 是纯 Java 实现，跨平台、无需本地库，所以现代 JDBC 驱动几乎都是 Type 4。
+
+## 二、连接数据库
+
+`DriverManager.getConnection` 是连接的入口：
+
+```java
+// 加载驱动 (JDBC 4.0+ 自动加载, 可省略)
+Class.forName("com.mysql.cj.jdbc.Driver");
+
+// 三个参数: url, username, password
+String url = "jdbc:mysql://localhost:3306/test?useSSL=false&serverTimezone=UTC";
+try (Connection conn = DriverManager.getConnection(url, "root", "123456")) {
+    System.out.println("连接成功: " + conn);
+} catch (SQLException e) {
+    e.printStackTrace();
+}
+```
+
+URL 格式：`jdbc:＜子协议＞://＜host＞:＜port＞/＜数据库＞?＜参数＞`。不同数据库的子协议不同——MySQL 是 `mysql`、PostgreSQL 是 `postgresql`、Oracle 是 `oracle:thin`、SQLite 是 `sqlite`。
+
+JDBC 4.0（Java 6）起，驱动通过 `META-INF/services/java.sql.Driver` 自动发现，`Class.forName` 可以省略——只要驱动 jar 在 classpath 里。
+
+## 三、Statement vs PreparedStatement
+
+执行 SQL 有两种主要方式——`Statement` 和 `PreparedStatement`。
+
+### 3.1 Statement：直接拼 SQL（有 SQL 注入风险）
+
+```java
+Statement stmt = conn.createStatement();
+String name = "张三";   // 假设来自用户输入
+ResultSet rs = stmt.executeQuery("SELECT * FROM users WHERE name = '" + name + "'");
+```
+
+问题：如果用户输入 `' OR '1'='1`，SQL 变成 `SELECT * FROM users WHERE name = '' OR '1'='1'`——**SQL 注入**！所有用户都查出来了。
+
+### 3.2 PreparedStatement：预编译 + 参数化（防注入）
+
+```java
+String sql = "SELECT * FROM users WHERE name = ?";
+PreparedStatement ps = conn.prepareStatement(sql);
+ps.setString(1, "张三");    // 索引从 1 开始!
+ResultSet rs = ps.executeQuery();
+```
+
+`?` 是占位符，参数通过 `setString`/`setInt`/`setObject` 等填充。驱动会对参数做转义——单引号会被转义成 `\'`，注入无效。**永远用 `PreparedStatement`，不要用 `Statement` 拼用户输入！**
+
+```java
+ps.setString(1, "' OR '1'='1");   // 会被当成普通字符串, 不会注入
+```
+
+`PreparedStatement` 还有两个额外好处：
+
+1. **预编译**——同一条 SQL 多次执行时，数据库只编译一次执行计划，性能高。
+2. **类型安全**——`setInt` 传非数字会编译错，避免类型混乱。
+
+## 四、ResultSet 与游标
+
+`ResultSet` 是查询结果集——它是一个"游标"（cursor），初始指向第一行之前，`next()` 移动到下一行并返回是否有数据。
+
+```java
+ResultSet rs = ps.executeQuery();
+while (rs.next()) {           // 移动到下一行
+    int id = rs.getInt("id");          // 按列名取
+    String name = rs.getString(2);     // 按列索引取 (从 1 开始!)
+    Date created = rs.getDate("created_at");
+    System.out.println(id + ", " + name + ", " + created);
+}
+```
+
+注意 JDBC 的索引**从 1 开始**（不是 0）——这是历史遗留，许多 JDBC API 都是 1-based。
+
+默认 `ResultSet` 只能 `next()` 向前滚动、只读。要可滚动可更新：
+
+```java
+Statement stmt = conn.createStatement(
+    ResultSet.TYPE_SCROLL_INSENSITIVE,   // 可滚动
+    ResultSet.CONCUR_UPDATABLE           // 可更新
+);
+// 之后 rs.previous()/rs.first()/rs.absolute(3) 等都能用
+```
+
+实际开发很少用可滚动结果集——大数据量时占用内存，一般用 `LIMIT`/`OFFSET` 分页。
+
+## 五、批处理
+
+要执行大量 INSERT/UPDATE，一条条发太慢——`addBatch` + `executeBatch` 一次性发给数据库：
+
+```java
+conn.setAutoCommit(false);
+PreparedStatement ps = conn.prepareStatement("INSERT INTO logs(msg) VALUES(?)");
+for (int i = 0; i < 1000; i++) {
+    ps.setString(1, "log " + i);
+    ps.addBatch();          // 加入批
+    if (i % 100 == 0) {
+        ps.executeBatch();   // 每 100 条执行一次
+        ps.clearBatch();
+    }
+}
+ps.executeBatch();           // 剩余的
+conn.commit();
+```
+
+批处理能把 1000 次网络往返压缩到 10 次，性能提升 10 倍以上。
+
+## 六、获取自增主键
+
+INSERT 后经常需要拿到数据库生成的自增主键：
+
+```java
+String sql = "INSERT INTO users(name) VALUES(?)";
+PreparedStatement ps = conn.prepareStatement(
+    sql,
+    Statement.RETURN_GENERATED_KEYS     // 声明要返回主键
+);
+ps.setString(1, "张三");
+ps.executeUpdate();
+
+ResultSet keys = ps.getGeneratedKeys();
+if (keys.next()) {
+    long id = keys.getLong(1);   // 自增主键
+    System.out.println("新用户 id: " + id);
+}
+```
+
+## 七、事务管理
+
+JDBC 默认**自动提交**——每条 SQL 执行完立即 commit。要事务控制，先关掉自动提交：
+
+```java
+Connection conn = DriverManager.getConnection(url, user, pwd);
+conn.setAutoCommit(false);   // 关闭自动提交
+
+try {
+    // 转账: A 减 100, B 加 100
+    ps1.executeUpdate("UPDATE account SET balance = balance - 100 WHERE id = 1");
+    ps2.executeUpdate("UPDATE account SET balance = balance + 100 WHERE id = 2");
+    conn.commit();            // 都成功 -> 提交
+} catch (SQLException e) {
+    conn.rollback();          // 任一失败 -> 回滚
+    throw e;
+}
+```
+
+### 7.1 Savepoint：部分回滚
+
+事务里有时只想回滚一部分，不影响前面已成功的操作——`Savepoint` 派上用场：
+
+```java
+conn.setAutoCommit(false);
+try {
+    ps1.executeUpdate("INSERT ...");   // 操作 1
+
+    Savepoint sp = conn.setSavepoint("before_risky");   // 设置保存点
+    try {
+        ps2.executeUpdate("INSERT ...");   // 操作 2 (可能失败)
+    } catch (SQLException e) {
+        conn.rollback(sp);    // 只回滚到 sp, 操作 1 保留
+    }
+
+    conn.commit();            // 操作 1 + 操作 2(若成功) 一起提交
+} catch (SQLException e) {
+    conn.rollback();
+}
+```
+
+## 八、实战：通用 DAO 封装
+
+由于 Piston 在线环境没有真实数据库驱动，我用**模拟的 JDBC API** 演示完整流程——所有接口签名和真 JDBC 一致，只是底层用内存 Map 模拟数据库。你换上真实 JDBC 驱动，代码逻辑完全一样。
+
+<CodeRunner code={`import java.sql.*;
+import java.util.*;
+import java.lang.reflect.*;
+
+// === 模拟 JDBC 核心 API (签名与真 JDBC 一致) ===
+class MockConnection {
+    private boolean autoCommit = true;
+    private final List<String> executedSql = new ArrayList<>();
+    void setAutoCommit(boolean v) { this.autoCommit = v; }
+    boolean getAutoCommit() { return autoCommit; }
+    void commit() { System.out.println("  [DB] COMMIT"); }
+    void rollback() { System.out.println("  [DB] ROLLBACK"); }
+    void rollback(Object savepoint) { System.out.println("  [DB] ROLLBACK TO " + savepoint); }
+    Object setSavepoint(String name) {
+        System.out.println("  [DB] SAVEPOINT " + name);
+        return "SP:" + name;
+    }
+    void execute(String sql) { executedSql.add(sql); System.out.println("  [DB] 执行: " + sql); }
+    Object executeQuery(String sql) { executedSql.add(sql); System.out.println("  [DB] 查询: " + sql); return sql; }
+    void close() {}
+}
+
+class MockPreparedStatement {
+    private final String sql;
+    private final Map<Integer, Object> params = new HashMap<>();
+    public MockPreparedStatement(String sql) { this.sql = sql; }
+    public void setString(int i, String v) { params.put(i, v); }
+    public void setInt(int i, int v) { params.put(i, v); }
+    public void setObject(int i, Object v) { params.put(i, v); }
+    public int executeUpdate() {
+        System.out.println("  [DB] 执行更新: " + sql + " 参数=" + params);
+        return 1;
+    }
+    public List<Map<String, Object>> executeQuery() {
+        System.out.println("  [DB] 执行查询: " + sql + " 参数=" + params);
+        // 模拟返回结果
+        List<Map<String, Object>> rows = new ArrayList<>();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("id", params.getOrDefault(1, 1));
+        row.put("name", "模拟用户");
+        row.put("age", 20);
+        rows.add(row);
+        return rows;
+    }
+    public void addBatch() {}
+    public int[] executeBatch() { return new int[]{1, 1, 1}; }
+    public void close() {}
+}
+
+// === 真实项目里直接用 java.sql.Connection / PreparedStatement ===
+// 这里用 Mock 演示, 逻辑完全一致
+
+// 通用 DAO 基类
+abstract class BaseDao<T> {
+    protected final MockConnection conn;
+    public BaseDao(MockConnection conn) { this.conn = conn; }
+
+    // 模板方法: 子类实现具体映射
+    protected abstract T mapRow(Map<String, Object> row);
+    protected abstract String table();
+
+    // 通用查询: 按 id
+    public T findById(int id) {
+        String sql = "SELECT * FROM " + table() + " WHERE id = ?";
+        MockPreparedStatement ps = new MockPreparedStatement(sql);
+        ps.setInt(1, id);
+        List<Map<String, Object>> rows = ps.executeQuery();
+        return rows.isEmpty() ? null : mapRow(rows.get(0));
+    }
+
+    // 通用查询: 返回所有
+    public List<T> findAll() {
+        String sql = "SELECT * FROM " + table();
+        MockPreparedStatement ps = new MockPreparedStatement(sql);
+        return rowsToEntities(ps.executeQuery());
+    }
+
+    protected List<T> rowsToEntities(List<Map<String, Object>> rows) {
+        List<T> list = new ArrayList<>();
+        for (Map<String, Object> row : rows) list.add(mapRow(row));
+        return list;
+    }
+}
+
+// 用户实体
+class User {
+    int id; String name; int age;
+    public User(int id, String name, int age) {
+        this.id = id; this.name = name; this.age = age;
+    }
+    @Override public String toString() { return "User{id=" + id + ", name='" + name + "', age=" + age + "}"; }
+}
+
+class UserDao extends BaseDao<User> {
+    public UserDao(MockConnection conn) { super(conn); }
+    @Override protected String table() { return "users"; }
+    @Override protected User mapRow(Map<String, Object> row) {
+        return new User((int) row.get("id"), (String) row.get("name"), (int) row.get("age"));
+    }
+
+    public int insert(User u) {
+        String sql = "INSERT INTO users(name, age) VALUES(?, ?)";
+        MockPreparedStatement ps = new MockPreparedStatement(sql);
+        ps.setString(1, u.name);
+        ps.setInt(2, u.age);
+        return ps.executeUpdate();
+    }
+
+    public int[] batchInsert(List<User> users) {
+        String sql = "INSERT INTO users(name, age) VALUES(?, ?)";
+        MockPreparedStatement ps = new MockPreparedStatement(sql);
+        for (User u : users) {
+            ps.setString(1, u.name);
+            ps.setInt(2, u.age);
+            ps.addBatch();
+        }
+        return ps.executeBatch();
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== JDBC 实战: 通用 DAO 封装 (模拟) ===\\n");
+
+        // 1. 获取连接 (真实: DriverManager.getConnection)
+        MockConnection conn = new MockConnection();
+
+        // 2. 基本 CRUD
+        System.out.println("--- 1. 基本 CRUD ---");
+        UserDao dao = new UserDao(conn);
+        dao.insert(new User(0, "张三", 20));
+        dao.insert(new User(0, "李四", 22));
+
+        User u = dao.findById(1);
+        System.out.println("查到: " + u);
+
+        List<User> all = dao.findAll();
+        System.out.println("全部: " + all);
+
+        // 3. 批处理
+        System.out.println("\\n--- 2. 批处理 ---");
+        List<User> batch = Arrays.asList(
+            new User(0, "王五", 25),
+            new User(0, "赵六", 28),
+            new User(0, "钱七", 30)
+        );
+        int[] counts = dao.batchInsert(batch);
+        System.out.println("批处理影响行数: " + Arrays.toString(counts));
+
+        // 4. 事务管理
+        System.out.println("\\n--- 3. 事务管理 ---");
+        conn.setAutoCommit(false);
+        try {
+            new UserDao(conn).insert(new User(0, "事务A", 1));
+            new UserDao(conn).insert(new User(0, "事务B", 2));
+            conn.commit();
+            System.out.println("事务成功, 已提交");
+        } catch (Exception e) {
+            conn.rollback();
+            System.out.println("事务失败, 已回滚");
+        }
+
+        // 5. 事务回滚演示
+        System.out.println("\\n--- 4. 事务回滚演示 ---");
+        conn.setAutoCommit(false);
+        try {
+            new UserDao(conn).insert(new User(0, "成功操作", 1));
+            System.out.println("第一个操作成功");
+            throw new RuntimeException("第二个操作失败!");
+        } catch (Exception e) {
+            conn.rollback();
+            System.out.println("捕获异常: " + e.getMessage() + ", 整个事务回滚");
+        }
+
+        // 6. Savepoint 部分回滚
+        System.out.println("\\n--- 5. Savepoint 部分回滚 ---");
+        conn.setAutoCommit(false);
+        try {
+            new UserDao(conn).insert(new User(0, "必成功", 1));
+            Object sp = conn.setSavepoint("before_risky");
+            try {
+                throw new RuntimeException("危险操作失败");
+            } catch (Exception inner) {
+                conn.rollback(sp);   // 只回滚危险操作
+                System.out.println("危险操作回滚, 但 '必成功' 保留");
+            }
+            new UserDao(conn).insert(new User(0, "之后操作", 2));
+            conn.commit();
+        } catch (Exception e) {
+            conn.rollback();
+        }
+
+        System.out.println("\\n=== JDBC 关键点 ===");
+        System.out.println("1. PreparedStatement 防 SQL 注入 (永远不要拼字符串)");
+        System.out.println("2. JDBC 索引从 1 开始 (历史遗留)");
+        System.out.println("3. setAutoCommit(false) + commit/rollback 控制事务");
+        System.out.println("4. Savepoint 实现部分回滚");
+        System.out.println("5. addBatch + executeBatch 批处理提性能");
+        System.out.println("6. getGeneratedKeys 获取自增主键");
+    }
+}`} />
+
+下面是真实 JDBC 的完整代码模板（在本地有 MySQL 时可直接运行）：
+
+```java
+import java.sql.*;
+
+public class JdbcDemo {
+    public static void main(String[] args) throws SQLException {
+        String url = "jdbc:mysql://localhost:3306/test?useSSL=false&serverTimezone=UTC";
+        try (Connection conn = DriverManager.getConnection(url, "root", "123456")) {
+            // 建表
+            try (Statement st = conn.createStatement()) {
+                st.execute("CREATE TABLE IF NOT EXISTS users ("
+                    + "id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50), age INT)");
+            }
+
+            // 插入 (PreparedStatement + 获取自增主键)
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO users(name, age) VALUES(?, ?)",
+                    Statement.RETURN_GENERATED_KEYS)) {
+                ps.setString(1, "张三");
+                ps.setInt(2, 20);
+                ps.executeUpdate();
+                try (ResultSet keys = ps.getGeneratedKeys()) {
+                    if (keys.next()) System.out.println("新 id: " + keys.getLong(1));
+                }
+            }
+
+            // 查询
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT * FROM users WHERE age > ?")) {
+                ps.setInt(1, 18);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        System.out.println(rs.getInt("id") + " "
+                            + rs.getString("name") + " " + rs.getInt("age"));
+                    }
+                }
+            }
+
+            // 事务
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "UPDATE users SET age = age + ? WHERE id = ?")) {
+                ps.setInt(1, 1); ps.setInt(2, 1); ps.executeUpdate();
+                ps.setInt(1, -1); ps.setInt(2, 2); ps.executeUpdate();
+                conn.commit();
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            }
+        }
+    }
+}
+```
+
+> **观察重点**：
+> - **`PreparedStatement` 用 `?` 占位 + `setXxx` 填参**——防 SQL 注入的核心。
+> - **JDBC 索引从 1 开始**——`setString(1, ...)` 不是 `0`，这是历史遗留。
+> - **事务三步走**——`setAutoCommit(false)` → 业务 → `commit`/`rollback`。
+> - **`try-with-resources` 自动关连接**——Connection/Statement/ResultSet 都要关，否则泄漏。
+> - **Savepoint 回滚到指定点**——不影响保存点之前的操作。
+
+## 九、JDBC 资源管理与陷阱
+
+JDBC 资源（Connection/Statement/ResultSet）都是"重型"对象，必须及时关闭，否则泄漏。最佳实践：
+
+```java
+// 推荐: try-with-resources 自动关闭
+try (Connection conn = dataSource.getConnection();
+     PreparedStatement ps = conn.prepareStatement(sql)) {
+    try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) { ... }
+    }
+}
+```
+
+**常见陷阱**：
+
+1. **Connection 不关**——数据库连接数有限（MySQL 默认 151），泄漏多了拒绝服务。
+2. **ResultSet 不关**——游标占用数据库资源，长期不关会撑爆。
+3. **在循环里创建 Statement**——每次循环 new 一个，资源爆炸。
+4. **`SELECT *`**——查不需要的列浪费带宽，明确列出列名。
+5. **事务跨方法**——`setAutoCommit(false)` 后跨方法调用，容易忘记 commit。
+
+## 十、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| `DriverManager.getConnection` | 获取连接 |
+| `Statement` vs `PreparedStatement` | 后者防 SQL 注入 |
+| `?` 占位符 | `setString`/`setInt` 填参，索引从 1 |
+| `ResultSet` | 游标式遍历，`next()` 移动 |
+| 批处理 | `addBatch`/`executeBatch` |
+| 自增主键 | `RETURN_GENERATED_KEYS` + `getGeneratedKeys` |
+| 事务 | `setAutoCommit(false)` + `commit`/`rollback` |
+| Savepoint | 部分回滚 |
+| 资源管理 | `try-with-resources` 自动关 |
+
+**记忆口诀**：
+
+- **永远用 `PreparedStatement`**——别用 `Statement` 拼用户输入。
+- **JDBC 索引从 1 开始**——历史遗留，别按 0 算。
+- **事务三件套**——关自动提交、commit、rollback。
+- **资源用 try-with-resources**——Connection/Statement/ResultSet 都要关。
+- **批处理先 add 再 execute**——大量插入性能 10 倍。
+
+## 结语：从 JDBC 到连接池
+
+这一章我们用模拟环境演示了 JDBC 的全流程——连接、CRUD、批处理、事务、Savepoint。真实项目里基本不直接写 JDBC——会用 MyBatis/JPA 等框架封装。但理解 JDBC 是理解这些框架的前提——MyBatis 的 `#{}` 就是 `PreparedStatement` 的 `?`，`@Transactional` 就是 `setAutoCommit(false)`。
+
+下一章我们看一个现实问题——每次请求都 `getConnection` 太慢怎么办？答案是**连接池**。

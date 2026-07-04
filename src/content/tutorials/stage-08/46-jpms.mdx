@@ -1,0 +1,329 @@
+---
+title: "模块系统"
+chapter: 46
+stage: "第八阶段"
+stageName: "现代 Java 特性"
+order: 1
+description: "理解 JPMS 模块系统、jar hell 痛点、module-info.java 的 requires/exports/opens/uses/provides、模块路径与类路径、jdeps 依赖分析、unnamed/automatic 模块迁移策略"
+pubDate: 2026-07-03
+tags: ["Java", "JPMS", "模块化", "Module", "jdeps", "JDK 9"]
+---
+
+# 模块系统
+
+从这一章开始，我们进入 **第八阶段：现代 Java 特性**。这一阶段要讲的，是 Java 在 2017 年之后陆续引入的一批"现代化"语法和 API——模块系统、Records、Sealed Classes、Pattern Matching、HttpClient、Text Blocks 等。它们让 Java 在保持向后兼容的同时，终于追上了 Kotlin、Scala 这些"后起之秀"的语法表达力。
+
+我们从一个争议最大、影响最深、也最难用的特性开始——**Java 平台模块系统（Java Platform Module System，JPMS）**，也就是 JSR 376、JEP 261，在 JDK 9 正式发布。它把"乐高积木"的理念带进了 Java——每个模块是一块独立的积木，有清晰的接口和隐藏的内部，积木之间通过明确的契约拼接。
+
+## 一、为什么需要模块化：jar hell 的痛苦
+
+在讲"是什么"之前，先感受"为什么"。
+
+### 1.1 jar hell：依赖地狱的 Java 版
+
+在没有模块系统的年代，Java 把所有 jar 包都丢到 classpath 上，问题层出不穷：
+
+- **版本冲突**——`A.jar` 依赖 `commons-lang3:3.8`，`B.jar` 依赖 `commons-lang3:3.12`。classpath 只认类名不认版本，谁排前面就用谁，结果可能运行时崩在某个不存在的方法上。
+- **可见性失控**——`public` 就是"全宇宙可见"。你想让 `internal` 包只给自己的模块用，做不到。Spring、Guava 都被逼着把内部 API 标 `public`，结果被用户大量误用，想改都改不动。
+- **classpath 是一锅粥**——classpath 上的所有类互相可见，没有边界。一个 jar 缺了依赖，编译时不报错，运行时才 `NoClassDefFoundError`。
+- **JDK 自己也太胖**——`rt.jar` 几千个类，写个 HelloWorld 也要拖上 AWT、Swing、CORBA。嵌入式设备、云原生镜像都嫌它大。
+
+### 1.2 模块化要解决什么
+
+JPMS 的目标：
+
+1. **可靠的配置**——模块声明自己需要什么、提供什么，启动时就检查依赖完整性，而不是运行时崩。
+2. **强封装**——`public` 不再"全宇宙可见"，只对 `exports` 出去的包可见，内部包真正隐藏。
+3. **可组合的平台**——JDK 自己拆成几十个小模块，应用只带需要的，支持定制 JRE（`jlink`）。
+
+## 二、module-info.java：模块的身份证
+
+每个模块在根目录有一个 `module-info.java` 文件，它就是模块的"身份证"。
+
+### 2.1 最简单的模块
+
+```
+myapp/
+├── module-info.java
+└── com/example/
+    └── Main.java
+```
+
+```java
+// module-info.java
+module myapp {
+    requires java.sql;       // 依赖 java.sql 模块
+    exports com.example;     // 对外暴露 com.example 包
+}
+```
+
+```java
+// com/example/Main.java
+package com.example;
+import java.sql.Connection;
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("模块 myapp 启动");
+    }
+}
+```
+
+### 2.2 五个关键关键字
+
+`module-info.java` 里能用到的关键字不多，但每一个都重要：
+
+| 关键字 | 作用 | 示例 |
+| --- | --- | --- |
+| `requires` | 声明依赖某模块 | `requires java.sql;` |
+| `requires transitive` | 传递依赖（使用者也能读到） | `requires transitive java.logging;` |
+| `requires static` | 编译时必需，运行时可选 | `requires static lombok;` |
+| `exports` | 对外暴露某包 | `exports com.example.api;` |
+| `exports ... to` | 只对指定模块暴露 | `exports com.example.internal to mylib;` |
+| `opens` | 运行时开放（用于反射） | `opens com.example.dto;` |
+| `opens ... to` | 只对指定模块开放反射 | `opens com.example.dto to myframework;` |
+| `uses` | 声明使用某 ServiceLoader 服务 | `uses com.example.Driver;` |
+| `provides ... with` | 提供某服务的实现 | `provides com.example.Driver with com.example.MyDriver;` |
+
+**`exports` vs `opens` 的区别**——这是初学者最容易混淆的点：
+
+- `exports`：**编译时和运行时都可见**——别的模块能 `import` 你的类、直接调用。
+- `opens`：**只在运行时通过反射可见**——编译时不能 import，但反射能访问。典型用于 Spring、Hibernate 这种靠反射扫字段的框架。
+
+如果某个包既 `exports` 又 `opens`，那就是既能直接用又能反射。
+
+### 2.3 uses/provides：服务机制
+
+JPMS 内建了一套类似 SPI（Service Provider Interface）的机制。一个模块声明 `uses` 某接口，另一个模块 `provides` 实现，运行时 `ServiceLoader` 自动发现。
+
+```java
+// 框架模块
+module myframework {
+    exports com.fw.api;
+    uses com.fw.api.Plugin;     // 我要找 Plugin 的实现
+}
+
+// 插件模块
+module myplugin {
+    requires myframework;
+    provides com.fw.api.Plugin with com.plugin.MyPlugin;  // 我提供实现
+}
+```
+
+```java
+// 框架代码
+ServiceLoader<Plugin> loader = ServiceLoader.load(Plugin.class);
+for (Plugin p : loader) {
+    p.run();
+}
+```
+
+这就是 JDBC 4.0+ 自动发现驱动的原理——`java.sql` 模块 `uses java.sql.Driver`，各驱动 jar `provides java.sql.Driver with ...`。
+
+## 三、模块路径 vs 类路径
+
+模块系统引入了**模块路径（module path）**，和传统的类路径（class path）并存。
+
+| 维度 | class path | module path |
+| --- | --- | --- |
+| 单元 | jar/目录 | 模块化 jar/目录 |
+| 可见性 | 所有类互相可见（公共） | 按 `exports`/`requires` 控制 |
+| 检查时机 | 运行时（崩了才知道） | 启动时（启动失败） |
+| 包冲突 | 同名包可能加载两次（不会报错，行为未定义） | 同名包严格禁止（**split package** 错误） |
+
+**关键规则**：JPMS 严禁**分裂包（split package）**——同一个包不能出现在两个模块里。这是模块化迁移时最常踩的坑。
+
+### 3.1 unnamed module：类路径上的代码
+
+类路径上的所有类，会被自动放进一个叫**未命名模块（unnamed module）**的容器里。它有几个特点：
+
+- **自动 `requires` 所有模块**——能读到模块路径上所有 `exports` 的包。
+- **不 `exports` 任何包**——模块路径上的代码看不到类路径上的类（除非反射）。
+- **每个类加载器一个 unnamed module**。
+
+这就是为什么"老代码放 classpath，新模块放 module path"能共存—— unnamed module 是个"二等公民"，只能被模块用反射访问，不能被模块直接 `import`。
+
+### 3.2 automatic module：jar 的过渡身份
+
+一个**普通的 jar**（没有 `module-info.class`）放到**模块路径**上，会自动变成**自动模块（automatic module）**。它的特点：
+
+- **模块名**取自 jar 名（`foo-bar-1.0.jar` → 模块名 `foo.bar`，可由 `Automatic-Module-Name: foo.bar` 在 MANIFEST 显式指定）。
+- **`requires` 所有模块**——能读所有 `exports`。
+- **`exports` 所有包**——所有包自动对外可见。
+
+这是迁移的"过渡桥梁"——你不用一次性把所有 jar 都模块化，先把核心模块化，依赖的 jar 当 automatic module 用。
+
+## 四、jdeps：依赖分析利器
+
+模块化改造最大的工作量是搞清楚"谁依赖谁"。JDK 自带的 `jdeps` 工具就是干这个的。
+
+```bash
+# 分析一个 jar 依赖了哪些 JDK 模块
+jdeps --jdk-internals myapp.jar
+
+# 分析 jar 之间的依赖
+jdeps -recursive -module-path libs myapp.jar
+
+# 推荐生成的 module-info.java
+jdeps --generate-module-info ./out myapp.jar
+```
+
+`jdeps --jdk-internals` 还会警告你用了 JDK 内部 API（如 `sun.misc.Unsafe`）——JDK 17 起这些内部 API 大多被强封装，模块化迁移必须先扫一遍。
+
+## 五、模块化迁移策略：自底向上
+
+把一个老项目迁移到完全模块化，是个"渐进"过程。社区总结出两条路径：
+
+### 5.1 自底向上（Bottom-Up）
+
+1. **底层库先模块化**——那些不被项目内部依赖的 jar 优先。
+2. **中间层逐步跟进**——等依赖的库都模块化了，再加 `module-info`。
+3. **应用层最后做**。
+
+每一步都把已模块化的 jar 放 module path，未模块化的放 class path 或当 automatic module。
+
+### 5.2 自顶向下（Top-Down）
+
+如果底层库不归你管、第三方还没模块化：
+
+1. **应用代码先模块化**，依赖的 jar 当 automatic module。
+2. automatic module 的包名当模块名用，先凑合。
+3. 等第三方出模块化版本再换。
+
+### 5.3 实战示例：演示模块路径与反射
+
+下面的例子演示在**单个文件**里通过反射访问未导出包，以及 `Module` API 的基本用法——这是在不分多模块项目结构时最容易跑起来的演示方式。
+
+<CodeRunner code={`import java.lang.reflect.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== JPMS 模块系统演示 ===");
+        System.out.println("Java 版本: " + System.getProperty("java.version"));
+
+        // 1. 当前类所在模块
+        Module myModule = Main.class.getModule();
+        System.out.println("\\n当前模块: " + myModule.getName()
+            + " (是否命名模块: " + myModule.isNamed() + ")");
+        System.out.println("类加载器: " + Main.class.getClassLoader());
+
+        // 2. 列出当前模块的所有 requires
+        System.out.println("\\n当前模块声明的依赖 (requires):");
+        myModule.getDescriptor().requires().forEach(req ->
+            System.out.println("  - " + req.name() + " " + req.modifiers()));
+
+        // 3. 查看 String 所在的 java.base 模块
+        Module javaBase = String.class.getModule();
+        System.out.println("\\njava.base 模块信息:");
+        System.out.println("  模块名: " + javaBase.getName());
+        System.out.println("  导出的包 (部分):");
+        javaBase.getDescriptor().exports().stream()
+            .limit(8)
+            .forEach(e -> System.out.println("    - " + e.source()));
+
+        // 4. 演示 exports 控制: java.base 导出 java.lang, 但不导出 sun.* 内部包
+        System.out.println("\\n=== 模块封装性演示 ===");
+        try {
+            // 尝试访问 JDK 内部类 (模块化后被封装)
+            Class<?> unsafe = Class.forName("sun.misc.Unsafe");
+            System.out.println("成功加载 sun.misc.Unsafe (不该看到)");
+        } catch (ClassNotFoundException e) {
+            System.out.println("无法直接加载 sun.misc.Unsafe - 已被模块封装");
+        } catch (Throwable e) {
+            System.out.println("访问被拒: " + e.getClass().getSimpleName()
+                + " - " + e.getMessage());
+        }
+
+        // 5. 演示 Module API 的反射式导出 (运行时打开)
+        System.out.println("\\n=== 运行时 Module API ===");
+        System.out.println("java.base 是否导出 java.lang 给当前模块: "
+            + javaBase.isExported("java.lang", myModule));
+        System.out.println("java.base 是否导出 sun.misc 给当前模块: "
+            + javaBase.isExported("sun.misc", myModule));
+        System.out.println("java.base 是否开放 sun.misc 给当前模块: "
+            + javaBase.isOpen("sun.misc", myModule));
+
+        // 6. 列出系统加载的所有模块
+        System.out.println("\\n=== 系统中的部分 JDK 模块 ===");
+        ModuleLayer.boot().modules().stream()
+            .map(Module::getName)
+            .filter(n -> n.startsWith("java."))
+            .sorted()
+            .limit(10)
+            .forEach(n -> System.out.println("  - " + n));
+
+        // 7. 简单示意: 模块描述符手工构造 (模拟 module-info 解析结果)
+        System.out.println("\\n=== 模块描述符手工构造示例 ===");
+        java.lang.module.ModuleDescriptor desc =
+            java.lang.module.ModuleDescriptor.newModule("myapp")
+                .requires(java.lang.module.ModuleDescriptor.Requires.MODULE_BASE)
+                .requires("java.sql")
+                .exports("com.example.api")
+                .build();
+        System.out.println("构造的模块名: " + desc.name());
+        System.out.println("requires:");
+        desc.requires().forEach(r -> System.out.println("  - " + r.name()));
+        System.out.println("exports:");
+        desc.exports().forEach(e -> System.out.println("  - " + e.source()));
+
+        System.out.println("\\n=== 总结 ===");
+        System.out.println("1. 模块 = 命名空间 + 依赖声明 + 强封装");
+        System.out.println("2. module-info.java 用 requires/exports/opens/uses/provides");
+        System.out.println("3. 模块路径按 exports/requires 控制可见性, 类路径全可见");
+        System.out.println("4. unnamed module (类路径) 和 automatic module (jar) 是迁移桥梁");
+        System.out.println("5. jdeps 分析依赖, jlink 定制 JRE");
+    }
+}`} />
+
+> **观察重点**：
+> - 当前类在 **unnamed module**（`isNamed()=false`）——因为我们没写 `module-info.java`。
+> - `sun.misc.Unsafe` 无法直接加载——JDK 17 起内部包强封装，除非加 `--add-opens` 启动参数。
+> - `Module` API 可以**运行时查询**模块的导出/开放状态——框架做反射扫描时常用。
+> - `ModuleDescriptor.newModule` 可以**编程式构造**模块描述符——动态代理、字节码增强库会用。
+
+## 六、jlink：定制 JRE
+
+模块化的"红利"之一是 `jlink`——把你的应用 + 它依赖的 JDK 模块打包成一个**定制 JRE**，不带 JVM 的几余模块。
+
+```bash
+jlink --module-path out:JAVA_HOME/jmods \
+      --add-modules myapp \
+      --launcher launch=myapp/com.example.Main \
+      --output myapp-image
+```
+
+产物是一个完整目录，包含 JVM、应用模块、启动脚本——不需要用户装 Java。Docker 镜像可以从几百 MB 缩到几十 MB。
+
+## 七、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| jar hell | 版本冲突、可见性失控、依赖运行时才崩 |
+| module-info.java | 模块的身份证，声明 requires/exports/opens/uses/provides |
+| `requires` | 依赖某模块；`transitive` 传递；`static` 运行时可选 |
+| `exports` | 编译+运行时可见；`exports to` 限定目标 |
+| `opens` | 运行时反射可见；用于框架反射访问 |
+| `uses/provides` | ServiceLoader 服务机制 |
+| 模块路径 | 按 exports/requires 严格控制可见性 |
+| 类路径 | 所有类互相可见，进入 unnamed module |
+| automatic module | 普通 jar 放模块路径，自动模块化，exports 全部包 |
+| split package | 同包禁止出现在多个模块 |
+| jdeps | 依赖分析、生成 module-info 草稿、扫内部 API |
+| jlink | 定制 JRE，云原生镜像友好 |
+
+**记忆口诀**：
+
+- **模块像乐高积木**——有凸起（exports）有凹槽（requires），契合才能拼。
+- **`exports` 是门牌**——挂出去的包，外人能进；没挂的，门锁着。
+- **`opens` 是后门钥匙**——反射能进，编译器不让 import。
+- **`unnamed` 是过渡区**——老代码的避难所。
+- **`automatic` 是临时身份**——jar 还没改造前的过渡装。
+- **分裂包是禁忌**——同包不能跨模块。
+- **`jdeps` 是侦察兵**——迁移前先派它探路。
+
+## 结语：模块化的现实
+
+JPMS 是 Java 历史上最艰难的一次升级——从 2011 年立项到 2017 年发布，争吵了 6 年，连 IBM、Red Hat 都曾公开反对。发布后社区反应冷淡：Spring、Tomcat 至今没完全模块化，绝大多数应用还在用 classpath。
+
+但模块化的价值是真实的——**强封装**让库作者终于敢重构内部 API，**jlink** 让云原生镜像变小，**JDK 自身模块化**让平台可裁剪。即便你不写 `module-info.java`，模块系统也在底层默默运行——你用的每个 JDK 类都在某个模块里。
+
+下一章我们看一个更"亲民"的现代特性——**Records 记录类**。它是 Java 14 引入、Java 16 转正的语法糖，一行代码干掉过去几十行的 POJO 样板。如果模块系统是"重型工程"，Records 就是"轻量甜品"——我们下一章见。

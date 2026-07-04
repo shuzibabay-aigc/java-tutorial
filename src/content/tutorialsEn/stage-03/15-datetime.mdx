@@ -1,0 +1,451 @@
+---
+title: "The Date and Time API"
+chapter: 15
+stage: "Stage 3"
+stageName: "Java Core Libraries"
+order: 3
+description: "Understand the flaws of the legacy date API and master the new java.time API (LocalDate, Instant, Duration, ZonedDateTime, DateTimeFormatter) with hands-on examples"
+pubDate: 2026-07-03
+tags: ["Java", "日期时间", "java.time", "LocalDate", "DateTimeFormatter"]
+---
+
+# The Date and Time API
+
+Time is a programmer's eternal adversary. It slips by silently yet tugs at every nerve of a program — orders must be paid within 30 minutes, logs must be precise to the millisecond, birthdays must be reminded every year, and time zones must align global teams to the same instant.
+
+Java's API for handling time went through an "epic generational change." The early `java.util.Date` and `Calendar` were so poorly designed that they were jokingly called "one of Java's biggest API failures." It wasn't until Java 8 introduced `java.time` (JSR 310) that Java programmers finally had a respectable date and time toolkit. In this chapter we'll first review the "indictment" against the old API, then savor the elegance of the new one.
+
+## 1. The Problems with the Legacy API
+
+### 1.1 The "original sin" of Date
+
+`java.util.Date` has been around since JDK 1.0, and its design is a "textbook counter-example":
+
+```java
+import java.util.Date;
+
+// Months start at 0! January=0, December=11
+Date d = new Date(2026 - 1900, 6 - 1, 3);   // Represents June 3, 2026
+System.out.println(d);   // Wed Jun 03 00:00:00 CST 2026
+
+// The year has to be offset by 1900!
+Date d2 = new Date(122, 0, 1);   // This is January 1, 2022
+```
+
+Two suffocating design choices:
+
+1. **Years are counted from 1900** — `new Date(122, ...)` means the year 2022.
+2. **Months are 0-based** — 0 is January, 11 is December.
+
+Countless bugs were born here. Worse, `Date` is **mutable** — its `setTime` and `setYear` methods can change its internal state, making it unsafe in multi-threaded scenarios. Almost all of its get/set methods are marked `@Deprecated`, but they can never be truly removed.
+
+### 1.2 The complexity of Calendar
+
+`Calendar` (Java 1.1) was meant to patch `Date` but introduced new complexity:
+
+```java
+import java.util.Calendar;
+
+Calendar c = Calendar.getInstance();
+c.set(2026, Calendar.JUNE, 3);   // At least months can use constants now
+int year = c.get(Calendar.YEAR);
+int month = c.get(Calendar.MONTH) + 1;   // But get is still 0-based!
+```
+
+`Calendar` is still mutable, still 0-based for months, and its API is bloated — a single class manages date, time, time zone, day of week, and milliseconds, with method names in the "field query" style of `get(Calendar.FIELD)`, which is highly unreadable.
+
+### 1.3 SimpleDateFormat is not thread-safe
+
+`SimpleDateFormat` is the legacy API's formatting tool, but it's **not thread-safe**:
+
+```java
+// Sharing the same SimpleDateFormat across threads causes bugs
+SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+// If thread A and thread B both call sdf.parse(...) at once, they may get wrong results or an exception
+```
+
+`SimpleDateFormat` has an internal `Calendar` field that `parse` and `format` mutate — concurrent use overwrites each other. This has caused countless "ghost bugs" in production.
+
+These three problems — chaotic design, unsafe mutability, and a thread-unsafe formatter — made the legacy API notorious. Java 8 finally swept them all away with `java.time`.
+
+## 2. The Core Classes of java.time (Java 8+)
+
+`java.time` (JSR 310) was led by Stephen Colebourne, the author of Joda-Time, and absorbs the best of Joda-Time. Its core design principles:
+
+- **Immutable**: All classes are immutable; methods return new objects, so they're inherently thread-safe.
+- **Clear separation**: Date, time, and instant each have a dedicated class — no mixing.
+- **Intuitive API**: `getYear()`, `plusDays(5)` — crystal clear.
+
+### 2.1 The three siblings: LocalDate, LocalTime, LocalDateTime
+
+| Class | Meaning | Example |
+| --- | --- | --- |
+| `LocalDate` | A date (year, month, day) | 2026-07-03 |
+| `LocalTime` | A time (hour, minute, second, nanosecond) | 14:30:00 |
+| `LocalDateTime` | Date + time | 2026-07-03T14:30:00 |
+
+They carry no time zone information — "Local" means "local," suited for representing "a date" itself rather than "a moment on the global timeline."
+
+```java
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.LocalDateTime;
+
+// Creation
+LocalDate today = LocalDate.now();          // today
+LocalDate birthday = LocalDate.of(2000, 1, 1);   // Months finally start at 1!
+
+LocalTime now = LocalTime.now();
+LocalTime lunch = LocalTime.of(12, 30, 0);
+
+LocalDateTime dt = LocalDateTime.now();
+LocalDateTime specific = LocalDateTime.of(2026, 7, 3, 14, 30);
+
+System.out.println(today);       // 2026-07-03
+System.out.println(birthday);    // 2000-01-01
+System.out.println(lunch);       // 12:30
+```
+
+Note one major improvement: **months now start at 1**! `LocalDate.of(2026, 7, 3)` is July 3rd — no more subtracting 1.
+
+### 2.2 Reading fields
+
+```java
+LocalDate d = LocalDate.of(2026, 7, 3);
+System.out.println(d.getYear());        // 2026
+System.out.println(d.getMonthValue());  // 7
+System.out.println(d.getDayOfMonth());  // 3
+System.out.println(d.getDayOfWeek());   // FRIDAY
+System.out.println(d.getDayOfYear());   // 184 (the 184th day of the year)
+System.out.println(d.lengthOfMonth());  // 31 (July has 31 days)
+System.out.println(d.isLeapYear());     // false (2026 is not a leap year)
+```
+
+### 2.3 Date arithmetic
+
+The arithmetic methods in `java.time` return **new objects**; the original is untouched:
+
+```java
+LocalDate today = LocalDate.now();
+
+LocalDate nextWeek = today.plusDays(7);        // plus 7 days
+LocalDate lastMonth = today.minusMonths(1);    // minus 1 month
+LocalDate nextYear = today.plusYears(1);       // plus 1 year
+LocalDate changed = today.withYear(2030);      // change the year to 2030
+LocalDate firstDay = today.withDayOfMonth(1);  // change the day to the 1st
+
+System.out.println(today);       // original object unchanged
+System.out.println(nextWeek);    // 7 days later
+```
+
+The `with` family of methods "modifies a single field" — `withYear`, `withMonth`, `withDayOfMonth` — and again returns a new object.
+
+### 2.4 Comparison
+
+```java
+LocalDate d1 = LocalDate.of(2026, 1, 1);
+LocalDate d2 = LocalDate.of(2026, 12, 31);
+
+System.out.println(d1.isBefore(d2));    // true
+System.out.println(d1.isAfter(d2));     // false
+System.out.println(d1.isEqual(d2));     // false
+```
+
+## 3. Instant: A Point on the Timeline
+
+`Instant` represents **a precise instant on the timeline** (a UTC timestamp), internally "seconds since 1970-01-01T00:00:00Z + nanoseconds."
+
+```java
+import java.time.Instant;
+
+Instant now = Instant.now();          // current UTC moment
+Instant epoch = Instant.ofEpochSecond(0);   // 1970-01-01T00:00:00Z
+
+System.out.println(now);              // 2026-07-03T06:00:00.123Z (Z=UTC)
+System.out.println(now.getEpochSecond());   // seconds
+System.out.println(now.toEpochMilli());     // milliseconds (equivalent to System.currentTimeMillis())
+```
+
+`Instant` is a **machine-friendly** representation of time — it doesn't care which time zone or calendar humans use; it only recognizes "seconds since the epoch." `LocalDateTime` is **human-friendly** — it cares about "what hour, what minute," but isn't anchored to the global timeline.
+
+The bridge between the two is the time zone: `localDateTime.atZone(zoneId)` adds a time zone and turns it into an `Instant`, and vice versa.
+
+## 4. Duration and Period
+
+### 4.1 Duration: a span of time (hours, minutes, seconds)
+
+`Duration` represents a quantity of time **precise to the nanosecond**, suited for spans at the "hours, minutes, seconds" level:
+
+```java
+import java.time.Duration;
+import java.time.LocalTime;
+
+LocalTime t1 = LocalTime.of(9, 0);
+LocalTime t2 = LocalTime.of(17, 30);
+
+Duration gap = Duration.between(t1, t2);
+System.out.println(gap.toHours());      // 8
+System.out.println(gap.toMinutes());    // 510
+System.out.println(gap.getSeconds());   // 30600
+```
+
+`Duration` also works between `Instant`s:
+
+```java
+Instant start = Instant.now();
+// ... do something time-consuming ...
+Instant end = Instant.now();
+Duration elapsed = Duration.between(start, end);
+System.out.println("Elapsed " + elapsed.toMillis() + " ms");
+```
+
+### 4.2 Period: a span of date (years, months, days)
+
+`Period` represents a date quantity at the **year, month, day** level, suited for describing a span in "human terms":
+
+```java
+import java.time.Period;
+import java.time.LocalDate;
+
+LocalDate birth = LocalDate.of(2000, 5, 15);
+LocalDate today = LocalDate.now();
+
+Period age = Period.between(birth, today);
+System.out.println(age.getYears() + " years " 
+    + age.getMonths() + " months " + age.getDays() + " days");
+```
+
+> ⚠️ Don't mix `Period` and `Duration`. `Duration.between(date1, date2)` will fail — it only handles "time" classes (Time/Instant). `Period.between(date1, date2)` only handles "date" classes (LocalDate).
+
+### 4.3 until and ChronoUnit
+
+If you only care about "how many days/months/years apart two dates are," `until` with `ChronoUnit` is more direct:
+
+```java
+import java.time.temporal.ChronoUnit;
+
+LocalDate d1 = LocalDate.of(2026, 1, 1);
+LocalDate d2 = LocalDate.of(2026, 12, 31);
+
+long days = d1.until(d2, ChronoUnit.DAYS);       // 364
+long months = d1.until(d2, ChronoUnit.MONTHS);   // 11
+long years = ChronoUnit.YEARS.between(d1, d2);   // 0
+```
+
+## 5. Time Zones: ZonedDateTime and ZoneId
+
+`ZonedDateTime` = `LocalDateTime` + time zone, representing "a moment in a particular place in the world."
+
+```java
+import java.time.ZonedDateTime;
+import java.time.ZoneId;
+
+ZonedDateTime shanghai = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"));
+ZonedDateTime london = ZonedDateTime.now(ZoneId.of("Europe/London"));
+ZonedDateTime newYork = ZonedDateTime.now(ZoneId.of("America/New_York"));
+
+System.out.println("Shanghai: " + shanghai);
+System.out.println("London: " + london);
+System.out.println("New York: " + newYork);
+```
+
+`ZoneId` is the time zone identifier, in "Area/City" format (the IANA time zone database), e.g. `Asia/Shanghai`, `America/New_York`, `UTC`.
+
+Time zone conversion:
+
+```java
+ZonedDateTime meeting = ZonedDateTime.of(
+    2026, 7, 3, 14, 0, 0, 0, ZoneId.of("Asia/Shanghai"));
+ZonedDateTime londonTime = meeting.withZoneSameInstant(ZoneId.of("Europe/London"));
+System.out.println("Shanghai 14:00 = London " + londonTime.getHour() + ":00");
+// Shanghai 14:00 = London 07:00 (during daylight saving time)
+```
+
+## 6. Formatting and Parsing: DateTimeFormatter
+
+`DateTimeFormatter` is the replacement for `SimpleDateFormat` — **it's immutable and thread-safe**.
+
+### 6.1 Predefined formats
+
+```java
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+
+LocalDate d = LocalDate.now();
+
+System.out.println(d.format(DateTimeFormatter.ISO_LOCAL_DATE));   // 2026-07-03
+System.out.println(d.format(DateTimeFormatter.BASIC_ISO_DATE));   // 20260703
+```
+
+### 6.2 Custom formats
+
+Create a formatter from a pattern string:
+
+```java
+DateTimeFormatter fmt1 = DateTimeFormatter.ofPattern("yyyy年MM月dd日");
+DateTimeFormatter fmt2 = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss");
+
+LocalDateTime now = LocalDateTime.now();
+System.out.println(now.format(fmt1));   // 2026年07月03日
+System.out.println(now.format(fmt2));   // 2026/07/03 14:30:00
+```
+
+Common pattern letters:
+
+| Letter | Meaning | Example |
+| --- | --- | --- |
+| `yyyy` | Four-digit year | 2026 |
+| `MM` | Two-digit month | 07 |
+| `dd` | Two-digit day | 03 |
+| `HH` | Two-digit hour (24-hour) | 14 |
+| `mm` | Two-digit minute | 30 |
+| `ss` | Two-digit second | 00 |
+| `SSS` | Milliseconds | 123 |
+| `E` | Day of week | Fri |
+| `a` | AM/PM | PM |
+
+### 6.3 Parsing strings
+
+```java
+DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+LocalDate parsed = LocalDate.parse("2026-07-03", fmt);
+System.out.println(parsed);   // 2026-07-03
+
+// ISO standard formats can be parsed directly (no formatter needed)
+LocalDate iso = LocalDate.parse("2026-07-03");
+```
+
+> 💡 `DateTimeFormatter` is thread-safe — a single instance can be shared across threads, which is its biggest improvement over `SimpleDateFormat`.
+
+## 7. A Quick Reference of Common Operations
+
+| Operation | Method | Example |
+| --- | --- | --- |
+| Add/subtract days | `plusDays(n)` / `minusDays(n)` | `today.plusDays(7)` |
+| Add/subtract months | `plusMonths(n)` / `minusMonths(n)` | `today.minusMonths(1)` |
+| Modify a field | `withYear(y)` / `withMonth(m)` | `today.withYear(2030)` |
+| Compare | `isBefore` / `isAfter` / `isEqual` | `d1.isBefore(d2)` |
+| Span | `until(other, unit)` | `d1.until(d2, DAYS)` |
+| Read fields | `getYear` / `getMonthValue` / `getDayOfWeek` | `today.getYear()` |
+| Leap year | `isLeapYear()` | `today.isLeapYear()` |
+| Days in month | `lengthOfMonth()` | `today.lengthOfMonth()` |
+| Format | `format(formatter)` | `d.format(fmt)` |
+| Parse | `parse(str, formatter)` | `LocalDate.parse(s, fmt)` |
+
+## 8. Hands-On Practice
+
+### 8.1 Birthday countdown
+
+<CodeRunner code={`import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
+
+public class Main {
+    public static void main(String[] args) {
+        LocalDate today = LocalDate.now();
+        int year = today.getYear();
+
+        // Assume the birthday is June 15
+        int birthMonth = 6;
+        int birthDay = 15;
+
+        LocalDate birthdayThisYear = LocalDate.of(year, birthMonth, birthDay);
+        LocalDate birthdayNext = birthdayThisYear;
+
+        // If this year's birthday has already passed, look at next year
+        if (birthdayThisYear.isBefore(today) || birthdayThisYear.isEqual(today)) {
+            birthdayNext = birthdayThisYear.plusYears(1);
+        }
+
+        long daysUntil = today.until(birthdayNext, ChronoUnit.DAYS);
+
+        System.out.println("今天是: " + today);
+        System.out.println("下一次生日: " + birthdayNext);
+        if (daysUntil == 0) {
+            System.out.println("今天就是生日！生日快乐！");
+        } else {
+            System.out.println("距离生日还有 " + daysUntil + " 天");
+        }
+
+        // Calculate age
+        LocalDate realBirth = LocalDate.of(2000, birthMonth, birthDay);
+        long age = realBirth.until(today, ChronoUnit.YEARS);
+        System.out.println("当前年龄: " + age + " 岁");
+
+        // Total days since birth
+        long totalDays = realBirth.until(today, ChronoUnit.DAYS);
+        System.out.println("出生至今已 " + totalDays + " 天");
+    }
+}`} />
+
+### 8.2 Counting workdays between two dates
+
+<CodeRunner code={`import java.time.DayOfWeek;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+
+public class Main {
+    public static void main(String[] args) {
+        DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+
+        LocalDate start = LocalDate.of(2026, 7, 1);
+        LocalDate end = LocalDate.of(2026, 7, 31);
+
+        // Find every workday (Monday through Friday) in the range
+        List<LocalDate> workdays = new ArrayList<>();
+        LocalDate cursor = start;
+        while (!cursor.isAfter(end)) {
+            DayOfWeek dow = cursor.getDayOfWeek();
+            if (dow != DayOfWeek.SATURDAY && dow != DayOfWeek.SUNDAY) {
+                workdays.add(cursor);
+            }
+            cursor = cursor.plusDays(1);
+        }
+
+        System.out.println(start.format(fmt) + " 至 " + end.format(fmt));
+        System.out.println("工作日总数: " + workdays.size() + " 天");
+
+        // Print each workday with its weekday
+        for (LocalDate d : workdays) {
+            System.out.println("  " + d.format(fmt)
+                + " " + d.getDayOfWeek()
+                + " (第 " + d.getDayOfYear() + " 天)");
+        }
+
+        System.out.println();
+
+        // Compute the date 30 days from now, and which weekday it is
+        LocalDate future = start.plusDays(30);
+        System.out.println(start + " + 30 天 = " + future
+            + " " + future.getDayOfWeek());
+
+        // Last day of this month
+        LocalDate lastDayOfMonth = start.withDayOfMonth(start.lengthOfMonth());
+        System.out.println(start.getMonthValue() + " 月最后一天: "
+            + lastDayOfMonth + " " + lastDayOfMonth.getDayOfWeek());
+    }
+}`} />
+
+## 9. Chapter Summary
+
+| Topic | Key points |
+| --- | --- |
+| Legacy API flaws | Date offsets year by 1900, months are 0-based, mutable and unsafe; SimpleDateFormat is not thread-safe |
+| LocalDate | A date (year, month, day), immutable, months 1-12 |
+| LocalTime | A time (hour, minute, second, nanosecond) |
+| LocalDateTime | Date + time |
+| Instant | UTC timestamp, machine-friendly |
+| Duration | A span at the hour/minute/second level, precise to the nanosecond |
+| Period | A span at the year/month/day level |
+| ZonedDateTime | A date-time with a time zone |
+| DateTimeFormatter | A thread-safe formatter |
+| Arithmetic | plus/minus/with family of methods, returning new objects |
+| Comparison | isBefore/isAfter/isEqual |
+| Span calculation | until(other, ChronoUnit) / ChronoUnit.X.between(a, b) |
+
+## Conclusion
+
+`java.time` is one of the most welcome improvements in Java 8 — it uses **immutability** to guarantee thread safety, uses **clearly separated** classes so that "date," "time," "instant," and "time zone" each mind their own business, and uses an **intuitive API** (`plusDays`, `withYear`) to replace `Calendar`'s field-query nightmare. If you're still using `Date` and `SimpleDateFormat`, it's time to migrate — the new API will leave your time-related code refreshed.
+
+In the next chapter, we'll face the inevitable "accidents" during program execution — **exception handling**. You'll learn how to guard your program's robustness with try/catch/finally, how to elegantly manage resources with try-with-resources, and how to design your own exception hierarchy.

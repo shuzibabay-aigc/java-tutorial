@@ -1,0 +1,374 @@
+---
+title: "基础语法"
+chapter: 2
+stage: "第一阶段"
+stageName: "Java 基础入门"
+order: 2
+description: "掌握 Java 程序结构、标识符命名规范、关键字、注释、8 种基本数据类型、变量常量、类型转换与输入输出"
+pubDate: 2026-07-03
+tags: ["Java", "语法", "数据类型", "变量", "基础入门"]
+---
+
+# 基础语法
+
+上一章我们品尝了 Java 的第一口香气，运行了 HelloWorld 程序。但咖啡师不能只靠热情煮咖啡——他必须懂得咖啡豆的产地、烘焙度、研磨粗细、水温与萃取时间。同样，要写出优雅的 Java 程序，我们必须先熟悉它的语法规则。
+
+本章是 Java 之旅的地基。地基打得牢，大楼才能盖得高。让我们从程序的整体结构开始，一步步深入。
+
+## 一、Java 程序的结构
+
+让我们重新审视 HelloWorld 程序，这一次带着更细致的目光：
+
+```java
+public class HelloWorld {
+    public static void main(String[] args) {
+        System.out.println("Hello, World!");
+    }
+}
+```
+
+这段代码展示了 Java 程序的基本骨架：
+
+1. **类（Class）**：`public class HelloWorld` 定义了一个类。Java 是面向对象的语言，所有代码都必须写在类中。一个 `.java` 文件可以包含多个类，但只能有一个 `public` 类，且文件名必须与该 `public` 类名完全一致。
+
+2. **方法（Method）**：`public static void main(String[] args)` 是一个方法，是类的"行为"。方法定义了类能做什么。
+
+3. **main 方法**：它是 Java 应用程序的入口点。JVM 运行程序时，会从 main 方法开始执行。每个可独立运行的 Java 程序都必须有一个 main 方法，其签名固定为：
+   ```java
+   public static void main(String[] args)
+   ```
+   - `public`：可被外部（JVM）访问。
+   - `static`：静态方法，无需创建对象即可调用。
+   - `void`：无返回值。
+   - `String[] args`：命令行参数数组。
+
+4. **语句（Statement）**：`System.out.println("Hello, World!");` 是一条语句，以分号 `;` 结束。Java 中每条语句必须以分号结尾。
+
+5. **代码块（Block）**：用大括号 `{}` 包围的代码区域。类体、方法体都用大括号包围。
+
+### 为什么 Java 要把一切放在类中？
+
+这是一种设计哲学的选择。Java 强调"万物皆对象"，将代码组织在类中，使得数据与操作数据的方法天然地绑定在一起。这让大型程序的结构更清晰，也方便复用与扩展。
+
+## 二、标识符与命名规范
+
+### 2.1 什么是标识符
+
+标识符（Identifier）是程序员给程序中各种元素起的名字——类名、方法名、变量名等都是标识符。Java 对标识符有如下规则：
+
+- 只能由字母（A-Z、a-z）、数字（0-9）、下划线 `_` 和美元符号 `$` 组成。
+- 不能以数字开头。
+- 不能是 Java 的关键字。
+- 区分大小写（`name` 和 `Name` 是不同的标识符）。
+- 长度无限制。
+
+> 💡 Java 支持 Unicode 字符，因此中文等非拉丁字符在技术上也可以作为标识符（如 `int 年龄 = 18;`），但在实际开发中强烈建议使用英文，以避免编码问题。
+
+### 2.2 驼峰命名法
+
+良好的命名是程序可读性的基石。Java 社区约定俗成地使用**驼峰命名法**（Camel Case），它有几种变体：
+
+| 元素 | 命名风格 | 示例 |
+| --- | --- | --- |
+| 类名、接口名 | 大驼峰（PascalCase） | `HelloWorld`、`CoffeeMaker` |
+| 方法名、变量名 | 小驼峰（camelCase） | `makeCoffee`、`cupCount` |
+| 常量名 | 全大写+下划线 | `MAX_CUPS`、`DEFAULT_TEMP` |
+| 包名 | 全小写 | `com.example.coffee` |
+
+命名应当"见名知意"。`int a = 5;` 让人摸不着头脑，而 `int cupCount = 5;` 则一目了然。
+
+## 三、关键字
+
+关键字（Keywords）是 Java 语言保留的、具有特殊含义的单词，不能用作标识符。Java 共有 50 个关键字（含 2 个保留字 `goto` 和 `const`，目前未使用）。常见的包括：
+
+- **数据类型**：`byte`、`short`、`int`、`long`、`float`、`double`、`char`、`boolean`
+- **流程控制**：`if`、`else`、`switch`、`case`、`for`、`while`、`do`、`break`、`continue`、`return`
+- **类与对象**：`class`、`interface`、`extends`、`implements`、`new`、`this`、`super`、`instanceof`
+- **访问修饰**：`public`、`private`、`protected`
+- **其他修饰**：`static`、`final`、`abstract`、`synchronized`、`volatile`、`native`
+- **异常处理**：`try`、`catch`、`finally`、`throw`、`throws`
+- **包相关**：`package`、`import`
+- **字面量**：`true`、`false`、`null`（严格来说是字面量，但常与关键字一同列举）
+- **未使用**：`goto`、`const`
+
+> 💡 `enum`（枚举，Java 5 引入）、`assert`（断言，Java 1.4 引入）也是关键字。而 `var`（Java 10 引入的局部变量类型推断）是一个"保留类型名"，并非严格意义上的关键字，仍可作为变量名使用（但不推荐）。
+
+## 四、注释
+
+注释（Comment）是写给程序员看的文字，编译器会忽略它们。好的注释像咖啡店菜单上的说明，帮助客人理解每款咖啡的特色。
+
+Java 有三种注释：
+
+```java
+// 这是单行注释，从 // 到行尾
+
+/*
+   这是多行注释
+   可以跨越多行
+   适合较长的说明
+*/
+
+/**
+ * 这是文档注释（Javadoc）
+ * 用于生成 API 文档
+ * @author 咖啡师
+ * @version 1.0
+ */
+public class Coffee {}
+```
+
+文档注释以 `/**` 开头，以 `*/` 结尾，可配合 `javadoc` 工具生成 HTML 格式的 API 文档。其中的 `@author`、`@param`、`@return` 等是文档标签（Tags）。
+
+> 💡 注释应当解释"为什么"，而不是"做了什么"——代码本身已经说明了"做了什么"。过多无意义的注释反而会干扰阅读。
+
+## 五、八种基本数据类型
+
+Java 是一门强类型语言（Strongly Typed Language），每个变量在使用前必须声明其类型。Java 的数据类型分为两大类：**基本类型**（Primitive Types）和**引用类型**（Reference Types）。本节聚焦基本类型。
+
+基本类型就像咖啡店里的标准杯型——容量固定、规格统一。Java 共有 8 种基本类型，可分为四类：
+
+### 5.1 整数类型
+
+| 类型 | 占用空间 | 取值范围 | 默认值 |
+| --- | --- | --- | --- |
+| `byte` | 1 字节 | -128 ~ 127（-2⁷ ~ 2⁷-1） | 0 |
+| `short` | 2 字节 | -32,768 ~ 32,767（-2¹⁵ ~ 2¹⁵-1） | 0 |
+| `int` | 4 字节 | -2,147,483,648 ~ 2,147,483,647（约 ±21 亿） | 0 |
+| `long` | 8 字节 | -2⁶³ ~ 2⁶³-1（约 ±922 亿亿） | 0L |
+
+- 整数字面量默认是 `int` 类型。声明 `long` 型字面量时需加后缀 `L`（推荐大写，避免与数字 `1` 混淆）。
+- 整数有四种进制表示：十进制（`100`）、八进制（`0144`，以 `0` 开头）、十六进制（`0x64`，以 `0x` 开头）、二进制（`0b1100100`，以 `0b` 开头，Java 7+）。
+
+### 5.2 浮点类型
+
+| 类型 | 占用空间 | 精度 | 默认值 |
+| --- | --- | --- | --- |
+| `float` | 4 字节 | 约 6-7 位有效数字 | 0.0f |
+| `double` | 8 字节 | 约 15 位有效数字 | 0.0d |
+
+- 浮点字面量默认是 `double` 类型。声明 `float` 型需加后缀 `f` 或 `F`。
+- 浮点数遵循 IEEE 754 标准。注意：浮点运算存在精度误差，**不要用浮点数表示金钱**！需要精确计算时请使用 `java.math.BigDecimal`。
+
+### 5.3 字符类型
+
+| 类型 | 占用空间 | 取值范围 | 默认值 |
+| --- | --- | --- | --- |
+| `char` | 2 字节 | 0 ~ 65,535（即 '\u0000' ~ '\uffff'） | '\u0000' |
+
+`char` 存储 Unicode 字符，可以表示中文、英文、符号等各种字符。字符字面量用单引号包围：`'A'`、`'中'`、`'\n'`（换行）。
+
+常见的转义字符：`\n`（换行）、`\t`（制表符）、`\\`（反斜杠）、`\'`（单引号）、`\"`（双引号）、`\uXXXX`（Unicode 编码）。
+
+### 5.4 布尔类型
+
+| 类型 | 占用空间 | 取值 | 默认值 |
+| --- | --- | --- | --- |
+| `boolean` | 规范未明确（通常 1 字节或 1 位） | `true` 或 `false` | false |
+
+`boolean` 用于逻辑判断，只有 `true`（真）和 `false`（假）两个值。注意：Java 的 `boolean` **不能与整数相互转换**——不能像 C 语言那样用 `0` 表示 `false`、非零表示 `true`。
+
+### 5.5 数据类型演示
+
+让我们用一个程序来直观感受这些类型：
+
+<CodeRunner code={`public class Main {
+    public static void main(String[] args) {
+        // 整数类型
+        byte cups = 5;
+        short beans = 1000;
+        int population = 2_147_483_647;  // 下划线分隔，Java 7+ 支持提升可读性
+        long stars = 9_223_372_036_854_775_807L;
+
+        // 浮点类型
+        float temperature = 92.5f;
+        double price = 28.88;
+
+        // 字符类型
+        char grade = 'A';
+        char chinese = '咖';
+
+        // 布尔类型
+        boolean isHot = true;
+
+        System.out.println("杯子数: " + cups);
+        System.out.println("咖啡豆数: " + beans);
+        System.out.println("世界人口: " + population);
+        System.out.println("银河星辰: " + stars);
+        System.out.println("水温: " + temperature + "°C");
+        System.out.println("价格: " + price + " 元");
+        System.out.println("评级: " + grade);
+        System.out.println("中文字符: " + chinese);
+        System.out.println("是否烫手: " + isHot);
+
+        // 数据类型的大小（以位为单位）
+        System.out.println("\\n--- 各类型位数 ---");
+        System.out.println("byte: " + Byte.SIZE + " 位");
+        System.out.println("short: " + Short.SIZE + " 位");
+        System.out.println("int: " + Integer.SIZE + " 位");
+        System.out.println("long: " + Long.SIZE + " 位");
+        System.out.println("float: " + Float.SIZE + " 位");
+        System.out.println("double: " + Double.SIZE + " 位");
+        System.out.println("char: " + Character.SIZE + " 位");
+    }
+}`} />
+
+> 💡 注意代码中的 `2_147_483_647`，下划线用于分隔数字以提高可读性，编译器会忽略它们。这是 Java 7 引入的特性。
+
+## 六、变量与常量
+
+### 6.1 变量的声明与初始化
+
+变量（Variable）是程序中存储数据的"容器"。声明变量时需要指定类型和名称：
+
+```java
+int age;              // 声明
+age = 18;             // 赋值
+
+String name = "Java"; // 声明并初始化
+```
+
+变量按声明的位置可分为：
+- **局部变量（Local Variable）**：定义在方法内部，必须先赋值才能使用，没有默认值。
+- **成员变量（Member Variable / Field）**：定义在类中、方法外，属于对象，有默认值（如 `int` 默认为 `0`，`boolean` 默认为 `false`，引用类型默认为 `null`）。
+- **静态变量（Static Variable）**：用 `static` 修饰的成员变量，属于类，所有对象共享。
+
+### 6.2 常量
+
+常量（Constant）是值不可改变的变量，用 `final` 关键字修饰：
+
+```java
+final double PI = 3.14159265;
+final int MAX_CUPS = 100;
+PI = 3.14;  // 编译错误：无法为 final 变量赋值
+```
+
+常量的命名约定为全大写，单词之间用下划线分隔。使用常量可以让代码更有意义、更易维护——`MAX_CUPS` 比一个裸露的 `100` 更具可读性，且修改时只需改一处。
+
+## 七、类型转换
+
+Java 是强类型语言，不同类型之间不能随意赋值。但有时需要将一种类型的值转为另一种类型，这就是类型转换（Type Conversion）。
+
+### 7.1 自动类型转换（隐式）
+
+当把**取值范围小**的类型赋值给**取值范围大**的类型时，JVM 会自动完成转换，无需额外代码。这就像把小杯咖啡倒入大杯，毫无压力。
+
+转换方向（从小到大）：
+```
+byte → short → int → long → float → double
+              ↑
+             char
+```
+
+```java
+int a = 100;
+double b = a;   // 自动转换，b = 100.0
+```
+
+### 7.2 强制类型转换（显式）
+
+当把**取值范围大**的类型赋值给**取值范围小**的类型时，必须显式强制转换，且可能丢失精度。这就像把大杯咖啡硬倒入小杯——可能会溢出！
+
+```java
+double d = 3.99;
+int i = (int) d;   // 强制转换，i = 3（直接截断小数部分，不四舍五入）
+```
+
+### 7.3 表达式中的类型提升
+
+在算术表达式中，运算结果的类型会自动"提升"到参与运算的最大类型。但有一个陷阱：`byte`、`short`、`char` 在运算时会**先提升为 `int`** 再计算：
+
+```java
+byte a = 10;
+byte b = 20;
+byte c = a + b;       // 编译错误！a + b 的结果是 int
+byte d = (byte)(a + b);  // 正确：强制转换
+```
+
+## 八、var：局部变量类型推断（Java 10+）
+
+从 Java 10 开始，引入了 `var` 关键字，允许在声明局部变量时省略类型，让编译器根据右侧表达式自动推断类型：
+
+```java
+var name = "Java";       // 编译器推断为 String
+var count = 100;         // 推断为 int
+var price = 28.88;       // 推断为 double
+var cups = new ArrayList<String>();  // 推断为 ArrayList<String>
+```
+
+`var` 只是语法糖——变量仍然是静态类型的，编译后与显式声明类型完全等价。它减少了代码的冗余，但也要注意：
+
+- 只能用于局部变量（方法内部），不能用于成员变量、方法参数、返回类型。
+- 必须在声明时初始化（`var x;` 是非法的，编译器无从推断）。
+- 不能用 `null` 初始化（无法推断类型）。
+- 不要滥用：如果类型不明显，显式声明反而更清晰。
+
+## 九、输入与输出
+
+### 9.1 输出
+
+Java 最常用的输出方式是 `System.out`：
+
+```java
+System.out.print("不换行");
+System.out.println("换行");      // 打印后换行
+System.out.printf("格式化：%d, %.2f, %s%n", 10, 3.14159, "Java");
+```
+
+`printf` 使用格式化字符串，常用占位符：
+- `%d`：整数
+- `%f`：浮点数（`%.2f` 表示保留 2 位小数）
+- `%s`：字符串
+- `%c`：字符
+- `%b`：布尔值
+- `%n`：平台相关的换行符（推荐用 `%n` 代替 `\n`）
+
+### 9.2 输入
+
+要从控制台读取用户输入，使用 `java.util.Scanner` 类：
+
+```java
+import java.util.Scanner;
+
+Scanner scanner = new Scanner(System.in);
+System.out.print("请输入你的名字：");
+String name = scanner.nextLine();
+System.out.print("请输入你的年龄：");
+int age = scanner.nextInt();
+System.out.println("你好，" + name + "！你 " + age + " 岁了。");
+scanner.close();  // 使用完毕记得关闭
+```
+
+`Scanner` 提供了多种读取方法：`nextLine()`（读一行字符串）、`nextInt()`（读整数）、`nextDouble()`（读浮点数）、`nextBoolean()`（读布尔值）等。
+
+> 💡 在本教程的在线运行环境中，标准输入可能不可用。但理解 `Scanner` 的用法依然重要——在你本地的命令行程序中，它是读取用户输入的标准方式。
+
+## 十、综合示例
+
+让我们把本章学到的知识综合起来，写一个"咖啡订单"小程序：
+
+```java
+import java.util.Scanner;
+
+public class CoffeeOrder {
+    public static void main(String[] args) {
+        final double PRICE_PER_CUP = 28.0;  // 常量：每杯价格
+        Scanner scanner = new Scanner(System.in);
+
+        System.out.println("☕ 欢迎光临 Java 咖啡馆 ☕");
+        System.out.print("请问您要点几杯？");
+        var count = scanner.nextInt();  // var 类型推断
+
+        double total = count * PRICE_PER_CUP;
+        System.out.printf("您点了 %d 杯，应付 %.2f 元%n", count, total);
+        System.out.println("感谢惠顾，欢迎再来！");
+
+        scanner.close();
+    }
+}
+```
+
+## 结语
+
+本章我们学习了 Java 程序的骨架——类与方法，命名规则，关键字，注释，八种基本数据类型及其取值范围，变量与常量，类型转换的两种方式，以及输入输出。这些是构建任何 Java 程序的基础砖块。
+
+就像咖啡师熟悉了咖啡豆的种类、研磨度、水温之后，下一步就要学习萃取的手法一样——下一章我们将学习 Java 的"运算符"，掌握如何对这些数据进行各种运算与操作。算术、逻辑、位运算……一场精彩的运算之旅即将开启。

@@ -1,0 +1,558 @@
+---
+title: "锁与同步器"
+chapter: 40
+stage: "第七阶段"
+stageName: "并发编程"
+order: 7
+description: "掌握 Lock 接口与 ReentrantLock、读写锁、StampedLock、Condition、Semaphore、CountDownLatch、CyclicBarrier、Phaser、Exchanger 的原理与用法"
+pubDate: 2026-07-03
+tags: ["Java", "ReentrantLock", "读写锁", "StampedLock", "Semaphore", "CountDownLatch", "CyclicBarrier"]
+---
+
+# 锁与同步器
+
+`synchronized`/`wait`/`notify` 是 Java 并发的"基础工具"，但它们有局限：
+
+- 不能"超时获取锁"——拿不到就死等。
+- 不能"尝试获取锁"——`tryLock` 不存在。
+- 不能"中断等待锁的线程"——`synchronized` 不响应 interrupt。
+- 只有一个等待队列——多个条件用同一队列，`notify` 可能叫错线程。
+- 不能"读写分离"——读多写少场景性能差。
+
+这一章讲的"高级锁与同步器"补齐了这些短板。`ReentrantLock` 让锁可控，`ReadWriteLock` 让读不互斥，`StampedLock` 加乐观读，`Condition` 提供多条件队列，`Semaphore`/`CountDownLatch`/`CyclicBarrier`/`Phaser`/`Exchanger` 是协调多线程的"信号灯"。
+
+## 一、Lock 接口与 ReentrantLock
+
+### 1.1 Lock 接口
+
+`java.util.concurrent.locks.Lock` 是 JUC 锁的顶层接口：
+
+```java
+public interface Lock {
+    void lock();                    // 阻塞获取锁（不响应中断）
+    void lockInterruptibly();       // 阻塞获取锁，可被中断
+    boolean tryLock();              // 尝试获取，立即返回 true/false
+    boolean tryLock(long time, TimeUnit unit);  // 限时获取
+    void unlock();                  // 释放锁
+    Condition newCondition();       // 创建条件队列
+}
+```
+
+对比 `synchronized`：
+
+| 能力 | `synchronized` | `Lock` |
+| --- | --- | --- |
+| 超时获取 | ❌ | ✓ `tryLock(time)` |
+| 尝试获取 | ❌ | ✓ `tryLock()` |
+| 可中断 | ❌ | ✓ `lockInterruptibly` |
+| 公平锁 | ❌ | ✓ `new ReentrantLock(true)` |
+| 多条件队列 | ❌（单 wait/notify） | ✓ `newCondition()` |
+| 自动释放 | ✓（出块即释放） | ❌（必须手动 `unlock`，建议 finally） |
+
+### 1.2 ReentrantLock
+
+`ReentrantLock` 是 `Lock` 的主要实现——**可重入的独占锁**。"可重入"指同一线程可以多次获取同一把锁，每次计数器加 1，每次 unlock 减 1，归零才真正释放。
+
+```java
+ReentrantLock lock = new ReentrantLock();   // 默认非公平
+lock.lock();
+try {
+    // 临界区
+} finally {
+    lock.unlock();   // 必须 finally！
+}
+```
+
+**关键点**：
+
+- **必须 `finally` 释放锁**——`synchronized` 出异常会自动释放，`ReentrantLock` 不会，不 finally 就锁泄漏。
+- **不要在 `lock()` 前的代码可能抛异常**——锁还没拿到，finally 里 unlock 会抛 `IllegalMonitorStateException`。
+- **`lock()` 不响应中断**——想要可中断用 `lockInterruptibly()`。
+
+### 1.3 tryLock 防死锁
+
+`tryLock(timeout)` 是预防死锁的利器——拿不到就放弃已持有的锁重试：
+
+```java
+while (true) {
+    if (lock1.tryLock()) {
+        try {
+            if (lock2.tryLock()) {
+                try {
+                    // 拿到两把锁，干活
+                    return;
+                } finally {
+                    lock2.unlock();
+                }
+            }
+        } finally {
+            lock1.unlock();
+        }
+    }
+    Thread.sleep(randomTime);   // 随机退避防活锁
+}
+```
+
+## 二、ReentrantReadWriteLock 读写锁
+
+**读写锁**：读读共享，读写互斥，写写互斥。读多写少的场景能大幅提升性能。
+
+```java
+ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+ReentrantReadWriteLock.ReadLock readLock = rwLock.readLock();
+ReentrantReadWriteLock.WriteLock writeLock = rwLock.writeLock();
+
+// 读
+readLock.lock();
+try { /* 读操作 */ } finally { readLock.unlock(); }
+
+// 写
+writeLock.lock();
+try { /* 写操作 */ } finally { writeLock.unlock(); }
+```
+
+| 操作 | 读锁 | 写锁 |
+| --- | --- | --- |
+| 读锁持有 | 可再获取读锁 | ✗ 互斥 |
+| 写锁持有 | ✗ 互斥 | ✗ 互斥 |
+
+**适用**：缓存、配置等"读多写少"场景——10 个线程可以同时读，不用互相等待。
+
+**局限**：写锁饿死风险——一直有读者时写者拿不到锁。`ReentrantReadWriteLock` 默认非公平，写者可能饥饿。可用公平模式但吞吐量降低。
+
+## 三、StampedLock（Java 8+）
+
+`StampedLock` 是 `ReentrantReadWriteLock` 的"加强版"——引入**乐观读**，让读不加锁。
+
+```java
+StampedLock sl = new StampedLock();
+
+// 乐观读（不获取锁，性能最高）
+long stamp = sl.tryOptimisticRead();      // 拿"票据"
+int x = this.x, y = this.y;                // 读字段
+if (!sl.validate(stamp)) {                 // 验证读期间没被写
+    // 乐观读失败，退化为悲观读
+    stamp = sl.readLock();
+    try { x = this.x; y = this.y; }
+    finally { sl.unlockRead(stamp); }
+}
+
+// 悲观读
+long s = sl.readLock();
+try { /* ... */ } finally { sl.unlockRead(s); }
+
+// 写
+long ws = sl.writeLock();
+try { this.x = newX; this.y = newY; }
+finally { sl.unlockWrite(ws); }
+```
+
+**关键点**：
+
+- **乐观读不阻塞写**——但读完后用 `validate` 检查读期间是否被写，被写就退化为悲观读重读。
+- **不可重入**——同一线程不能重复获取同一 `StampedLock`，否则死锁。
+- **性能比 `ReentrantReadWriteLock` 高 10%-30%**——读多写少 + 短临界区时优势明显。
+
+**注意**：`StampedLock` 的 `tryOptimisticRead`/`validate` 用了棘手的内存语义，不要轻易混用 `readLock`/`writeLock`/`tryOptimisticRead`——容易出错。**优先用 `ReentrantReadWriteLock`，性能瓶颈时再考虑 `StampedLock`**。
+
+## 四、Condition：多条件队列
+
+`Condition` 是 `wait`/`notify` 的"加强版"——一把锁可以挂多个 `Condition`，每个 `Condition` 是独立的等待队列。
+
+```java
+Lock lock = new ReentrantLock();
+Condition notFull = lock.newCondition();   // 缓冲区不满
+Condition notEmpty = lock.newCondition();  // 缓冲区不空
+
+// 生产者
+lock.lock();
+try {
+    while (queue.size() == capacity) notFull.await();   // 等不满
+    queue.offer(x);
+    notEmpty.signal();   // 通知非空
+} finally { lock.unlock(); }
+
+// 消费者
+lock.lock();
+try {
+    while (queue.isEmpty()) notEmpty.await();   // 等非空
+    queue.poll();
+    notFull.signal();   // 通知不满
+} finally { lock.unlock(); }
+```
+
+对比 `wait`/`notify`：
+
+| 能力 | `wait`/`notify` | `Condition` |
+| --- | --- | --- |
+| 多条件队列 | ❌ | ✓ |
+| 超时等待 | `wait(ms)` | `await(time)` / `awaitNanos` |
+| 不响应中断 | `wait`（响应） | `awaitUninterruptibly` |
+| 等到 deadline | ❌ | `awaitUntil(deadline)` |
+
+`BlockingQueue` 的实现（`ArrayBlockingQueue` 等）就是用 `Condition` 实现的——分别有 `notFull`/`notEmpty` 两个条件队列，精确唤醒对方。
+
+## 五、Semaphore：信号量
+
+**`Semaphore`** 控制同时访问某资源的线程数——可以理解为"发放许可证"。
+
+```java
+Semaphore sem = new Semaphore(3);   // 3 个许可证
+
+sem.acquire();   // 获取许可证（阻塞）
+try {
+    // 最多 3 个线程同时在这里
+} finally {
+    sem.release();   // 释放许可证
+}
+```
+
+**典型应用**：
+
+- 限流——同时只允许 N 个请求访问数据库。
+- 限制并发连接数——连接池。
+- 资源池化——固定数量的资源分配。
+
+`Semaphore` 也可以是公平的：`new Semaphore(3, true)`。
+
+## 六、CountDownLatch：等待 N 个完成
+
+**`CountDownLatch`**：一次性的"反向计数器"——`countDown()` 减 1，`await()` 等到归零。
+
+```java
+CountDownLatch latch = new CountDownLatch(3);
+
+// 三个工作线程
+for (int i = 0; i < 3; i++) {
+    new Thread(() -> {
+        doWork();
+        latch.countDown();   // 完成时减 1
+    }).start();
+}
+
+latch.await();   // 主线程等所有完成
+System.out.println("全部完成");
+```
+
+**特点**：
+
+- **不可重置**——计数器归零后不能再用，一次性使用。
+- **`await(timeout)`** 可超时。
+- **`getCount()`** 查剩余计数。
+
+典型场景：等所有微服务就绪、等所有玩家加载完成、并行任务汇总。
+
+## 七、CyclicBarrier：N 个线程互相等待
+
+**`CyclicBarrier`**：N 个线程**互相等待**到齐，一起放行——可循环使用。
+
+```java
+CyclicBarrier barrier = new CyclicBarrier(3, () -> {
+    System.out.println("三个人到齐，开会议！");
+});
+
+for (int i = 0; i < 3; i++) {
+    new Thread(() -> {
+        System.out.println(Thread.currentThread().getName() + " 到达");
+        barrier.await();   // 等其他人
+        System.out.println(Thread.currentThread().getName() + " 继续");
+    }).start();
+}
+```
+
+**特点**：
+
+- **可循环**（Cyclic 的含义）——一次同步完成后可再用。
+- **可指定屏障动作**——所有线程到齐后由最后一个到达的线程执行。
+- 所有线程数必须等于 parties，否则一直等。
+
+**CountDownLatch vs CyclicBarrier**：
+
+| 维度 | CountDownLatch | CyclicBarrier |
+| --- | --- | --- |
+| 计数方向 | 减到 0 | 加到 N |
+| 重置 | 不可 | 可（自动） |
+| 等待对象 | 一个线程等 N 个 | N 个线程互等 |
+| 异常处理 | 不影响他人 | 一个线程异常，所有线程抛 `BrokenBarrierException` |
+
+## 八、Phaser：阶段同步器
+
+**`Phaser`**（JDK 7）是 `CyclicBarrier` 的加强版——支持**多阶段**同步，且**动态增减参与方**。
+
+```java
+Phaser phaser = new Phaser(3);   // 3 个参与方
+
+for (int i = 0; i < 3; i++) {
+    new Thread(() -> {
+        phaser.arriveAndAwaitAdvance();   // 阶段 1 同步
+        phase1Work();
+        phaser.arriveAndAwaitAdvance();   // 阶段 2 同步
+        phase2Work();
+        phaser.arriveAndDeregister();     // 退出
+    }).start();
+}
+```
+
+特点：
+
+- **多阶段**——可任意指定阶段数。
+- **动态**——`register()`/`arriveAndDeregister()` 增减参与方。
+- **层级**——`Phaser` 可以有父子关系，构建树形同步。
+
+适合"多阶段并行计算"——比如分批数据处理，每批后同步检查。
+
+## 九、Exchanger：两个线程交换数据
+
+**`Exchanger＜V＞`** 让两个线程在汇合点**交换数据**。
+
+```java
+Exchanger<String> exchanger = new Exchanger<>();
+
+new Thread(() -> {
+    String received = exchanger.exchange("from-A");
+    System.out.println("A 收到: " + received);
+}).start();
+
+new Thread(() -> {
+    String received = exchanger.exchange("from-B");
+    System.out.println("B 收到: " + received);
+}).start();
+// A 收到 from-B, B 收到 from-A
+```
+
+经典应用：遗传算法、流水线（一个填缓冲、一个清缓冲，交换缓冲）。
+
+## 十、实战：综合演示
+
+下面这个例子演示 `ReentrantLock`/`tryLock`、`ReadWriteLock`、`Semaphore`、`CountDownLatch`、`CyclicBarrier` 的用法。
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.locks.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // === 1. ReentrantLock + tryLock 防死锁 ===
+        System.out.println("=== ReentrantLock + tryLock ===");
+        ReentrantLock l1 = new ReentrantLock();
+        ReentrantLock l2 = new ReentrantLock();
+
+        Thread a = new Thread(() -> tryLockBoth(l1, l2, "A"), "T-A");
+        Thread b = new Thread(() -> tryLockBoth(l2, l1, "B"), "T-B");  // 反序
+        a.start(); b.start();
+        a.join(3000); b.join(3000);
+        System.out.println("A 状态: " + a.getState() + ", B 状态: " + b.getState());
+
+        // === 2. ReadWriteLock 缓存 ===
+        System.out.println("\\n=== ReadWriteLock 缓存 ===");
+        ReadWriteCache cache = new ReadWriteCache();
+        ExecutorService pool = Executors.newFixedThreadPool(6);
+
+        // 5 个读者 + 1 个写者
+        for (int i = 0; i < 5; i++) {
+            final int idx = i;
+            pool.submit(() -> System.out.println("读者 " + idx + " 读到: " + cache.get("key")));
+        }
+        pool.submit(() -> {
+            cache.put("key", "value-v1");
+            System.out.println("写者写入 key=value-v1");
+        });
+        pool.shutdown();
+        pool.awaitTermination(2, TimeUnit.SECONDS);
+
+        // === 3. Semaphore 限流 ===
+        System.out.println("\\n=== Semaphore 限流 (3 许可) ===");
+        Semaphore sem = new Semaphore(3);
+        ExecutorService semPool = Executors.newFixedThreadPool(10);
+        for (int i = 0; i < 10; i++) {
+            final int idx = i;
+            semPool.submit(() -> {
+                try {
+                    sem.acquire();
+                    System.out.println("  任务 " + idx + " 获取许可，开始执行");
+                    Thread.sleep(200);
+                    System.out.println("  任务 " + idx + " 释放");
+                } catch (InterruptedException e) {
+                } finally {
+                    sem.release();
+                }
+            });
+        }
+        semPool.shutdown();
+        semPool.awaitTermination(3, TimeUnit.SECONDS);
+
+        // === 4. CountDownLatch ===
+        System.out.println("\\n=== CountDownLatch ===");
+        int N = 3;
+        CountDownLatch latch = new CountDownLatch(N);
+        for (int i = 0; i < N; i++) {
+            final int idx = i;
+            new Thread(() -> {
+                try {
+                    Thread.sleep(100 * (idx + 1));
+                    System.out.println("  worker " + idx + " 完成");
+                } catch (InterruptedException e) {
+                } finally {
+                    latch.countDown();
+                }
+            }).start();
+        }
+        System.out.println("主线程等待 " + N + " 个 worker...");
+        latch.await();
+        System.out.println("全部完成，主线程继续");
+
+        // === 5. CyclicBarrier ===
+        System.out.println("\\n=== CyclicBarrier ===");
+        CyclicBarrier barrier = new CyclicBarrier(3, () ->
+            System.out.println("  >> 三人到齐，开会！"));
+        for (int i = 0; i < 3; i++) {
+            final int idx = i;
+            new Thread(() -> {
+                try {
+                    Thread.sleep(100 * (idx + 1));
+                    System.out.println("  " + idx + " 到达会议室");
+                    barrier.await();
+                    System.out.println("  " + idx + " 散会，离开");
+                } catch (Exception e) {}
+            }).start();
+        }
+        Thread.sleep(1000);
+
+        // === 6. Condition 实现阻塞队列 ===
+        System.out.println("\\n=== Condition 阻塞队列 ===");
+        SimpleBlockingQueue<Integer> queue = new SimpleBlockingQueue<>(2);
+        ExecutorService qPool = Executors.newFixedThreadPool(2);
+        qPool.submit(() -> {
+            try {
+                for (int i = 1; i <= 3; i++) {
+                    queue.put(i);
+                    System.out.println("  生产 " + i);
+                }
+            } catch (InterruptedException e) {}
+        });
+        qPool.submit(() -> {
+            try {
+                for (int i = 0; i < 3; i++) {
+                    Thread.sleep(200);
+                    System.out.println("  消费 " + queue.take());
+                }
+            } catch (InterruptedException e) {}
+        });
+        qPool.shutdown();
+        qPool.awaitTermination(2, TimeUnit.SECONDS);
+    }
+
+    // 用 tryLock 防死锁——拿不到两把就退
+    static void tryLockBoth(ReentrantLock a, ReentrantLock b, String name) {
+        try {
+            while (true) {
+                if (a.tryLock(100, TimeUnit.MILLISECONDS)) {
+                    try {
+                        if (b.tryLock(100, TimeUnit.MILLISECONDS)) {
+                            try {
+                                System.out.println(name + " 拿到两把锁，干活");
+                                return;
+                            } finally { b.unlock(); }
+                        }
+                    } finally { a.unlock(); }
+                }
+                Thread.sleep(ThreadLocalRandom.current().nextInt(50));
+            }
+        } catch (InterruptedException e) {}
+    }
+}
+
+// 读写锁实现的缓存
+class ReadWriteCache {
+    private final Map<String, String> map = new HashMap<>();
+    private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+
+    public String get(String key) {
+        rwLock.readLock().lock();
+        try {
+            return map.get(key);
+        } finally {
+            rwLock.readLock().unlock();
+        }
+    }
+
+    public void put(String key, String value) {
+        rwLock.writeLock().lock();
+        try {
+            map.put(key, value);
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+}
+
+// 用 Condition 实现的简单阻塞队列
+class SimpleBlockingQueue<T> {
+    private final Queue<T> queue = new LinkedList<>();
+    private final int capacity;
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition notFull = lock.newCondition();
+    private final Condition notEmpty = lock.newCondition();
+
+    SimpleBlockingQueue(int capacity) { this.capacity = capacity; }
+
+    public void put(T item) throws InterruptedException {
+        lock.lock();
+        try {
+            while (queue.size() == capacity) notFull.await();
+            queue.offer(item);
+            notEmpty.signal();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public T take() throws InterruptedException {
+        lock.lock();
+        try {
+            while (queue.isEmpty()) notEmpty.await();
+            T item = queue.poll();
+            notFull.signal();
+            return item;
+        } finally {
+            lock.unlock();
+        }
+    }
+}`} />
+
+> **观察重点**：
+> - **`tryLock(timeout)`**：A 和 B 反序加锁也**不会死锁**——拿不到就退让重试。
+> - **读写锁**：5 个读者可以并发读，写者独占。
+> - **`Semaphore`**：3 个许可——同时只 3 个任务跑，其他排队。
+> - **`CountDownLatch`**：主线程 await，3 个 worker 完成才继续。
+> - **`CyclicBarrier`**：3 个线程互等，到齐后执行屏障动作，然后各自继续。
+> - **`Condition`**：`notFull`/`notEmpty` 两个条件队列，精确唤醒生产者或消费者。
+
+## 十一、本章小结
+
+| 工具 | 用途 | 关键点 |
+| --- | --- | --- |
+| `ReentrantLock` | 可控独占锁 | `tryLock`/`lockInterruptibly`/公平锁；必须 `finally unlock` |
+| `ReentrantReadWriteLock` | 读写分离 | 读读共享、读写/写写互斥；适合读多写少 |
+| `StampedLock` | 乐观读锁 | `tryOptimisticRead`+`validate`；不可重入 |
+| `Condition` | 多条件队列 | `await`/`signal`/`signalAll`；替代 `wait`/`notify` |
+| `Semaphore` | 限流 | `acquire`/`release`；可公平 |
+| `CountDownLatch` | 一次性等 N 个 | 不可重置；`await`/`countDown` |
+| `CyclicBarrier` | N 个互等 | 可循环；任一异常则屏障 broken |
+| `Phaser` | 多阶段同步 | 动态增减参与方 |
+| `Exchanger` | 两线程交换 | `exchange(v)` |
+
+**记忆口诀**：
+
+- **`ReentrantLock` 必须 finally**——出异常不自动释放。
+- **`tryLock` 是防死锁神器**——拿不到就退让重试。
+- **读多写少用读写锁**——读不互斥性能高。
+- **`StampedLock` 乐观读最快**——但不可重入，谨慎用。
+- **`Condition` 比 `wait`/`notify` 强**——多条件队列精确唤醒。
+- **`CountDownLatch` 一次性，`CyclicBarrier` 可循环**——别搞混。
+
+## 结语：从"能锁"到"会锁"
+
+`synchronized` 是"傻瓜相机"——开箱即用但不够灵活。`ReentrantLock`/`ReadWriteLock`/`StampedLock` 是"单反相机"——参数多但能拍出更好的照片。同步器（`Semaphore`/`CountDownLatch` 等）则是协调多线程的"信号灯"和"接力棒"。
+
+但锁的代价不小——挂起/唤醒、上下文切换、缓存失效。能不能"不加锁"也实现并发安全？答案在第 41 章——**原子类与 CAS**。`AtomicInteger`/`LongAdder` 用硬件级 CAS 指令实现无锁并发，是更高性能的选择。下一章我们深入 CAS 原理、ABA 问题、`LongAdder` 的分段设计。

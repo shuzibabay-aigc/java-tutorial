@@ -1,0 +1,611 @@
+---
+title: "性能监控与调优"
+chapter: 54
+stage: "第九阶段"
+stageName: "JVM 深度"
+order: 4
+description: "掌握 JDK 自带工具 jps/jstat/jstack/jmap/jcmd、JConsole 与 VisualVM、JFR 与 JMC、async-profiler 火焰图、JVM 调优参数、OOM 与 CPU 飙高排查实战"
+pubDate: 2026-07-03
+tags: ["Java", "JVM", "jstack", "jmap", "JFR", "VisualVM", "OOM", "调优"]
+---
+
+# 性能监控与调优
+
+前面三章我们学了 JVM 内存模型、GC、类加载——这是"理论知识"。这一章是"动手实战"——用工具观察运行中的 JVM，排查 OOM、CPU 飙高、卡顿等真实问题。这是 Java 工程师"诊断能力"的核心——会写代码是基础，能定位问题才是高级。
+
+这一章把生产环境最常用的工具和排查思路一次讲完。
+
+## 一、JDK 自带命令行工具
+
+JDK 自带一套命令行工具，在 `$JAVA_HOME/bin` 下。它们小而精，无需额外安装，是排查问题的"第一响应"工具。
+
+### 1.1 jps：列出 Java 进程
+
+`jps`（JVM Process Status Tool）列出当前机器上的 Java 进程，类似 `ps` 但只看 Java：
+
+```bash
+$ jps
+12345 Main
+23456 org.eclipse.jetty.start.Main
+34567 sun.tools.jps.Jps
+
+$ jps -lvm   # 完整包名 + main 参数 + JVM 参数
+12345 com.example.Main --port=8080 -Xmx2g -XX:+UseG1GC
+```
+
+`-l` 显示完整包名，`-v` 显示 JVM 参数，`-m` 显示 main 方法参数。
+
+### 1.2 jstat：GC 统计
+
+`jstat`（JVM Statistics Monitoring Tool）监控 GC、类加载、编译等统计——最常用的是看 GC 情况：
+
+```bash
+# 每 1 秒输出一次, 共 10 次, 看 GC 情况
+$ jstat -gcutil 12345 1000 10
+  S0     S1     E      O      M     CCS    YGC   YGCT   FGC  FGCT   GCT
+  0.00  85.42  73.12  45.67  92.34  88.12   23   0.234   2  0.456  0.690
+  ...
+
+# 各列含义:
+# S0/S1: Survivor 0/1 使用率
+# E: Eden 使用率
+# O: Old 使用率
+# M: Metaspace 使用率
+# CCS: 压缩类空间使用率
+# YGC: Young GC 次数
+# YGCT: Young GC 累计耗时
+# FGC: Full GC 次数
+# FGCT: Full GC 累计耗时
+# GCT: 总 GC 耗时
+```
+
+`-gcutil` 看使用率，`-gc` 看字节数，`-gc_capacity` 看容量，`-gccause` 看 GC 原因。
+
+### 1.3 jstack：线程堆栈
+
+`jstack`（JVM Stack Tool）打印 JVM 的所有线程堆栈——排查**死锁、CPU 飙高、卡顿**的利器：
+
+```bash
+$ jstack 12345 > thread_dump.txt
+
+# 找死锁
+$ jstack -l 12345 | grep -A 20 "Found .* deadlock"
+
+# 强制打印 (进程无响应时)
+$ jstack -F 12345
+```
+
+`jstack` 输出每个线程的：
+
+- **线程名、优先级、线程 ID（nid，十六进制）**。
+- **线程状态**——`RUNNABLE`、`BLOCKED`、`WAITING`、`TIMED_WAITING`。
+- **调用栈**——当前执行的 Java 方法栈。
+
+```
+"http-nio-8080-exec-3" #25 daemon prio=5 os_prio=0 tid=0x... nid=0x... waiting on condition
+   java.lang.Thread.State: WAITING (parking)
+        at sun.misc.Unsafe.park(Native Method)
+        - parking to wait for  <0x...> (a java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject)
+        at java.util.concurrent.locks.LockSupport.park(LockSupport.java:175)
+        at java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:2039)
+        at java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:442)
+        at org.apache.tomcat.util.threads.TaskQueue.take(TaskQueue.java:103)
+        ...
+```
+
+#### 找 CPU 飙高的元凶
+
+CPU 飙高排查的标准流程（Linux）：
+
+```bash
+# 1. 找占 CPU 最高的 Java 进程
+$ top -c
+# 假设 PID = 12345
+
+# 2. 找该进程占 CPU 最高的线程
+$ top -Hp 12345
+# 假设线程 PID = 12378
+
+# 3. 线程 PID 转十六进制
+$ printf "%x\\n" 12378
+# 0x305a
+
+# 4. 在 jstack 输出里找 nid=0x305a 的线程
+$ jstack 12345 | grep "nid=0x305a" -A 30
+```
+
+那个线程的调用栈就是 CPU 飙高的代码——可能是死循环、正则灾难、加密算法、GC 线程等。
+
+### 1.4 jmap：内存堆 dump
+
+`jmap`（JVM Memory Map）打印堆内存使用、生成堆 dump 文件：
+
+```bash
+# 堆内存概要
+$ jmap -heap 12345
+
+# 直方图: 各类对象数量和大小 (按大小排)
+$ jmap -histo 12345 | head -20
+ num     #instances         #bytes  class name
+   1:        1234567      123456789  [B  (byte 数组)
+   2:         234567       23456789  java.lang.String
+   3:         123456        9876543  java.util.HashMap$Node
+   ...
+
+# 只看活对象 (会触发 Full GC, 谨慎!)
+$ jmap -histo:live 12345 | head -20
+
+# 生成 heap dump (生产环境用 -dump:format=b,file=...)
+$ jmap -dump:format=b,file=heap.hprof 12345
+```
+
+`jmap -histo` 是定位**内存泄漏**的第一步——看哪些类的对象数量异常多。`-histo:live` 会触发 Full GC 只看活对象，**生产慎用**——会 STW 一段时间。
+
+### 1.5 jcmd：万能工具
+
+`jcmd`（JVM Command）是 JDK 8 引入的"统一命令行工具"，能干前面所有工具的事，还支持更多：
+
+```bash
+$ jcmd                       # 列出所有 Java 进程
+$ jcmd 12345 help            # 列出该进程支持的所有命令
+$ jcmd 12345 Thread.print    # 等价于 jstack
+$ jcmd 12345 GC.class_stats  # 类元数据统计
+$ jcmd 12345 GC.heap_info    # 堆信息
+$ jcmd 12345 VM.flags        # JVM 参数
+$ jcmd 12345 VM.system_properties   # 系统属性
+$ jcmd 12345 GC.heap_dump heap.hprof   # 堆 dump
+$ jcmd 12345 JFR.start duration=60s filename=recording.jfr   # 启动 JFR
+```
+
+`jcmd` 是现代推荐的工具——统一接口，比分散的 jps/jstat/jstack/jmap 更强大。
+
+## 二、JConsole 与 VisualVM
+
+### 2.1 JConsole
+
+**JConsole**（Java Monitoring and Management Console）是 JDK 自带的 GUI 工具，监控 JVM 的内存、线程、类、GC、MBean。
+
+```bash
+$ jconsole   # 启动, 选择要连接的进程
+```
+
+功能：
+
+- **内存**——堆/非堆/各内存池的实时使用曲线。
+- **线程**——线程数实时曲线，每个线程的状态和栈，**死锁检测**（"检测到死锁"按钮）。
+- **类**——已加载/卸载的类数量曲线。
+- **VM 摘要**——JVM 参数、运行时间、CPU 占用。
+- **MBean**——查 MBean 属性、调 MBean 操作。
+
+适合**开发调试**——直观的曲线图，但生产环境少用（GUI 耗资源、远程连接需配置 JMX）。
+
+### 2.2 VisualVM
+
+**VisualVM**（All-in-One Java Troubleshooting Tool）比 JConsole 更强大——集成多个功能：
+
+- **概述**——JVM 信息、参数、系统属性。
+- **监视**——CPU、内存、线程、类的实时曲线。
+- **线程**——线程时间线，能看到线程何时 BLOCKED/WAITING。
+- **抽样器**——CPU/内存抽样，看哪个方法占 CPU 多。
+- **Profiler**——更精细的 CPU/内存剖析（侵入式，会影响性能）。
+- **快照**——保存线程 dump、堆 dump。
+
+```bash
+$ jvisualvm   # JDK 9 之前自带
+# JDK 9+ 单独下载: https://visualvm.github.io/
+```
+
+VisualVM 可以打开 `.hprof` 文件做**离线分析**——内存泄漏排查的标配。
+
+## 三、JFR 与 JMC
+
+### 3.1 JFR（Java Flight Recorder）
+
+**JFR**（Java Flight Recorder）是 Oracle 的"黑匣子"——持续记录 JVM 运行数据，开销极低（＜1%），可在生产环境长期开启。JDK 11 开源（之前是商业特性）。
+
+JFR 记录的事件包括：
+
+- **GC 事件**——每次 GC 的详细信息。
+- **方法采样**——哪些方法执行得多（CPU profile）。
+- **锁事件**——锁竞争、阻塞时间。
+- **IO 事件**——文件、socket IO。
+- **类加载、异常、线程** 等。
+
+```bash
+# 启动时开启 JFR, 录制 60 秒到文件
+$ java -XX:StartFlightRecording=duration=60s,filename=recording.jfr MyApp
+
+# 运行中启动
+$ jcmd 12345 JFR.start duration=60s filename=recording.jfr
+
+# 查看录制
+$ jcmd 12345 JFR.check
+```
+
+JFR 是"低开销、连续监控"的方案——比 jstack/jmap 的"快照式"诊断更适合生产长期运行。
+
+### 3.2 JMC（JDK Mission Control）
+
+**JMC**（JDK Mission Control）是 JFR 的 GUI 分析工具——打开 `.jfr` 文件，看曲线、火焰图、热点方法、GC 详情。比 VisualVM 更专业，是 Oracle 推荐的生产级分析工具。
+
+```bash
+# 单独下载: https://www.oracle.com/java/technologies/jdk-mission-control.html
+$ jmc   # 启动, 打开 .jfr 文件
+```
+
+JMC 7+ 支持自动分析——它会指出"哪些事件可能有问题"，比如"GC 暂停过长"、"锁等待过多"。
+
+## 四、async-profiler 与火焰图
+
+**async-profiler** 是社区开源的低开销 profiler——比 JFR 更适合 CPU 火焰图分析。它基于 `perf` 或异步信号，开销极低，能精确到 JVM 内部调用。
+
+### 4.1 安装
+
+```bash
+# macOS
+$ brew install async-profiler
+
+# 或下载: https://github.com/async-profiler/async-profiler/releases
+```
+
+### 4.2 CPU 火焰图
+
+```bash
+# 采样 30 秒, 输出火焰图
+$ asprof -d 30 -f flame.html 12345
+
+# 或者
+$ asprof -e cpu -d 30 -f flame.html 12345
+```
+
+打开 `flame.html`——一张火焰图，横轴是方法调用栈的层级，纵轴是采样次数（CPU 占用）。宽的方法就是 CPU 热点。
+
+### 4.3 内存分配火焰图
+
+```bash
+$ asprof -e alloc -d 30 -f alloc.html 12345
+```
+
+看哪些方法分配对象多——定位"内存压力"的源头。
+
+火焰图是排查 CPU 性能问题最直观的工具——比看 jstack 抽样高效得多。Brendan Gregg 的火焰图理念被广泛采用。
+
+## 五、常见 JVM 参数
+
+### 5.1 内存参数
+
+| 参数 | 作用 | 示例 |
+| --- | --- | --- |
+| `-Xms` | 堆初始大小 | `-Xms4g` |
+| `-Xmx` | 堆最大大小 | `-Xmx8g` |
+| `-Xmn` | 新生代大小 | `-Xmn2g` |
+| `-Xss` | 线程栈大小 | `-Xss512k` |
+| `-XX:MetaspaceSize` | 元空间初始 | `-XX:MetaspaceSize=256m` |
+| `-XX:MaxMetaspaceSize` | 元空间最大 | `-XX:MaxMetaspaceSize=512m` |
+| `-XX:MaxDirectMemorySize` | 直接内存最大 | `-XX:MaxDirectMemorySize=1g` |
+| `-XX:NewRatio` | Old:Young | `-XX:NewRatio=2` |
+| `-XX:SurvivorRatio` | Eden:S | `-XX:SurvivorRatio=8` |
+
+### 5.2 GC 参数
+
+| 参数 | 作用 |
+| --- | --- |
+| `-XX:+UseSerialGC` | Serial GC |
+| `-XX:+UseParallelGC` | Parallel GC (JDK 8 默认) |
+| `-XX:+UseG1GC` | G1 (JDK 9+ 默认) |
+| `-XX:+UseZGC` | ZGC |
+| `-XX:+UseShenandoahGC` | Shenandoah |
+| `-XX:MaxGCPauseMillis` | 目标 GC 暂停 |
+| `-XX:+PrintGCDetails` | 打印 GC 详情 (JDK 8) |
+| `-Xlog:gc*` | GC 日志 (JDK 9+) |
+| `-XX:+HeapDumpOnOutOfMemoryError` | OOM 自动 dump |
+| `-XX:HeapDumpPath` | dump 路径 |
+
+### 5.3 生产环境推荐配置
+
+```bash
+java \
+  -Xms4g -Xmx4g \              # 堆大小相同, 避免动态扩展
+  -XX:MetaspaceSize=256m \
+  -XX:MaxMetaspaceSize=512m \
+  -XX:+UseG1GC \               # G1 收集器
+  -XX:MaxGCPauseMillis=200 \   # 目标 200ms 暂停
+  -XX:+HeapDumpOnOutOfMemoryError \
+  -XX:HeapDumpPath=/var/dumps/ \
+  -Xlog:gc*:file=/var/log/gc.log:time,uptime,level,tags \
+  -jar app.jar
+```
+
+## 六、OOM 排查实战
+
+### 6.1 OOM 的类型
+
+OOM 不是只有"堆溢出"——不同区域溢出表现不同：
+
+| OOM 信息 | 原因 | 排查方向 |
+| --- | --- | --- |
+| `java.lang.OutOfMemoryError: Java heap space` | 堆溢出 | 内存泄漏 or 堆太小 |
+| `GC overhead limit exceeded` | GC 回收不动，98% 时间在 GC | 同上 |
+| `Metaspace` | 元空间溢出 | 动态类生成太多（CGLIB/Groovy） |
+| `Direct buffer memory` | 直接内存溢出 | NIO/Netty 泄漏 |
+| `unable to create new native thread` | 线程数过多 | 线程泄漏，调 `-Xss` 或 OS 限制 |
+| `StackOverflowError` | 栈溢出 | 递归过深 |
+
+### 6.2 排查步骤
+
+```bash
+# 1. 拿到 heap dump (推荐启动时加 -XX:+HeapDumpOnOutOfMemoryError)
+$ jmap -dump:format=b,file=heap.hprof 12345
+
+# 2. 用 MAT (Eclipse Memory Analyzer) 打开
+# 下载: https://www.eclipse.org/mat/
+
+# 3. MAT 的关键报告
+#   - Leak Suspects Report   泄漏嫌疑报告
+#   - Dominator Tree         支配树, 看哪个对象"占住"了最多内存
+#   - Histogram              按类看对象数和大小
+#   - Path to GC Roots       看对象为什么没被 GC (找到引用链)
+```
+
+MAT 的**Leak Suspects**会自动分析，指出"哪个对象 retain 了 X MB 内存"——通常直接定位泄漏点。
+
+### 6.3 常见泄漏模式
+
+- **静态集合**——`static Map` 一直加不删。
+- **ThreadLocal**——线程池里 ThreadLocal 不 remove，泄漏到线程销毁。
+- **监听器/回调**——注册了没反注册。
+- **缓存无淘汰**——自己写的 HashMap 缓存没有 LRU/过期。
+- **资源未关闭**——IO/Connection 没 close。
+- **内部类持有外部类**——非静态内部类持有外部引用，外部类无法回收。
+
+## 七、CPU 飙高排查实战
+
+```bash
+# 1. top 找占 CPU 高的 Java 进程
+$ top
+# PID = 12345, CPU 200%
+
+# 2. top -Hp 找该进程的"罪魁线程"
+$ top -Hp 12345
+# 线程 PID = 12378, 占 200%
+
+# 3. 线程 PID 转十六进制
+$ printf "%x\\n" 12378
+305a
+
+# 4. jstack 找 nid=0x305a 的线程
+$ jstack 12345 > td.txt
+$ grep "nid=0x305a" -A 30 td.txt
+```
+
+那个线程的调用栈就是 CPU 飙高的代码——常见原因：
+
+- **死循环**——`while(true)` 没退出条件。
+- **正则灾难**——`Pattern` 在热路径反复编译，或灾难性回溯。
+- **序列化/反序列化**——大对象 JSON/Gson。
+- **GC 线程**——GC 频繁，CPU 都在 GC。
+- **加密/压缩**——AES、ZIP 大数据。
+- **Stream 并行**——`parallelStream` 在 CPU 密集任务上抢核。
+
+## 八、实战：演示工具用法
+
+下面的例子演示用 Java 代码触发不同问题（OOM、CPU 飙高、死锁），并展示如何用 MXBean 监控。
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+public class Main {
+    // 模拟内存泄漏: 静态 Map 一直加
+    static Map<String, byte[]> leakMap = new HashMap<>();
+    static AtomicInteger counter = new AtomicInteger();
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 性能监控与调优演示 ===\\n");
+        System.out.println("(本演示不实际触发 OOM/死锁, 仅展示监控 API)\\n");
+
+        // 1. 查看内存使用
+        System.out.println("--- 1. 内存使用 ---");
+        Runtime rt = Runtime.getRuntime();
+        long MB = 1024 * 1024;
+        System.out.println("堆: 已用 " + (rt.totalMemory() - rt.freeMemory()) / MB
+            + " / " + rt.totalMemory() / MB
+            + " MB (最大 " + rt.maxMemory() / MB + " MB)");
+
+        // 详细内存池
+        System.out.println("\\n内存池:");
+        for (java.lang.management.MemoryPoolMXBean pool :
+             java.lang.management.ManagementFactory.getMemoryPoolMXBeans()) {
+            java.lang.management.MemoryUsage u = pool.getUsage();
+            if (u.getUsed() > 0) {
+                System.out.println("  " + pool.getName() + ": "
+                    + u.getUsed() / MB + "/" + u.getCommitted() / MB + " MB");
+            }
+        }
+
+        // 2. GC 信息
+        System.out.println("\\n--- 2. GC 信息 ---");
+        for (java.lang.management.GarbageCollectorMXBean gc :
+             java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+            System.out.println("  " + gc.getName() + ": "
+                + gc.getCollectionCount() + " 次, "
+                + gc.getCollectionTime() + " ms");
+        }
+
+        // 3. 线程信息
+        System.out.println("\\n--- 3. 线程信息 ---");
+        java.lang.management.ThreadMXBean tb =
+            java.lang.management.ManagementFactory.getThreadMXBean();
+        System.out.println("  活动线程: " + tb.getThreadCount());
+        System.out.println("  峰值线程: " + tb.getPeakThreadCount());
+        System.out.println("  守护线程: " + tb.getDaemonThreadCount());
+
+        // 列出所有线程状态
+        System.out.println("\\n  线程状态分布:");
+        Map<Thread.State, Long> stateCount = new HashMap<>();
+        for (java.lang.management.ThreadInfo ti : tb.dumpAllThreads(false, false)) {
+            stateCount.merge(ti.getThreadState(), 1L, Long::sum);
+        }
+        stateCount.forEach((s, c) -> System.out.println("    " + s + ": " + c));
+
+        // 4. 死锁检测
+        System.out.println("\\n--- 4. 死锁检测 ---");
+        long[] deadlocks = tb.findDeadlockedThreads();
+        System.out.println("  死锁线程: " + (deadlocks == null ? "无" : Arrays.toString(deadlocks)));
+        System.out.println("  (生产环境用 jstack -l 或 JConsole 检测死锁)");
+
+        // 5. 类加载信息
+        System.out.println("\\n--- 5. 类加载 ---");
+        java.lang.management.ClassLoadingMXBean cl =
+            java.lang.management.ManagementFactory.getClassLoadingMXBean();
+        System.out.println("  当前加载: " + cl.getLoadedClassCount());
+        System.out.println("  累计加载: " + cl.getTotalLoadedClassCount());
+        System.out.println("  已卸载: " + cl.getUnloadedClassCount());
+
+        // 6. CPU 占用 (进程级)
+        System.out.println("\\n--- 6. CPU/系统负载 ---");
+        java.lang.management.OperatingSystemMXBean os =
+            java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+        System.out.println("  CPU 核数: " + os.getAvailableProcessors());
+        System.out.println("  系统负载 (1分钟): " + os.getSystemLoadAverage());
+        if (os instanceof com.sun.management.OperatingSystemMXBean) {
+            com.sun.management.OperatingSystemMXBean sun = (com.sun.management.OperatingSystemMXBean) os;
+            System.out.println("  JVM CPU 占用: " + String.format("%.2f", sun.getProcessCpuLoad() * 100) + "%");
+            System.out.println("  系统 CPU 占用: " + String.format("%.2f", sun.getSystemCpuLoad() * 100) + "%");
+        }
+
+        // 7. 模拟一段 CPU 密集计算 (短时间, 演示 async-profiler 思路)
+        System.out.println("\\n--- 7. 模拟 CPU 密集 (1秒) ---");
+        long start = System.currentTimeMillis();
+        long sum = 0;
+        while (System.currentTimeMillis() - start < 1000) {
+            for (int i = 0; i < 100000; i++) {
+                sum += i * i;
+            }
+        }
+        System.out.println("  1 秒计算 sum = " + sum);
+        System.out.println("  (用 async-profiler asprof -d 30 -f flame.html PID 可看火焰图)");
+
+        // 8. 模拟内存压力 (少量, 不真触发 OOM)
+        System.out.println("\\n--- 8. 模拟内存压力 ---");
+        for (int i = 0; i < 100; i++) {
+            leakMap.put("key-" + counter.incrementAndGet(), new byte[1024 * 100]);   // 100KB
+        }
+        System.out.println("  往 leakMap 加 100 个 100KB 对象, 总计约 " + leakMap.size() * 100 / 1024 + " MB");
+        System.out.println("  当前堆已用: " + (rt.totalMemory() - rt.freeMemory()) / MB + " MB");
+        System.out.println("  (生产环境, 这种'只加不删的 static Map'就是典型泄漏)");
+
+        // 9. 监控自身运行时
+        System.out.println("\\n--- 9. 运行时信息 ---");
+        System.out.println("  Java: " + System.getProperty("java.version"));
+        System.out.println("  JVM: " + System.getProperty("java.vm.name"));
+        System.out.println("  启动时间: " + new Date(java.lang.management.RuntimeMXBean.class.cast(
+            java.lang.management.ManagementFactory.getRuntimeMXBean()).getStartTime()));
+        System.out.println("  运行时长: " + (System.currentTimeMillis() -
+            java.lang.management.ManagementFactory.getRuntimeMXBean().getStartTime()) / 1000 + " 秒");
+
+        // 10. JVM 参数
+        System.out.println("\\n--- 10. JVM 参数 ---");
+        List<String> jvmArgs = java.lang.management.ManagementFactory.getRuntimeMXBean().getInputArguments();
+        if (jvmArgs.isEmpty()) {
+            System.out.println("  (无 JVM 参数, 用默认值)");
+        } else {
+            jvmArgs.forEach(a -> System.out.println("  " + a));
+        }
+
+        System.out.println("\\n=== 排查工具速查 ===");
+        System.out.println("OOM:");
+        System.out.println("  jmap -dump:format=b,file=h.hprof PID");
+        System.out.println("  MAT 打开 hprof, 看 Leak Suspects");
+        System.out.println("CPU 飙高:");
+        System.out.println("  top -Hp PID → 线程 PID → printf '%x' → jstack 找 nid");
+        System.out.println("  或 async-profiler asprof -d 30 -f flame.html PID");
+        System.out.println("死锁:");
+        System.out.println("  jstack -l PID | grep -A 20 'deadlock'");
+        System.out.println("  或 jconsole '检测到死锁' 按钮");
+        System.out.println("GC:");
+        System.out.println("  jstat -gcutil PID 1000");
+        System.out.println("  jcmd PID JFR.start duration=60s filename=r.jfr");
+    }
+}`} />
+
+> **观察重点**：
+> - **`MemoryPoolMXBean`** 列出各内存池——Eden、Survivor、Old、Metaspace 实际使用。
+> - **`ThreadMXBean.findDeadlockedThreads()`** 返回 null 表示无死锁——程序化检测死锁。
+> - **`com.sun.management.OperatingSystemMXBean`** 能拿到 JVM/系统 CPU 占用——是 JConsole 的数据源。
+> - **`RuntimeMXBean.getInputArguments()`** 列出 JVM 启动参数——看实际生效的配置。
+> - **`leakMap` 只加不删**——这就是典型泄漏模式，生产环境 MAT 能定位到这种 `static Map`。
+
+## 九、调优思路总结
+
+### 9.1 调优三原则
+
+1. **不要过早调优**——先正确，再性能。先有监控，再调优。
+2. **基于数据调优**——基于 jstat/jfr/profiler 的数据，不靠猜。
+3. **一次调一个参数**——同时改多个看不出哪个有效。
+
+### 9.2 常见场景调优
+
+| 场景 | 调优方向 |
+| --- | --- |
+| 频繁 Minor GC | 加大 `-Xmn` 或新生代比例 |
+| Full GC 多 | 加大堆、查内存泄漏、换 G1/ZGC |
+| GC 暂停长 | 换 G1（`MaxGCPauseMillis`）、ZGC |
+| OOM | dump 分析，找泄漏点 |
+| CPU 100% | jstack 找热线程，看是否死循环/GC 线程 |
+| 元空间溢出 | 加大 `-XX:MaxMetaspaceSize`，查动态类生成 |
+| 直接内存溢出 | 查 NIO/Netty 的 DirectByteBuffer 泄漏 |
+| 启动慢 | 减小 `MetaspaceSize`，CDS/AppCDS |
+
+### 9.3 监控建设
+
+生产环境必须建监控：
+
+- **Prometheus + Grafana**——metrics 长期监控，JVM exporter 采集 JVM 指标。
+- **ELK**——GC 日志、应用日志集中分析。
+- **APM**（SkyWalking/Pinpoint）——链路追踪，定位慢调用。
+- **JFR 长期录制**——低开销，出问题能回看。
+
+监控是调优的前提——"没监控的调优"是瞎猜。
+
+## 十、本章小结
+
+| 工具 | 用途 |
+| --- | --- |
+| jps | 列 Java 进程 |
+| jstat | GC/内存统计 |
+| jstack | 线程堆栈、死锁检测 |
+| jmap | 堆 dump、对象直方图 |
+| jcmd | 万能工具，统一接口 |
+| JConsole | GUI 监控（开发用） |
+| VisualVM | GUI 分析（打开 hprof） |
+| JFR | 低开销连续录制（生产可用） |
+| JMC | JFR 分析 GUI |
+| async-profiler | 火焰图 profiler |
+| MAT | heap dump 分析 |
+
+**排查思路速查**：
+
+| 问题 | 工具链 |
+| --- | --- |
+| OOM | `jmap -dump` → MAT → Leak Suspects |
+| CPU 飙高 | `top -Hp` → `printf %x` → `jstack` 找 nid |
+| 死锁 | `jstack -l` 或 JConsole |
+| GC 频繁 | `jstat -gcutil` 看 YGC/FGC |
+| 卡顿 | JFR 录制，看 GC 事件 |
+| 方法热点 | async-profiler 火焰图 |
+
+**记忆口诀**：
+
+- **jps 找进程，jstat 看 GC，jstack 看线程，jmap 看 heap**——四件套。
+- **jcmd 是万能钥匙**——一个工具干所有事。
+- **OOM 用 MAT**——Leak Suspects 自动定位泄漏。
+- **CPU 用火焰图**——async-profiler 一张图找到热点。
+- **JFR 是黑匣子**——生产可长期开，＜1% 开销。
+- **调优靠数据不靠猜**——先监控、再分析、再调参。
+
+## 结语：调优是"诊断学"
+
+性能调优像医生看病——症状（卡顿/OOM）、化验（jstack/jmap/JFR）、诊断（MAT/火焰图）、治疗（调参/改代码）。会写代码是"会做手术"，会调优才是"会看病"——后者更稀缺。
+
+这一章我们看了工具和思路。下一章——第九阶段最后一章——讲 **字节码基础**。前面四章都是在"使用层"看 JVM，下一章钻进 `.class` 文件，看字节码指令到底长什么样，`i++` 和 `++i` 在字节码层面有什么区别，泛型擦除在字节码上是什么样子，try-with-resources 编译后是什么——把 JVM 的"最后一层神秘"揭开。我们下一章见。

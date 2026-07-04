@@ -1,0 +1,455 @@
+---
+title: "字符串"
+chapter: 13
+stage: "第三阶段"
+stageName: "Java 核心类库"
+order: 1
+description: "深入理解 String 的不可变性与常量池，掌握常用方法、StringBuilder、StringJoiner、文本块与字符编码"
+pubDate: 2026-07-03
+tags: ["Java", "String", "字符串", "StringBuilder", "文本块"]
+---
+
+# 字符串
+
+如果 Java 的世界是一座城，那字符串就是城里最繁忙的街道——几乎没有哪个程序不与文字打交道。登录要校验用户名，支付要拼接订单号，聊天要解析表情包，日志要格式化时间戳。`String`，是 Java 中使用频率最高的类型之一。
+
+但字符串看似简单，背后却藏着精巧的设计：**不可变性**（Immutability）、**字符串常量池**（String Pool）、**编译期优化**……理解了这些，你才能写出既高效又正确的代码。本章，我们一起揭开 `String` 的面纱。
+
+## 一、String 的不可变性
+
+### 1.1 一个"刻在石头上"的类
+
+先看一个看似寻常的现象：
+
+```java
+String s = "hello";
+s = s + " world";
+System.out.println(s);   // hello world
+```
+
+`s` 的值变了——但真的是"`s` 变了"吗？不。原来的 `"hello"` 对象纹丝未动，`s + " world"` 创建了一个**全新的** `"hello world"` 对象，然后 `s` 这个引用指向了新对象。旧的 `"hello"` 仍在内存里（可能在常量池中）。
+
+这就是 String 的核心特性：**不可变**。一旦创建，它的字符序列就不能被修改。所有"修改"方法（`concat`、`replace`、`substring`、`toUpperCase`）都不是原地改写，而是返回一个**新的 String 对象**。
+
+### 1.2 不可变是怎么实现的
+
+打开 `java.lang.String` 的源码，你会看到：
+
+```java
+public final class String implements java.io.Serializable,
+                                      Comparable<String>, CharSequence {
+    private final char[] value;   // Java 8 及以前
+    // private final byte[] value;  // Java 9+（Compact Strings）
+    ...
+}
+```
+
+不可变性由三道"锁"保证：
+
+1. **类是 `final` 的**——不能被继承，杜绝子类"偷偷"添加可变方法。
+2. **字段 `value` 是 `final` 的**——构造完成后引用不再改变。
+3. **没有公开的修改方法**——`value` 是 `private`，外部无从下手。
+
+> 💡 **Java 9 的变化**：从 Java 9 开始（JEP 254：Compact Strings），String 内部从 `char[]` 改成了 `byte[]`，并增加一个 `coder` 字段标识编码（LATIN1 或 UTF16）。因为大多数字符串只用 Latin-1 字符（ASCII 等），用一个字节存一个字符能省近一半内存。但不可变性这个核心设计没有变。
+
+### 1.3 为什么要把 String 设计成不可变
+
+这不是随手拍板的决定，而是深思熟虑的权衡：
+
+- **安全性**（Security）：String 常被用作参数传递——文件路径、数据库 URL、网络连接地址。如果 String 可变，你在打开文件前检查了路径是安全的，但别人偷偷改了它，就酿成安全漏洞。不可变让"检查即有效"。
+- **线程安全**（Thread Safety）：不可变对象天生线程安全——多个线程读同一个 String，永远不用加锁，因为它不可能被改。
+- **字符串常量池**（String Pool）：正因为不可变，JVM 才敢让多个引用共享同一个 String 对象（见下文），节省内存。
+- **hashCode 缓存**：String 的 `hashCode` 在首次计算后被缓存。不可变保证缓存永远有效，使 String 极其适合做 HashMap 的键。
+
+## 二、字符串常量池
+
+### 2.1 两种创建方式
+
+```java
+String a = "abc";              // 字面量方式
+String b = "abc";              // 字面量方式
+String c = new String("abc");  // new 方式
+```
+
+`a` 和 `b` 指向同一个对象吗？是的。`a == b` 为 `true`。
+
+`new String("abc")` 则不同——它在堆上**新创建**一个对象，`c == a` 为 `false`（虽然内容相同）。
+
+### 2.2 常量池的工作原理
+
+JVM 维护一个**字符串常量池**（String Pool）。当用字面量 `"abc"` 创建字符串时，JVM 先查常量池：有就返回引用，没有就放入池中再返回。所以所有 `"abc"` 字面量共享同一个对象。
+
+`new String("abc")` 则做两件事：先看池里有没有 `"abc"`（没有就放进去），再在堆上 new 一个新对象——所以最多创建两个对象。
+
+> 📍 从 Java 7 起，字符串常量池从方法区（永久代）移到了**堆**中，避免永久代溢出。
+
+### 2.3 intern() 方法
+
+`intern()` 是 String 提供的手动入池方法：调用时，如果池中有相等的字符串，返回池中对象；否则把当前对象放入池中并返回。
+
+```java
+String s1 = new String("hello");   // 堆上新对象
+String s2 = "hello";               // 池中对象
+System.out.println(s1 == s2);      // false
+
+String s3 = s1.intern();           // 返回池中对象
+System.out.println(s3 == s2);      // true
+System.out.println(s3 == s1);      // false（s1 仍是堆对象）
+```
+
+实际开发中 `intern()` 用得不多，但在处理大量重复字符串（如日志、缓存键）时，可以显著节省内存。
+
+## 三、String 常用方法
+
+String 自带一个庞大的方法库。下面是最常用的几组。
+
+### 3.1 基础查询
+
+| 方法 | 作用 |
+| --- | --- |
+| `length()` | 字符串长度（字符个数） |
+| `charAt(int i)` | 返回第 i 个字符 |
+| `isEmpty()` | 是否长度为 0 |
+| `isBlank()` | 是否为空或全为空白（Java 11+） |
+| `indexOf(String s)` | 查找子串首次出现位置 |
+| `lastIndexOf(String s)` | 查找子串最后出现位置 |
+| `contains(CharSequence s)` | 是否包含子串 |
+| `startsWith(String s)` | 是否以指定前缀开头 |
+| `endsWith(String s)` | 是否以指定后缀结尾 |
+
+```java
+String s = "Hello, Java";
+System.out.println(s.length());          // 11
+System.out.println(s.charAt(1));         // e
+System.out.println(s.indexOf("Java"));   // 7
+System.out.println(s.contains("ell"));   // true
+System.out.println(s.startsWith("He"));  // true
+System.out.println("  ".isBlank());      // true（Java 11+）
+```
+
+### 3.2 截取与变换
+
+| 方法 | 作用 |
+| --- | --- |
+| `substring(int begin)` | 从 begin 截到末尾 |
+| `substring(int b, int e)` | 截取 [b, e) |
+| `toUpperCase()` / `toLowerCase()` | 转大写 / 小写 |
+| `trim()` | 去除首尾 ASCII 空白（U+0020 及以下） |
+| `strip()` | 去除首尾 Unicode 空白（Java 11+） |
+| `replace(old, new)` | 替换所有匹配 |
+| `replaceAll(regex, new)` | 用正则替换 |
+| `split(regex)` | 按正则拆分 |
+| `join(delim, elems)` | 用分隔符拼接 |
+| `repeat(int n)` | 重复 n 次（Java 11+） |
+
+`trim()` 和 `strip()` 的区别值得留意：`trim()` 只去除 ASCII 空白（空格及 `\t\n\r\f` 等控制字符，码点 ≤ U+0020），而 `strip()`（Java 11+）使用 `Character.isWhitespace` 判断，能识别全角空格等 Unicode 空白字符。
+
+```java
+String s = "  Hello World  ";
+System.out.println("[" + s.trim() + "]");    // [Hello World]
+System.out.println("[" + s.strip() + "]");   // [Hello World]
+
+// 中文全角空格 \u3000
+String full = "\u3000Hello\u3000";
+System.out.println("[" + full.trim() + "]");   // [　Hello　]（trim 去不掉）
+System.out.println("[" + full.strip() + "]");  // [Hello]（strip 能去掉）
+```
+
+### 3.3 拆分与拼接
+
+```java
+String csv = "Java,Python,Go,Rust";
+String[] langs = csv.split(",");
+for (String lang : langs) {
+    System.out.println(lang);
+}
+
+// 用 String.join 拼接
+String result = String.join(" | ", "Java", "Python", "Go");
+System.out.println(result);   // Java | Python | Go
+
+// repeat 重复
+String line = "=" .repeat(20);
+System.out.println(line);     // ====================
+```
+
+> ⚠️ `split` 的参数是**正则表达式**。如果分隔符是 `.`、`|`、`$` 等正则特殊字符，要转义：`split("\\.")`。
+
+## 四、StringBuilder 与 StringBuffer
+
+### 4.1 为什么需要可变字符序列
+
+看下面的代码：
+
+```java
+String s = "";
+for (int i = 0; i < 1000; i++) {
+    s = s + i;   // 每次循环都 new 一个新 String！
+}
+```
+
+这段代码创建了约 1000 个 String 对象，每次拼接都要复制前面的全部字符——时间复杂度是 O(n²)，浪费至极。
+
+`StringBuilder` 就是解药。它是**可变字符序列**，`append` 操作直接在内部数组上修改，不产生新对象：
+
+```java
+StringBuilder sb = new StringBuilder();
+for (int i = 0; i < 1000; i++) {
+    sb.append(i);
+}
+String result = sb.toString();
+```
+
+### 4.2 StringBuilder vs StringBuffer
+
+两者 API 几乎一模一样，区别在于**线程安全**：
+
+| 类 | 线程安全 | 性能 | 适用场景 |
+| --- | --- | --- | --- |
+| `StringBuilder` | 否 | 快 | 单线程拼接（绝大多数场景） |
+| `StringBuffer` | 是（synchronized） | 慢 | 多线程共享拼接（罕见） |
+
+实际开发中 99% 用 `StringBuilder`——单线程下它更快，多线程下你通常也不会用共享的拼接器，而是各自拼接再合并。
+
+```java
+StringBuilder sb = new StringBuilder("Hello");
+sb.append(", ").append("World");     // 链式调用
+sb.insert(5, " Java");
+sb.delete(5, 10);
+sb.reverse();
+System.out.println(sb);              // dlroW ,olleH
+```
+
+> 💡 编译器有个优化：`"a" + "b" + "c"` 这样的字面量拼接，编译期会自动用 StringBuilder（或直接常量折叠）。但循环里的 `+=` 每次都会 new StringBuilder，仍需手动优化。
+
+## 五、StringJoiner
+
+`StringJoiner`（Java 8+）是专为"带分隔符拼接"设计的工具，特别适合处理"可选前缀后缀"的场景：
+
+```java
+import java.util.StringJoiner;
+
+StringJoiner sj = new StringJoiner(", ", "[", "]");
+sj.add("Java");
+sj.add("Python");
+sj.add("Go");
+System.out.println(sj);   // [Java, Python, Go]
+```
+
+它最常出现在 Stream 的 `Collectors.joining` 背后：
+
+```java
+import java.util.List;
+import java.util.stream.Collectors;
+
+String joined = List.of("Java", "Python", "Go")
+    .stream()
+    .collect(Collectors.joining(", ", "[", "]"));
+System.out.println(joined);   // [Java, Python, Go]
+```
+
+## 六、文本块（Text Blocks，Java 15+）
+
+写多行字符串曾是 Java 程序员的痛。你要么用 `\n` 拼接，要么用 `String.join`，写 SQL、JSON、HTML 时尤为难看。Java 15 正式引入**文本块**，用三引号 `"""` 解决了这个问题。
+
+### 6.1 基本语法
+
+```java
+String json = """
+        {
+            "name": "Alice",
+            "age": 30
+        }
+        """;
+System.out.println(json);
+```
+
+规则要点：
+
+- 开头 `"""` 后**必须换行**，内容从下一行开始。
+- 结尾 `"""` 可以单独成行，也可以跟在内容最后一行。
+- **缩进由最后一行 `"""` 的位置决定**：编译器会去除所有行"多余"的前导空白（incidental whitespace），保留你刻意留的缩进。
+
+### 6.2 缩进控制
+
+```java
+String s = """
+        Hello
+          World
+        """;
+// 实际内容是 "Hello\n  World\n"
+// 最末行的 """ 前有 8 个空格，所以每行去掉 8 个前导空格
+```
+
+如果末尾 `"""` 往左移，内容缩进减少；往右移，缩进增加。这个设计让你能自由控制最终字符串的缩进层次。
+
+### 6.3 特殊转义
+
+文本块内仍可用 `\n`、`\t` 等转义。还有两个文本块专属的转义：
+
+- `\＜换行＞`（行尾反斜杠）：**行 continuation**，去掉这行的换行符。
+- `\s`：保留单个空格（避免被尾部空白裁剪误伤）。
+
+```java
+String sql = """
+        SELECT * \
+        FROM users \
+        WHERE age > 18\
+        """;
+// 实际内容是 "SELECT * FROM users WHERE age > 18"
+System.out.println(sql);
+
+String colors = """
+        red  \s
+        green\s
+        blue \s
+        """;
+// \s 保留每行末尾的空格
+```
+
+## 七、字符串与字符编码
+
+### 7.1 Java 内部的字符表示
+
+Java 的 `char` 是 16 位无符号整数，采用 **UTF-16** 编码。这意味着：
+
+- 基本多语言平面（BMP）的字符（如 ASCII、常用汉字）用一个 `char` 表示。
+- 增补字符（如 emoji 表情 😀，码点 U+1F600）需要**两个 char**（代理对 surrogate pair）。
+
+```java
+String emoji = "😀";
+System.out.println(emoji.length());        // 2（两个 char！）
+System.out.println(emoji.codePointCount(0, emoji.length()));  // 1（一个码点）
+```
+
+所以 `length()` 返回的是 UTF-16 码元个数，不是"字符"个数。处理 emoji 等增补字符时，要用 `codePointCount`。
+
+### 7.2 字节与编码
+
+`String` 在内存里是 UTF-16，但存到文件、网络传输时要转成字节序列——这就涉及**字符编码**（Charset）。常见编码：UTF-8、UTF-16、GBK、ISO-8859-1。
+
+```java
+String s = "你好";
+
+byte[] utf8 = s.getBytes("UTF-8");       // 6 字节（每个汉字 3 字节）
+byte[] gbk = s.getBytes("GBK");          // 4 字节（每个汉字 2 字节）
+
+// 用指定编码还原
+String restored = new String(utf8, "UTF-8");
+System.out.println(restored);            // 你好
+```
+
+> ⚠️ `getBytes()` 无参版本使用**平台默认编码**——这在不同机器上结果不同，是乱码的常见元凶。**永远显式指定编码**，或用 `StandardCharsets.UTF_8`。
+
+```java
+import java.nio.charset.StandardCharsets;
+
+byte[] bytes = "你好".getBytes(StandardCharsets.UTF_8);
+String back = new String(bytes, StandardCharsets.UTF_8);
+```
+
+## 八、实战演练
+
+下面把本章知识串起来，做两个小练习。
+
+### 8.1 字符串反转与词频统计
+
+<CodeRunner code={`import java.util.LinkedHashMap;
+import java.util.Map;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 字符串反转（三种方式）
+        String original = "Hello, 世界!";
+        System.out.println("原串: " + original);
+
+        // 方式一：StringBuilder.reverse
+        String r1 = new StringBuilder(original).reverse().toString();
+        System.out.println("反转1: " + r1);
+
+        // 方式二：手动倒序拼接
+        StringBuilder sb = new StringBuilder();
+        for (int i = original.length() - 1; i >= 0; i--) {
+            sb.append(original.charAt(i));
+        }
+        System.out.println("反转2: " + sb);
+
+        // 方式三：递归
+        System.out.println("反转3: " + reverseRec(original));
+
+        System.out.println();
+
+        // 2. 词频统计
+        String text = "the quick brown fox jumps over the lazy dog the end";
+        Map<String, Integer> freq = countWords(text);
+        System.out.println("词频统计:");
+        freq.forEach((w, c) -> System.out.println("  " + w + " => " + c));
+    }
+
+    static String reverseRec(String s) {
+        if (s.isEmpty()) return s;
+        return reverseRec(s.substring(1)) + s.charAt(0);
+    }
+
+    static Map<String, Integer> countWords(String text) {
+        Map<String, Integer> map = new LinkedHashMap<>();
+        // 按空白拆分（正则 \\\\s+ 匹配一个或多个空白字符）
+        String[] words = text.split("\\\\s+");
+        for (String w : words) {
+            // 转小写后统计
+            String key = w.toLowerCase();
+            map.merge(key, 1, Integer::sum);
+        }
+        return map;
+    }
+}`} />
+
+### 8.2 用 StringBuilder 高效拼接 SQL
+
+<CodeRunner code={`import java.util.List;
+
+public class Main {
+    public static void main(String[] args) {
+        // 模拟：根据用户列表生成 IN 子句
+        List<Integer> userIds = List.of(1001, 1002, 1003, 1004);
+
+        // 错误示范：String 拼接（循环里每次 new）
+        // String inClause = "";
+        // for (Integer id : userIds) { inClause += id + ","; }
+
+        // 正确做法：StringBuilder
+        StringBuilder sb = new StringBuilder("SELECT * FROM orders WHERE user_id IN (");
+        for (int i = 0; i < userIds.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(userIds.get(i));
+        }
+        sb.append(") ORDER BY created_at DESC");
+        System.out.println(sb);
+
+        // 更优雅：StringJoiner
+        var sj = new java.util.StringJoiner(", ", "SELECT * FROM orders WHERE user_id IN (", ")");
+        for (Integer id : userIds) sj.add(id.toString());
+        System.out.println(sj);
+    }
+}`} />
+
+## 九、本章小结
+
+| 主题 | 要点 |
+| --- | --- |
+| 不可变性 | String 是 final 类，内部数组 final；所有"修改"返回新对象 |
+| 不可变的好处 | 安全、线程安全、支持常量池、hashCode 可缓存 |
+| 常量池 | 字面量共享，`new String` 不共享；`intern()` 手动入池 |
+| 常用方法 | length/charAt/substring/indexOf/replace/split/strip/repeat |
+| trim vs strip | trim 只去 ASCII 空白，strip 去 Unicode 空白 |
+| StringBuilder | 可变字符序列，单线程拼接首选，避免 O(n²) |
+| StringBuffer | 线程安全版本，多线程罕见场景 |
+| StringJoiner | 带分隔符与前缀后缀的拼接 |
+| 文本块 | `"""` 三引号，自动管理缩进，`\＜换行＞` 续行，`\s` 保留空格 |
+| 编码 | 内部 UTF-16，传输用 Charset；务必显式指定 UTF-8 |
+
+## 结语
+
+字符串是 Java 中"最熟悉的陌生人"——人人都会用，但很少有人真正理解它背后的设计。掌握不可变性与常量池，你就能写出内存友好的代码；善用 StringBuilder 与 StringJoiner，你的拼接逻辑会优雅许多；理解字符编码，你才能彻底告别乱码的困扰。
+
+下一章，我们将从字符串转向数字世界——**包装类与数学工具**。在那里，你会看到 Java 如何用"保险箱"保护基本类型，又如何用 BigDecimal 拯救金融计算的精度。

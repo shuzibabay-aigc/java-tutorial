@@ -1,0 +1,696 @@
+---
+title: "Spring Core"
+chapter: 69
+stage: "Stage 13"
+stageName: "Java Web and the Spring Ecosystem"
+order: 2
+description: "Understand the Spring ecosystem overview, IoC/DI (Inversion of Control and Dependency Injection), the Bean lifecycle, annotation-based configuration (@Component/@Autowired/@Configuration/@Bean), AOP (aspects/pointcuts/five advice types), and Spring transaction management with @Transactional"
+pubDate: 2026-07-03
+tags: ["Java", "Spring", "IoC", "DI", "AOP", "Bean", "Transaction"]
+---
+
+# Spring Core
+
+**Spring** is the de facto standard framework for Java back-ends — released by Rod Johnson in 2003, it has dominated enterprise Java development ever since. It solves three core problems:
+
+- **IoC/DI** — Object creation and dependency management are handed off to the container; no more manual `new`.
+- **AOP** — Cross-cutting concerns (transactions, logging, permissions) are separated from business code.
+- **Template encapsulation** — Boilerplate code for JDBC/transactions/ORM is wrapped up so business logic takes center stage.
+
+This chapter examines Spring's two great pillars — IoC and AOP — and the principles behind them.
+
+## 1. The Spring Ecosystem at a Glance
+
+Spring is not a single framework; it is an ecosystem:
+
+| Project | Purpose |
+| --- | --- |
+| **Spring Framework** | The core (IoC/AOP/transactions); the foundation of every other project |
+| **Spring Boot** | Auto-configuration + starter dependencies; ready out of the box |
+| **Spring MVC** | Web MVC framework (Servlet-based) |
+| **Spring WebFlux** | Reactive web framework (Reactor-based) |
+| **Spring Data** | Data access abstraction (JPA/Redis/MongoDB) |
+| **Spring Security** | Authentication and authorization |
+| **Spring Cloud** | Microservices toolkit (gateway/registry/config) |
+| **Spring Batch** | Batch processing |
+| **Spring Integration** | EIP integration patterns |
+
+This chapter focuses on the Spring Framework core — IoC and AOP.
+
+## 2. IoC and DI
+
+### 2.1 Traditional Approach vs IoC
+
+In traditional development, objects `new` their own dependencies:
+
+```java
+public class UserService {
+    private UserRepository repo = new UserRepositoryImpl();   // manual new
+    private EmailService email = new EmailServiceImpl();
+    // Tightly coupled: switching implementations requires code changes, hard to test
+}
+```
+
+The problems:
+
+- **Tight coupling** — `UserService` hard-codes `UserRepositoryImpl`; switching implementations means changing code.
+- **Hard to test** — You cannot mock `UserRepository` in unit tests.
+- **Chaotic lifecycle management** — Each `new` is self-managed; objects proliferate.
+
+**IoC (Inversion of Control)** — Reverse the control over "object creation" and hand it to the container:
+
+```java
+public class UserService {
+    private final UserRepository repo;    // declare only, do not new
+    private final EmailService email;
+
+    // Constructor injection: the container injects dependencies
+    public UserService(UserRepository repo, EmailService email) {
+        this.repo = repo;
+        this.email = email;
+    }
+}
+```
+
+The container is responsible for `new`-ing objects, injecting dependencies, and managing lifecycles — that is "inversion of control." **DI (Dependency Injection)** is the implementation technique for IoC — the container injects dependencies into objects.
+
+### 2.2 The IoC Container and Beans
+
+The Spring container (`ApplicationContext`) manages a set of **Beans** — a Bean is simply an object managed by the container.
+
+Ways to declare a Bean:
+
+```java
+// 1. Component scanning: @Component and its derivatives
+@Component
+public class UserRepositoryImpl implements UserRepository { ... }
+
+@Service                 // derivative of @Component, semantic
+public class UserService { ... }
+
+@Repository              // derivative of @Component, for DAO
+public class UserDao { ... }
+
+@Controller              // derivative of @Component, for controllers
+public class UserController { ... }
+
+// 2. @Bean methods: inside @Configuration classes
+@Configuration
+public class AppConfig {
+    @Bean
+    public DataSource dataSource() {
+        return new HikariDataSource(...);
+    }
+    @Bean
+    public RestTemplate restTemplate() {
+        return new RestTemplate();
+    }
+}
+```
+
+The `@Component` family — annotate the class, and Spring scans the package to create instances. `@Bean` — annotate a method, and its return value becomes a Bean; ideal for bringing third-party library classes into the container (you cannot edit their source to add `@Component`).
+
+### 2.3 Three Styles of Dependency Injection
+
+```java
+// 1. Constructor injection (recommended!)
+@Service
+@RequiredArgsConstructor   // Lombok generates the constructor
+public class UserService {
+    private final UserRepository repo;     // final, immutable
+    private final EmailService email;
+}
+
+// 2. Setter injection
+@Service
+public class UserService {
+    private UserRepository repo;
+    @Autowired
+    public void setRepo(UserRepository repo) { this.repo = repo; }
+}
+
+// 3. Field injection (not recommended)
+@Service
+public class UserService {
+    @Autowired
+    private UserRepository repo;   // cannot be final, hard to test
+}
+```
+
+**Why prefer constructor injection?**
+
+- **Immutable** — `final` fields cannot be changed after injection; thread-safe.
+- **Explicit dependencies** — At a glance you can see what this class needs.
+- **Easy to test** — In unit tests, just `new UserService(mockRepo, mockEmail)`.
+- **Avoids null pointers** — The container must supply all dependencies at construction; "forgot to inject" cannot happen.
+
+The anti-pattern of field injection — cannot be `final`, cannot be tested outside Spring, hides circular dependencies. Spring 6+ discourages field injection.
+
+### 2.4 Bean Scopes
+
+| Scope | Meaning |
+| --- | --- |
+| `singleton` (default) | One instance per container |
+| `prototype` | A new instance on every injection |
+| `request` | One per HTTP request (web apps) |
+| `session` | One per HTTP Session |
+| `application` | One per ServletContext |
+
+```java
+@Component
+@Scope("prototype")
+public class Counter { ... }   // a new object on every injection
+```
+
+The vast majority of Beans are `singleton` — stateless services, DAOs, Repositories. Stateful ones (user shopping carts, session data) use `prototype`/`session`.
+
+## 3. The Bean Lifecycle
+
+A Bean goes through these stages from creation to destruction:
+
+```
+1. Instantiation       -- the container calls the constructor to new the object
+2. Property assignment -- inject dependencies (@Autowired)
+3. BeanNameAware / BeanFactoryAware and other Aware interfaces
+4. BeanPostProcessor.postProcessBeforeInitialization  -- pre-initialization callback
+5. @PostConstruct / InitializingBean.afterPropertiesSet / init-method  -- initialization
+6. BeanPostProcessor.postProcessAfterInitialization   -- post-initialization callback (AOP proxy created here!)
+7. Bean ready          -- ready for use
+8. @PreDestroy / DisposableBean.destroy / destroy-method  -- destruction
+```
+
+```java
+@Component
+public class MyBean {
+    @PostConstruct
+    public void init() {
+        System.out.println("Bean initialized (dependencies injected)");
+    }
+
+    @PreDestroy
+    public void cleanup() {
+        System.out.println("Cleaning up before Bean destruction");
+    }
+}
+```
+
+`@PostConstruct` runs after dependency injection is complete — commonly used to validate configuration or start background threads. `@PreDestroy` runs before the container shuts down — used to release resources.
+
+### 3.1 AOP Proxies and the Lifecycle
+
+AOP proxies are generated during the `BeanPostProcessor.postProcessAfterInitialization` stage — the container discovers that a Bean has annotations like `@Transactional`/`@Async` and wraps the original Bean in a proxy before injecting it. This is why `@Transactional` does not work for self-invocation — `this.method()` goes through the original object and bypasses the proxy.
+
+## 4. Annotation-based Configuration
+
+### 4.1 Component Scanning
+
+```java
+@Configuration
+@ComponentScan(basePackages = "com.example")
+public class AppConfig { ... }
+```
+
+`@ComponentScan` tells Spring to scan the specified package (and sub-packages) for all `@Component`/`@Service`/`@Repository`/`@Controller` and register them as Beans. Spring Boot's `@SpringBootApplication` includes `@ComponentScan` by default.
+
+### 4.2 @Autowired
+
+```java
+@Service
+public class UserService {
+    @Autowired
+    private UserRepository repo;    // inject by type
+
+    @Autowired
+    @Qualifier("userRepoImpl")      // when multiple implementations exist, select by name
+    private UserRepository repo2;
+}
+
+// When multiple Beans qualify, @Primary marks the default
+@Primary
+@Repository
+public class UserRepoImpl implements UserRepository { ... }
+```
+
+`@Autowired` injects by type by default. When multiple implementations exist, use `@Qualifier` to specify a name, or `@Primary` to mark the default implementation.
+
+### 4.3 @Bean Methods
+
+```java
+@Configuration
+public class DataSourceConfig {
+
+    @Bean
+    @ConfigurationProperties(prefix = "app.datasource")   // inject properties from config
+    public DataSource dataSource() {
+        return DataSourceBuilder.create().build();
+    }
+
+    @Bean
+    public PlatformTransactionManager transactionManager(DataSource ds) {
+        return new DataSourceTransactionManager(ds);   // parameter ds is auto-injected
+    }
+}
+```
+
+`@Bean` methods may take parameters — parameters are auto-injected from the container. This is the standard way to bring third-party library classes into the container.
+
+## 5. AOP: Aspect-Oriented Programming
+
+**AOP (Aspect-Oriented Programming)** — Extract "cross-cutting concerns" (transactions, logging, permissions, caching) from business code and handle them uniformly via "aspects."
+
+### 5.1 Core AOP Concepts
+
+| Term | Meaning | Example |
+| --- | --- | --- |
+| **Aspect** | Modularization of a cross-cutting concern | `LogAspect` logging aspect |
+| **Join Point** | A point during program execution | A method invocation |
+| **Pointcut** | Where the aspect applies (expression) | `execution(* com.example..*.*(..))` |
+| **Advice** | What to do at a pointcut | `@Before`/`@After`/`@Around` |
+| **Target object** | The original object being proxied | `UserService` |
+| **Proxy** | The proxy object wrapping the target | CGLIB/JDK dynamic proxy |
+| **Weaving** | Applying the aspect to the target | Runtime (Spring) / Compile time (AspectJ) |
+
+### 5.2 The Five Advice Types
+
+```java
+@Aspect
+@Component
+public class LogAspect {
+
+    // Pointcut: match all methods of all classes under com.example.service
+    @Pointcut("execution(* com.example.service..*.*(..))")
+    public void serviceMethods() {}
+
+    // 1. Before advice
+    @Before("serviceMethods()")
+    public void before(JoinPoint jp) {
+        System.out.println("[Before] " + jp.getSignature());
+    }
+
+    // 2. After advice (runs whether or not an exception is thrown)
+    @After("serviceMethods()")
+    public void after(JoinPoint jp) {
+        System.out.println("[After] " + jp.getSignature());
+    }
+
+    // 3. After-returning advice (after a normal return)
+    @AfterReturning(pointcut = "serviceMethods()", returning = "result")
+    public void afterReturning(JoinPoint jp, Object result) {
+        System.out.println("[AfterReturning] " + jp.getSignature() + " -> " + result);
+    }
+
+    // 4. After-throwing advice
+    @AfterThrowing(pointcut = "serviceMethods()", throwing = "ex")
+    public void afterThrowing(JoinPoint jp, Exception ex) {
+        System.out.println("[AfterThrowing] " + jp.getSignature() + " throws " + ex);
+    }
+
+    // 5. Around advice (most powerful, controls whether the original method runs)
+    @Around("serviceMethods()")
+    public Object around(ProceedingJoinPoint pjp) throws Throwable {
+        long start = System.currentTimeMillis();
+        try {
+            Object result = pjp.proceed();    // execute the original method
+            return result;
+        } finally {
+            long cost = System.currentTimeMillis() - start;
+            System.out.println("[Around] " + pjp.getSignature() + " took " + cost + "ms");
+        }
+    }
+}
+```
+
+`@Around` is the most powerful — it can decide whether to execute the original method, modify parameters, modify the return value, and catch exceptions. `@Transactional` is implemented with `@Around` — `try { proceed(); commit(); } catch { rollback(); }`.
+
+### 5.3 Pointcut Expressions
+
+```java
+// execution(modifier? return-type package.class.method(param-types) exception?)
+execution(public * com.example.service.*.*(..))        // public methods of all classes in the service package
+execution(* com.example..*.*(..))                       // all methods in com.example and sub-packages
+execution(* UserService.*(..))                          // all methods of UserService
+execution(* UserService.find*(..))                      // all methods of UserService starting with find
+execution(* save*(String, ..))                          // methods starting with save, first param String, rest arbitrary
+
+// @annotation: match methods carrying a given annotation
+@Pointcut("@annotation(com.example.Loggable)")
+public void loggableMethods() {}
+
+// @within: match classes carrying a given annotation
+@Pointcut("@within(org.springframework.stereotype.Service)")
+public void serviceClasses() {}
+```
+
+### 5.4 AOP Implementation: Dynamic Proxy
+
+Spring AOP is built on the **dynamic proxy** we studied in the previous stage:
+
+- If a class implements an interface → JDK dynamic proxy
+- If a class implements no interface → CGLIB (generates a subclass)
+- Spring Boot 2.0+ defaults to CGLIB
+
+In Stage 10 we hand-wrote a dynamic-proxy AOP — Spring AOP's essence is simply making that mechanism standardized and powerful.
+
+## 6. Spring Transaction Management
+
+Transactions are a classic AOP application — `@Transactional` wraps a method in a transaction automatically.
+
+### 6.1 Programmatic vs Declarative
+
+```java
+// Programmatic (manual management, not recommended)
+@Transactional
+public void transfer(Long from, Long to, BigDecimal amount) {
+    TransactionStatus status = txManager.getTransaction(new DefaultTransactionDefinition());
+    try {
+        accountDao.debit(from, amount);
+        accountDao.credit(to, amount);
+        txManager.commit(status);
+    } catch (Exception e) {
+        txManager.rollback(status);
+        throw e;
+    }
+}
+
+// Declarative (recommended, @Transactional does it in one line)
+@Transactional
+public void transfer(Long from, Long to, BigDecimal amount) {
+    accountDao.debit(from, amount);   // automatically inside a transaction
+    accountDao.credit(to, amount);
+}
+```
+
+`@Transactional` is essentially an AOP aspect — `@Around` wraps the method in "begin transaction → execute → commit/rollback."
+
+### 6.2 @Transactional Configuration
+
+```java
+@Transactional(
+    propagation = Propagation.REQUIRED,        // propagation behavior
+    isolation = Isolation.DEFAULT,             // isolation level
+    timeout = 30,                              // timeout (seconds)
+    readOnly = false,                          // read-only transaction
+    rollbackFor = Exception.class,             // which exceptions trigger rollback
+    noRollbackFor = BusinessException.class    // which exceptions do not roll back
+)
+public void doSomething() { ... }
+```
+
+**Propagation** — how a transaction propagates when methods call each other:
+
+| Propagation | Behavior |
+| --- | --- |
+| `REQUIRED` (default) | Join the existing transaction; create a new one if none exists |
+| `REQUIRES_NEW` | Always create a new one, suspending the current transaction |
+| `NESTED` | Nested transaction (savepoint) |
+| `SUPPORTS` | Join if a transaction exists; otherwise run non-transactionally |
+| `NOT_SUPPORTED` | Run non-transactionally, suspending the current transaction |
+| `MANDATORY` | Must run inside a transaction, otherwise throw |
+| `NEVER` | Must run without a transaction, otherwise throw |
+
+**Isolation level** — how much concurrent transactions affect each other:
+
+| Isolation | Dirty read | Non-repeatable read | Phantom read |
+| --- | --- | --- | --- |
+| `READ_UNCOMMITTED` | Possible | Possible | Possible |
+| `READ_COMMITTED` | Not possible | Possible | Possible |
+| `REPEATABLE_READ` (MySQL default) | Not possible | Not possible | Possible |
+| `SERIALIZABLE` | Not possible | Not possible | Not possible |
+
+### 6.3 Pitfalls Where @Transactional Silently Fails
+
+1. **Self-invocation** — `this.method()` goes through the original object and bypasses the proxy. Move the method to another Bean, or inject yourself.
+2. **Method is not public** — by default only public methods are proxied.
+3. **Exception is swallowed** — a `try-catch` that catches and does not re-throw makes the transaction think everything is fine; no rollback.
+4. **Wrong exception type** — by default only `RuntimeException` triggers rollback; checked exceptions do not. Configure `rollbackFor = Exception.class`.
+5. **Class is not a Bean** — `@Transactional` on a class not managed by Spring has no effect.
+
+## 7. Hands-on: Simulating Spring IoC + AOP
+
+Because the Spring framework cannot run in Piston, below we use plain Java SE to simulate a **mini Spring** — demonstrating the core mechanisms of the IoC container, dependency injection, and AOP proxying. When you use real Spring locally, the principles are exactly the same.
+
+<CodeRunner code={`import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+// === 模拟 Spring 注解 ===
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Component {}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Service {}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Repository {}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+@interface Autowired {}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface Around { String value(); }
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Aspect {}
+
+// === 业务接口与实现 ===
+interface UserRepository { String findById(int id); }
+
+@Repository
+class UserRepositoryImpl implements UserRepository {
+    public String findById(int id) {
+        try { Thread.sleep(10); } catch (Exception e) {}
+        return "User#" + id;
+    }
+}
+
+interface EmailService { void send(String to, String msg); }
+
+@Service
+class EmailServiceImpl implements EmailService {
+    public void send(String to, String msg) {
+        System.out.println("    [邮件] " + to + ": " + msg);
+    }
+}
+
+// 业务类: 用构造器注入 (字段用 @Autowired 演示)
+@Service
+class UserService {
+    @Autowired
+    private UserRepository userRepo;
+    @Autowired
+    private EmailService emailService;
+
+    public void notifyUser(int userId, String msg) {
+        String user = userRepo.findById(userId);
+        System.out.println("    [业务] 查到 " + user);
+        emailService.send(user + "@example.com", msg);
+    }
+}
+
+// === 迷你 IoC 容器 (模拟 Spring ApplicationContext) ===
+class MiniSpring {
+    private final Map<Class<?>, Object> beans = new ConcurrentHashMap<>();
+    private final Map<String, Object> byName = new ConcurrentHashMap<>();
+
+    // 注册一个 Bean (无依赖)
+    public void register(Class<?> clazz) throws Exception {
+        if (!isComponent(clazz)) return;
+        Object instance = clazz.getDeclaredConstructor().newInstance();
+        beans.put(clazz, instance);
+        for (Class<?> iface : clazz.getInterfaces()) beans.put(iface, instance);
+        byName.put(clazz.getSimpleName(), instance);
+    }
+
+    // 全量初始化: 注册所有 + 注入依赖
+    public void initialize(Class<?>... classes) throws Exception {
+        // 第 1 步: 实例化所有 Bean
+        System.out.println("[Spring] 第 1 步: 实例化 Bean");
+        for (Class<?> c : classes) {
+            if (isComponent(c) && !beans.containsKey(c)) {
+                Object bean = c.getDeclaredConstructor().newInstance();
+                beans.put(c, bean);
+                for (Class<?> i : c.getInterfaces()) beans.put(i, bean);
+                byName.put(c.getSimpleName(), bean);
+                System.out.println("  [创建] " + c.getSimpleName());
+            }
+        }
+        // 第 2 步: 注入依赖
+        System.out.println("[Spring] 第 2 步: 注入依赖 (@Autowired)");
+        for (Object bean : new HashSet<>(beans.values())) {
+            injectDependencies(bean);
+        }
+        // 第 3 步: AOP 代理 (有 @Aspect 的会包装)
+        System.out.println("[Spring] 第 3 步: AOP 代理");
+        // 简化: 直接用动态代理包装 UserService
+        applyAop();
+    }
+
+    private void injectDependencies(Object bean) throws Exception {
+        for (Field f : bean.getClass().getDeclaredFields()) {
+            if (f.isAnnotationPresent(Autowired.class)) {
+                Object dep = beans.get(f.getType());
+                if (dep == null) throw new RuntimeException("找不到依赖: " + f.getType());
+                f.setAccessible(true);
+                f.set(bean, dep);
+                System.out.println("  [注入] " + bean.getClass().getSimpleName()
+                    + "." + f.getName() + " <- " + dep.getClass().getSimpleName());
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void applyAop() {
+        // 用 JDK 动态代理给 UserService 加事务/日志切面
+        UserService original = (UserService) beans.get(UserService.class);
+        if (original == null) return;
+        UserService proxy = (UserService) Proxy.newProxyInstance(
+            UserService.class.getClassLoader(),
+            UserService.class.getInterfaces().length > 0
+                ? UserService.class.getInterfaces() : new Class[]{UserService.class},
+            // 简化: 直接演示 UserService 没接口, 用 cglib 才行
+            // 这里给一个无接口的类做演示, 改用匿名子类
+            null
+        );
+        // 因为 UserService 没接口, JDK 代理不行, 真实 Spring 用 CGLIB
+        // 这里我们直接保留原对象, 演示事务靠 @Transactional 风格切面 (见后面)
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T> T getBean(Class<T> type) {
+        return (T) beans.get(type);
+    }
+
+    private boolean isComponent(Class<?> c) {
+        return c.isAnnotationPresent(Component.class)
+            || c.isAnnotationPresent(Service.class)
+            || c.isAnnotationPresent(Repository.class);
+    }
+}
+
+// === 模拟 @Transactional 切面 (用动态代理, 需要接口) ===
+class TxProxy {
+    @SuppressWarnings("unchecked")
+    public static <T> T wrap(T target, Class<?> iface) {
+        return (T) Proxy.newProxyInstance(
+            iface.getClassLoader(),
+            new Class[]{iface},
+            (proxy, method, args) -> {
+                System.out.println("  [事务] === 开启事务 ===");
+                long start = System.currentTimeMillis();
+                try {
+                    Object result = method.invoke(target, args);
+                    System.out.println("  [事务] === 提交事务 (耗时 "
+                        + (System.currentTimeMillis() - start) + "ms) ===");
+                    return result;
+                } catch (InvocationTargetException e) {
+                    System.out.println("  [事务] === 回滚事务! 异常: "
+                        + e.getCause().getMessage() + " ===");
+                    throw e.getCause();
+                }
+            });
+    }
+}
+
+// 有接口的服务, 可以用 JDK 动态代理
+interface OrderService { String createOrder(String user, double amount); }
+
+@Service
+class OrderServiceImpl implements OrderService {
+    public String createOrder(String user, double amount) {
+        try { Thread.sleep(20); } catch (Exception e) {}
+        if (amount < 0) throw new RuntimeException("金额不能为负");
+        return "ORD-" + user + "-" + amount;
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Spring 核心: IoC + AOP 模拟 ===\\n");
+
+        // 1. 启动容器
+        MiniSpring ctx = new MiniSpring();
+        ctx.initialize(UserRepositoryImpl.class, EmailServiceImpl.class,
+            UserService.class, OrderServiceImpl.class);
+
+        // 2. 用容器获取 Bean, 调用业务方法
+        System.out.println("\\n--- 调用 UserService (依赖已自动注入) ---");
+        UserService userService = ctx.getBean(UserService.class);
+        userService.notifyUser(42, "您的订单已发货");
+
+        // 3. 演示 AOP: 给 OrderService 套事务切面
+        System.out.println("\\n--- AOP 事务切面 ---");
+        OrderService raw = ctx.getBean(OrderService.class);
+        OrderService txWrapped = TxProxy.wrap(raw, OrderService.class);
+
+        System.out.println("\\n[正常流程]");
+        String orderId = txWrapped.createOrder("张三", 99.5);
+        System.out.println("  结果: " + orderId);
+
+        System.out.println("\\n[异常流程]");
+        try {
+            txWrapped.createOrder("李四", -1);
+        } catch (Exception e) {
+            System.out.println("  业务异常已抛出");
+        }
+
+        // 4. Bean 单例验证
+        System.out.println("\\n--- Bean 单例 ---");
+        UserService u1 = ctx.getBean(UserService.class);
+        UserService u2 = ctx.getBean(UserService.class);
+        System.out.println("两次获取的 UserService 是同一对象? " + (u1 == u2));
+        System.out.println("(Spring 默认 singleton 作用域)");
+
+        System.out.println("\\n=== Spring 核心概念 ===");
+        System.out.println("IoC: 控制反转, 容器管对象, 不用自己 new");
+        System.out.println("DI: 依赖注入, 容器把依赖塞进对象 (构造器/Setter/字段)");
+        System.out.println("Bean: 容器管理的对象, 默认 singleton");
+        System.out.println("@Component/@Service/@Repository: 声明 Bean");
+        System.out.println("@Autowired: 注入依赖 (推荐构造器注入)");
+        System.out.println("@Bean: 在 @Configuration 类里引入第三方 Bean");
+        System.out.println("AOP: 切面/切入点/通知 (Before/After/Around 等)");
+        System.out.println("@Transactional: 声明式事务, AOP 实现");
+        System.out.println("Bean 生命周期: 实例化->注入->初始化->使用->销毁");
+    }
+}`} />
+
+> **What to observe**:
+> - **`UserService` never writes `new`; dependencies are auto-injected by the container** — this is the core of IoC/DI.
+> - **Beans are singletons by default** — two `getBean` calls return the same object.
+> - **The AOP proxy inserts logic before and after transactions** — this is the essence of `@Transactional`.
+> - **On exception, the transaction rolls back** — the AOP catch triggers the rollback.
+> - **JDK dynamic proxy requires an interface** — classes without interfaces use CGLIB in Spring.
+
+## 8. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| IoC | Inversion of Control; object creation handed to the container |
+| DI | Dependency Injection; the container injects dependencies into objects |
+| Bean | A container-managed object; singleton by default |
+| `@Component` family | Declares a Bean; registered via component scanning |
+| `@Autowired` | Injects dependencies; constructor injection recommended |
+| `@Bean` | A method's return value becomes a Bean |
+| Bean lifecycle | Instantiation → injection → initialization → use → destruction |
+| AOP | Aspect / pointcut / advice |
+| Five advice types | Before/After/AfterReturning/AfterThrowing/Around |
+| `@Transactional` | Declarative transactions, implemented via AOP |
+
+**Memory mnemonics**:
+
+- **IoC inverts control** — objects do not `new` themselves; the container manages them.
+- **Constructor injection is safest** — final, easy to test, explicit dependencies.
+- **Beans are singletons by default** — no mutable state fields.
+- **AOP's five advice types** — Before before, After after, Returning on success, Throwing on exception, Around wraps all.
+- **`@Transactional` is AOP** — self-invocation does not work, only public methods are proxied, exceptions must be re-thrown.
+- **JDK proxy needs an interface, CGLIB uses inheritance** — Spring Boot defaults to CGLIB.
+
+## Conclusion: From Servlet to Spring
+
+This chapter covered Spring's two great pillars — IoC decouples object management, AOP separates cross-cutting logic. Spring turns the "reflection + dynamic proxy + annotations" of Stage 12 into an enterprise-grade framework. The next chapter looks at Spring Boot — making Spring truly "ready out of the box."

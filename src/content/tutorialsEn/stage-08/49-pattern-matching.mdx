@@ -1,0 +1,574 @@
+---
+title: "Pattern Matching"
+chapter: 49
+stage: "Stage 8"
+stageName: "Modern Java Features"
+order: 4
+description: "Master instanceof pattern matching, switch pattern matching, type patterns, Record patterns, the when guard clause, and refactor complex if-else chains into switch pattern matching in practice"
+pubDate: 2026-07-03
+tags: ["Java", "Pattern Matching", "模式匹配", "instanceof", "switch", "JDK 21"]
+---
+
+# Pattern Matching
+
+This chapter is the "last mile" of modern Java's three-piece set (Records + Sealed + Pattern Matching) — **Pattern Matching**. Officially released in Java 21 (September 2023) via JEP 441, it arms both `instanceof` and `switch` "to the teeth," letting Java finally handle type branches and data deconstruction as elegantly as Scala and Rust.
+
+## 1. Why Pattern Matching: The Ugliness of if-else Chains
+
+### 1.1 Traditional instanceof Boilerplate
+
+```java
+Object obj = "hello";
+if (obj instanceof String) {
+    String s = (String) obj;   // cast, redundant
+    System.out.println(s.length());
+}
+```
+
+`instanceof String` already told us `obj` is a String, yet we still write `String s = (String) obj` again — pure boilerplate. Three lines do one thing: check, cast, use.
+
+### 1.2 The Disaster of Complex if-else Chains
+
+Handling multiple types is even worse:
+
+```java
+String describe(Object obj) {
+    if (obj instanceof String) {
+        String s = (String) obj;
+        return "String: " + s;
+    } else if (obj instanceof Integer) {
+        Integer i = (Integer) obj;
+        return "Integer: " + i;
+    } else if (obj instanceof List) {
+        List<?> list = (List<?>) obj;
+        return "List: " + list.size() + " items";
+    } else if (obj == null) {
+        return "null";
+    } else {
+        return "Unknown: " + obj.getClass();
+    }
+}
+```
+
+Four `instanceof`s + four casts + four `else if`s — long, repetitive, dizzying. This is one reason classic Java frameworks (Struts, Spring MVC handlers) are so verbose.
+
+### 1.3 What Pattern Matching Solves
+
+Pattern Matching makes "check + cast + bind variable" happen in one step:
+
+```java
+String describe(Object obj) {
+    return switch (obj) {
+        case null -> "null";
+        case String s -> "String: " + s;
+        case Integer i -> "Integer: " + i;
+        case List<?> l -> "List: " + l.size() + " items";
+        default -> "Unknown: " + obj.getClass();
+    };
+}
+```
+
+Check and cast unified, variable auto-bound, `switch` expression returns directly — that's the power of pattern matching.
+
+## 2. instanceof Pattern Matching (Java 16+)
+
+The most basic pattern matching — `instanceof` followed by "type + variable name," auto-bound on match:
+
+### 2.1 Basic Usage
+
+```java
+Object obj = "hello";
+if (obj instanceof String s) {
+    System.out.println(s.length());   // s is bound, no cast needed
+}
+// s is not visible here (scope is only within the if)
+```
+
+`s` is a **pattern variable** — only valid in the "branch where the match succeeds." This is called "flow-sensitive scope."
+
+### 2.2 Flow-Sensitive Scope
+
+A pattern variable's scope isn't simply "within the braces" — it's "any path where the match definitely succeeds":
+
+```java
+Object obj = "hello";
+if (!(obj instanceof String s)) {
+    return;   // s isn't bound here
+}
+// s is bound here (because non-String already returned)
+System.out.println(s.length());   // legal!
+```
+
+```java
+Object obj = Math.random() > 0.5 ? "hello" : Integer.valueOf(42);
+if (obj instanceof String s && s.length() > 3) {
+    // s is bound on the right side of &&, can use
+    System.out.println(s);
+}
+```
+
+The compiler does "reverse data-flow analysis" — as long as `instanceof` definitely succeeds on a path, the variable is bound. This makes pattern variables smarter than ordinary local variables.
+
+### 2.3 Refactoring equals
+
+The most common application of `instanceof` pattern matching is simplifying `equals`:
+
+```java
+// Old style
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;
+    if (!(o instanceof Point)) return false;
+    Point p = (Point) o;
+    return p.x == this.x && p.y == this.y;
+}
+
+// New style
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;
+    if (!(o instanceof Point p)) return false;   // cast + bind in one step
+    return p.x == this.x && p.y == this.y;
+}
+```
+
+One line less, one fewer chance to "miss something."
+
+## 3. switch Pattern Matching (Java 21)
+
+`switch` pattern matching is Pattern Matching's "main event" — `case` no longer matches only constants; it can match **types**, **Record structure**, **null**, and more.
+
+### 3.1 Type Patterns
+
+```java
+String format(Object obj) {
+    return switch (obj) {
+        case null -> "null";
+        case String s -> "String \"" + s + "\"";
+        case Integer i when i > 0 -> "Positive integer " + i;
+        case Integer i -> "Non-positive integer " + i;
+        case int[] arr -> "int array, length " + arr.length;
+        case List<?> l when l.isEmpty() -> "Empty list";
+        case List<?> l -> "List, length " + l.size();
+        default -> "Other type: " + obj.getClass().getSimpleName();
+    };
+}
+```
+
+Key points:
+
+- `case String s` — type pattern, matches String and binds to `s`.
+- `case null` — finally can match null! Traditional switch NPEs on null; now you can handle it gracefully.
+- `when` — **guard clause**, an additional condition.
+- Multiple cases are order-sensitive — the top one matches first; `Integer i when i ＞ 0` must come before `Integer i`.
+
+### 3.2 The when Guard Clause
+
+`when` adds an "additional condition" to a case — after the type matches, check the condition:
+
+```java
+return switch (obj) {
+    case Integer i when i > 100 -> "Large integer";
+    case Integer i when i < 0 -> "Negative integer";
+    case Integer i -> "Normal integer";   // fallback
+    ...
+};
+```
+
+`when` is evaluated **after** the type matches — so `i` is already bound and usable inside `when`. Far more elegant than the "nested if" of traditional switch.
+
+### 3.3 case null: A Pain Point of Traditional switch
+
+Traditional `switch` throws NPE on `null` — because `obj.hashCode()` blows up at `switch (obj)`. Pattern matching's `switch` solves this:
+
+```java
+String s = switch (obj) {
+    case null -> "null";        // explicitly handle null
+    case String str -> str;
+    default -> "Other";
+};
+```
+
+If you don't write `case null`, encountering null still NPEs (for backward compatibility) — but you can **explicitly choose** to handle it.
+
+## 4. Record Patterns: Deconstructing Records
+
+Record patterns (JEP 440, Java 21) let you directly "deconstruct" a Record's components inside a case:
+
+### 4.1 Basic Record Pattern
+
+```java
+record Point(int x, int y) {}
+
+String describe(Object obj) {
+    return switch (obj) {
+        case Point(int x, int y) -> "Point (" + x + ", " + y + ")";
+        default -> "Not a point";
+    };
+}
+```
+
+`case Point(int x, int y)` directly deconstructs `Point`'s two components into `x`, `y` — no `((Point) obj).x()` needed.
+
+### 4.2 Nested Record Patterns
+
+```java
+record Point(int x, int y) {}
+record Rectangle(Point topLeft, Point bottomRight) {}
+
+int area(Object obj) {
+    return switch (obj) {
+        case Rectangle(Point(int x1, int y1), Point(int x2, int y2)) ->
+            Math.abs((x2 - x1) * (y2 - y1));
+        default -> 0;
+    };
+}
+```
+
+Two layers of nesting deconstructed in one go — this is functional language "pattern matching" implemented in Java. Especially handy in AST processing and JSON parse-tree traversal.
+
+### 4.3 Record Pattern + when
+
+```java
+return switch (shape) {
+    case Circle(double r) when r > 0 -> Math.PI * r * r;
+    case Circle(double r) -> 0;   // non-positive radius, area 0
+    case Rectangle(double w, double h) when w > 0 && h > 0 -> w * h;
+    case Rectangle(double w, double h) -> 0;
+    ...
+};
+```
+
+### 4.4 Record Pattern + Type Inference
+
+If a Record's component types are known (e.g., `record Box＜T＞(T value)`), the pattern variable's type can be inferred:
+
+```java
+record Box<T>(T value) {}
+
+String open(Box<String> box) {
+    return switch (box) {
+        case Box(String s) -> "String: " + s;   // T inferred as String
+    };
+}
+```
+
+## 5. Exhaustiveness Checking: Sealed's Gift
+
+`switch` pattern matching combined with **Sealed Classes** (covered in the previous chapter) can **omit default** — the compiler checks "whether all subclasses are handled":
+
+```java
+sealed interface Shape permits Circle, Rectangle, Triangle {}
+record Circle(double r) implements Shape {}
+record Rectangle(double w, double h) implements Shape {}
+record Triangle(double a, double b, double c) implements Shape {}
+
+double area(Shape s) {
+    return switch (s) {
+        case Circle(double r) -> Math.PI * r * r;
+        case Rectangle(double w, double h) -> w * h;
+        case Triangle(double a, double b, double c) -> {
+            double p = (a + b + c) / 2;
+            yield Math.sqrt(p * (p - a) * (p - b) * (p - c));
+        }
+        // No default needed! The compiler knows there are only these three
+    };
+}
+```
+
+Adding `case Pentagon` to `Shape.permits` in the future will cause all `switch(Shape)` to warn — forcing you to handle the new case. This is the "compile-time guarantee" of ADT + Pattern Matching.
+
+If you don't write `case null`, the compiler will also ask "do you want to handle null" — friendlier than traditional switch.
+
+## 6. Pattern Matching Priority and Order
+
+switch pattern matching cases are matched **in order** — top to bottom, first match wins. So order matters:
+
+```java
+return switch (obj) {
+    case Integer i when i > 100 -> "Large integer";   // 1. Match specific condition first
+    case Integer i -> "Other integer";               // 2. Then the type fallback
+    case Number n -> "Other number";                // 3. Then the parent type
+    default -> "Not a number";                         // 4. Finally default
+};
+```
+
+If you reverse it and put `case Integer i` first, `i ＞ 100` will never match — the compiler warns "case will never be reached."
+
+**Rule**: **Subtypes first, supertypes later; with-when first, without-when later.**
+
+## 7. Practice: Refactoring a Complex if-else Chain
+
+The following example shows refactoring a "message handler" with Pattern Matching — comparing traditional if-else chains vs switch pattern matching.
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    // === Message type ADT ===
+    public sealed interface Message permits TextMsg, ImageMsg, VideoMsg, SystemMsg {}
+    public record TextMsg(String from, String content) implements Message {}
+    public record ImageMsg(String from, String url, int width, int height) implements Message {}
+    public record VideoMsg(String from, String url, int duration) implements Message {}
+    public record SystemMsg(String type, int code) implements Message {}
+
+    public static void main(String[] args) {
+        System.out.println("=== Pattern Matching Demo ===\\n");
+
+        // 1. instanceof pattern matching
+        System.out.println("--- 1. instanceof Pattern Matching ---");
+        Object[] objs = {"hello", 42, List.of(1, 2, 3), 3.14, null};
+        for (Object o : objs) {
+            String desc = describeInstance(o);
+            System.out.println("  " + desc);
+        }
+
+        // 2. switch type pattern + when guard
+        System.out.println("\\n--- 2. switch Type Pattern + when ---");
+        Object[] nums = {100, -5, 0, 9999, "abc", List.of(), List.of(1, 2)};
+        for (Object o : nums) {
+            System.out.println("  " + o + " -> " + describeNumber(o));
+        }
+
+        // 3. switch handling Message ADT (exhaustive)
+        System.out.println("\\n--- 3. switch Handling Message ADT ---");
+        List<Message> msgs = List.of(
+            new TextMsg("Alice", "Hi"),
+            new ImageMsg("Bob", "https://x.com/cat.jpg", 800, 600),
+            new VideoMsg("Carol", "https://x.com/v.mp4", 30),
+            new SystemMsg("LOGIN", 200)
+        );
+        for (Message m : msgs) {
+            System.out.println("  " + handleMessage(m));
+        }
+
+        // 4. Record pattern deconstruction
+        System.out.println("\\n--- 4. Record Pattern Deconstruction ---");
+        record Point(int x, int y) {}
+        record Line(Point start, Point end) {}
+        record TriangleShape(Point a, Point b, Point c) {}
+
+        Object[] shapes = {
+            new Point(3, 4),
+            new Line(new Point(0, 0), new Point(5, 5)),
+            new TriangleShape(new Point(0,0), new Point(3,0), new Point(0,4))
+        };
+        for (Object s : shapes) {
+            System.out.println("  " + describeShape(s));
+        }
+
+        // 5. Nested Record pattern + when
+        System.out.println("\\n--- 5. Nested Record Pattern + when ---");
+        record Box(String label, int weight) {}
+        Object[] boxes = {
+            new Box("Light", 2),
+            new Box("Heavy", 50),
+            new Box("Empty", 0)
+        };
+        for (Object b : boxes) {
+            System.out.println("  " + describeBox(b));
+        }
+
+        // 6. Refactor comparison: traditional if-else vs switch pattern matching
+        System.out.println("\\n--- 6. Refactor Comparison: Traditional vs Pattern Matching ---");
+        Object test = "hello world";
+        System.out.println("  Old style: " + oldStyleDescribe(test));
+        System.out.println("  New style: " + newStyleDescribe(test));
+
+        // 7. Exhaustiveness checking demo
+        System.out.println("\\n--- 7. Exhaustiveness Check (sealed cooperation) ---");
+        System.out.println("  Message is sealed, handleMessage needs no default");
+        System.out.println("  Message.permits: " + Arrays.toString(
+            Message.class.getPermittedSubclasses()).replace("class ", ""));
+
+        // 8. Flow-sensitive scope of pattern variables
+        System.out.println("\\n--- 8. Flow-Sensitive Scope ---");
+        Object obj = "test";
+        if (obj instanceof String s && s.length() > 2) {
+            System.out.println("  s available on the right of &&: " + s.toUpperCase());
+        }
+        if (!(obj instanceof Integer i)) {
+            System.out.println("  obj is not Integer, skipping");
+        } else {
+            System.out.println("  i available in else: " + i);   // i is bound here
+        }
+
+        System.out.println("\\n=== Summary ===");
+        System.out.println("1. instanceof pattern matching: if (o instanceof String s)");
+        System.out.println("2. switch type pattern: case String s ->");
+        System.out.println("3. switch Record pattern: case Point(int x, int y) ->");
+        System.out.println("4. when guard: case Integer i when i > 0 ->");
+        System.out.println("5. case null: explicitly handle null");
+        System.out.println("6. sealed + switch: compile-time exhaustiveness, no default needed");
+    }
+
+    // instanceof pattern matching
+    static String describeInstance(Object o) {
+        if (o == null) return "null";
+        if (o instanceof String s) return "String \"" + s + "\", length " + s.length();
+        if (o instanceof Integer i) return "Integer " + i;
+        if (o instanceof List<?> l) return "List, length " + l.size();
+        if (o instanceof Number n) return "Other number " + n;
+        return "Other: " + o.getClass().getSimpleName();
+    }
+
+    // switch type pattern + when guard
+    static String describeNumber(Object o) {
+        return switch (o) {
+            case null -> "null";
+            case Integer i when i > 1000 -> "Large integer " + i;
+            case Integer i when i < 0 -> "Negative integer " + i;
+            case Integer i when i == 0 -> "Zero";
+            case Integer i -> "Normal integer " + i;
+            case String s -> "String: " + s;
+            case List<?> l when l.isEmpty() -> "Empty list";
+            case List<?> l -> "Non-empty list, length " + l.size();
+            default -> "Other: " + o.getClass().getSimpleName();
+        };
+    }
+
+    // switch handling Message ADT - exhaustive, no default needed
+    static String handleMessage(Message m) {
+        return switch (m) {
+            case TextMsg(String from, String content) ->
+                "Text[" + from + "]: " + content;
+            case ImageMsg(String from, String url, int w, int h) ->
+                "Image[" + from + "]: " + url + " (" + w + "x" + h + ")";
+            case VideoMsg(String from, String url, int dur) ->
+                "Video[" + from + "]: " + url + " " + dur + "s";
+            case SystemMsg(String type, int code) ->
+                "System[" + type + "] code=" + code;
+        };
+    }
+
+    // Record pattern deconstruction
+    static String describeShape(Object s) {
+        return switch (s) {
+            case Point(int x, int y) -> "Point (" + x + ", " + y + ")";
+            case Line(Point(int x1, int y1), Point(int x2, int y2)) ->
+                "Line (" + x1 + "," + y1 + ")->(" + x2 + "," + y2 + ") length "
+                + Math.sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1));
+            case TriangleShape(Point a, Point b, Point c) ->
+                "Triangle " + a + " " + b + " " + c;
+            default -> "Unknown shape";
+        };
+    }
+
+    // Nested Record pattern + when
+    static String describeBox(Object o) {
+        return switch (o) {
+            case Box(String label, int w) when w == 0 -> "Empty box[" + label + "]";
+            case Box(String label, int w) when w < 10 -> "Light box[" + label + "] " + w + "kg";
+            case Box(String label, int w) when w < 50 -> "Medium box[" + label + "] " + w + "kg";
+            case Box(String label, int w) -> "Heavy box[" + label + "] " + w + "kg";
+            default -> "Not a box";
+        };
+    }
+
+    // Old style: a bunch of instanceof + casts
+    static String oldStyleDescribe(Object obj) {
+        if (obj == null) return "null";
+        if (obj instanceof String) {
+            String s = (String) obj;
+            if (s.length() > 5) {
+                return "Long string: " + s;
+            } else {
+                return "Short string: " + s;
+            }
+        } else if (obj instanceof Integer) {
+            Integer i = (Integer) obj;
+            if (i > 0) {
+                return "Positive integer: " + i;
+            } else {
+                return "Non-positive integer: " + i;
+            }
+        } else if (obj instanceof List) {
+            List<?> l = (List<?>) obj;
+            return "List: " + l.size() + " items";
+        }
+        return "Unknown: " + obj.getClass().getSimpleName();
+    }
+
+    // New style: switch pattern matching
+    static String newStyleDescribe(Object obj) {
+        return switch (obj) {
+            case null -> "null";
+            case String s when s.length() > 5 -> "Long string: " + s;
+            case String s -> "Short string: " + s;
+            case Integer i when i > 0 -> "Positive integer: " + i;
+            case Integer i -> "Non-positive integer: " + i;
+            case List<?> l -> "List: " + l.size() + " items";
+            default -> "Unknown: " + obj.getClass().getSimpleName();
+        };
+    }
+
+    // Local Records for describeShape
+    public record Point(int x, int y) {}
+    public record Line(Point start, Point end) {}
+    public record TriangleShape(Point a, Point b, Point c) {}
+    public record Box(String label, int weight) {}
+}`} />
+
+> **Key observations**:
+> - **`describeInstance` uses `if instanceof`** — one less cast than the traditional style.
+> - **`describeNumber`'s case order** — `Integer i when i ＞ 1000` must come before `Integer i`, or it never matches.
+> - **`handleMessage` has no `default`** — `Message` is sealed, and the compiler knows there are only 4 cases.
+> - **`describeShape`'s nested Record deconstruction** — `Line(Point(...), Point(...))` unpacks two layers in one line.
+> - **`oldStyleDescribe` vs `newStyleDescribe`** — same logic, the pattern matching version is half the code and twice as readable.
+> - **Flow-sensitive scope** — `if (o instanceof String s && s.length() ＞ 2)`, `s` is bound on the right of `&&`.
+
+## 8. Pattern Matching Use Cases
+
+| Scenario | Example |
+| --- | --- |
+| Replacing if-else type branches | Message dispatch, event handling |
+| Deconstructing Records | AST traversal, config parsing, JSON/SQL parse trees |
+| Handling sealed ADTs | State machines, "closed enumeration" in domain modeling |
+| Simplifying equals | `if (!(o instanceof X x)) return false;` |
+| Replacing the visitor pattern | No more Visitor pattern boilerplate; switch pattern matching is more direct |
+| Gracefully handling null | `case null -＞` explicit handling |
+
+## 9. Pattern Matching Limitations
+
+Current Java 21 pattern matching has some limitations (some may improve in future versions):
+
+- **No array patterns** — `case int[]{int a, int b, int rest}` isn't supported yet (proposed in JEP 432).
+- **No collection patterns** — `case List(first, second, ...rest)` isn't supported yet (future JEP).
+- **`when` can't reference local variables outside the case** — if it would conflict with an outer variable, it's a compile error.
+- **No deconstruction of ordinary classes** — only Records can be deconstructed; ordinary classes can't use `case Foo(int x)` (unless custom deconstruction methods are added, future JEP).
+
+But even in its current version, Pattern Matching dramatically boosts Java's expressiveness.
+
+## 10. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| `instanceof X x` | Type match + variable binding, no cast needed |
+| Flow-sensitive scope | Pattern variables are valid on "definitely matched" paths |
+| `switch` type pattern | `case String s -＞`, replaces if-else chains |
+| `switch` Record pattern | `case Point(int x, int y) -＞`, deconstructs Records |
+| `when` guard | `case Integer i when i ＞ 0`, additional condition |
+| `case null` | Explicit null handling, no more NPE |
+| Exhaustiveness checking | sealed + switch can omit default |
+| Order-sensitive | Subtypes first, supertypes later; with-when first |
+
+**Mnemonics**:
+
+- **instanceof + variable** — check is bind, one less cast to write.
+- **switch case type** — the terminator of if-else chains.
+- **Record pattern deconstruction** — unpack components in one line.
+- **when adds conditions** — type + condition double filter.
+- **case null explicit handling** — say goodbye to NPE.
+- **sealed cooperation** — exhaustiveness check, omit default.
+- **Order-sensitive** — specific first, general later.
+
+## Conclusion: Java's Modern Data Modeling Three-Piece Set Complete
+
+With this, modern Java data modeling's three-piece set is fully covered:
+
+- **Records (Chapter 47)** — immutable value objects, product type.
+- **Sealed Classes (Chapter 48)** — closed inheritance hierarchies, sum type.
+- **Pattern Matching (this chapter)** — deconstruction + exhaustiveness, making ADTs truly usable.
+
+These three coordinate, letting Java for the first time model algebraic data types as elegantly as Scala, Haskell, and Rust. Writing an AST parser, state machine, or domain model goes from "Visitor pattern + tons of if-else" to "sealed + record + switch pattern matching" — half the code, twice the readability, and the compiler checks exhaustiveness for you.
+
+The next chapter is Stage 8's finale — **a quick tour of other modern features**. We'll cover interface private methods, Stream enhancements, HttpClient, Text Blocks, Sequenced Collections, and the FFM API in one go — "small but beautiful" features. None are as revolutionary as the three-piece set, but each quietly makes Java more pleasant to use. See you in the next chapter.

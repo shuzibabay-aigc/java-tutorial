@@ -1,0 +1,560 @@
+---
+title: "Redis"
+chapter: 75
+stage: "Stage 14"
+stageName: "Advanced Topics and Distributed Systems"
+order: 3
+description: "Master Redis's five major data types and commands, RDB/AOF persistence, the three big caching problems (penetration/breakdown/avalanche), SETNX/Redisson distributed locks, and the Lettuce/Jedis clients"
+pubDate: 2026-07-03
+tags: ["Java", "Redis", "Cache", "Distributed Lock", "Lettuce", "Jedis", "Redisson"]
+---
+
+# Redis
+
+A database is like a meticulous librarian — every query means scanning the catalog, walking to the shelf, pulling the book, and checking it out, unhurried but absolutely reliable. Redis (Remote Dictionary Server), by contrast, is more like that always-open drawer right next to your elbow — you reach in and grab exactly what you need, fast enough to make you doubt reality.
+
+How fast? A single instance easily tops 100,000 QPS, with all data living in memory and reads/writes measured in microseconds. In 2009, Italian programmer Salvatore Sanfilippo (aka antirez) built this "in-memory database" for one of his own projects. Over a decade later, Redis has become a standard weapon in every backend engineer's arsenal — caching, queues, counters, leaderboards, distributed locks: it shows up everywhere.
+
+In this chapter we'll look at Redis's five data types, its two persistence mechanisms, the three great caching problems, distributed locks, and how Java talks to Redis.
+
+## I. Why You Need Redis
+
+Databases (MySQL/PostgreSQL) store data on disk — reliable, but slow. A single disk I/O takes several milliseconds, while memory access takes tens of nanoseconds — a five-order-of-magnitude gap. When your system is read-heavy and write-light (a product detail page, a trending article), querying the database every time is wasteful.
+
+The **cache** idea is simple — put hot data in memory; on a read, check memory first. If it hits, return immediately; if it misses, query the database and write the result back to memory. Redis is the de facto standard for this "memory layer."
+
+Redis is more than a cache — its rich data types let it do many things:
+
+| Scenario | What to Use |
+| --- | --- |
+| Cache hot data | String |
+| Leaderboards | ZSet (sorted set) |
+| Likes / follows | Set |
+| Shopping cart | Hash |
+| Lightweight message queue | List |
+| Rate limiting | ZSet / List |
+| Distributed lock | String + SETNX |
+| Geolocation | Geo |
+| Count unique visitors (UV) | HyperLogLog |
+
+## II. The Five Data Types
+
+Redis's "data types" don't mean int/float — they refer to the storage structure of the value. All keys are strings; values come in five basic types.
+
+### 2.1 String: The Most Basic Key-Value
+
+```bash
+SET name "redis"        # Set
+GET name                # Read, returns "redis"
+INCR counter            # Increment (atomic)
+EXPIRE name 60          # Expire after 60 seconds
+SET token "abc" EX 60   # Set with expiry (EX = seconds)
+```
+
+String can hold strings, numbers, even binary data (images). Up to 512MB.
+
+### 2.2 List: An Ordered List
+
+```bash
+LPUSH queue "a" "b"     # Insert on the left
+RPUSH queue "c"         # Insert on the right
+LRANGE queue 0 -1       # View all
+LPOP queue              # Pop from the left
+```
+
+A List is a doubly linked list; operations at either end are O(1). Often used as a queue.
+
+### 2.3 Hash: A Field-Value Map
+
+```bash
+HSET user:1 name "Tom" age 18    # Set fields
+HGET user:1 name                 # Read a single field
+HGETALL user:1                   # Read all fields
+HINCRBY user:1 age 1             # Increment a field
+```
+
+Hash is great for storing objects — more flexible than serializing an object into a String, since you can change a single field without rewriting the whole thing.
+
+### 2.4 Set: An Unordered Collection
+
+```bash
+SADD tags "java" "redis"         # Add elements
+SMEMBERS tags                    # View all
+SISMEMBER tags "java"            # Check membership
+SINTER set1 set2                 # Intersection
+SUNION set1 set2                 # Union
+```
+
+Set elements are unique; commonly used for tags, deduplication, and mutual friends.
+
+### 2.5 ZSet: A Sorted Collection
+
+```bash
+ZADD rank 100 "alice" 90 "bob"   # Add members with scores
+ZRANGE rank 0 2                  # Top 3 ascending by score
+ZREVRANGE rank 0 2               # Top 3 descending (leaderboard)
+ZINCRBY rank 5 "alice"           # Increment a score
+```
+
+ZSet (Sorted Set) is Redis's "killer feature" — every element carries a score, and elements are ordered by it. Leaderboards run on it.
+
+## III. Persistence: The Safety Net for In-Memory Data
+
+Redis data lives in memory — restart and it's gone. To avoid losing data, Redis offers two persistence strategies.
+
+### 3.1 RDB (Redis Database)
+
+**RDB** is a point-in-time snapshot of memory — all data written to an `.rdb` file.
+
+- **Triggers** — manual `SAVE`/`BGSAVE`, or config like `save 900 1` (1 change within 900 seconds triggers it).
+- **Pros** — small file, fast recovery, good for backups.
+- **Cons** — data between two snapshots can be lost.
+
+### 3.2 AOF (Append Only File)
+
+**AOF** appends every write command to a log file — like a database's binlog.
+
+- **Sync strategies** — `appendfsync always` (sync on every write, safest but slowest) / `everysec` (sync once per second, default, at most 1 second lost) / `no` (leave it to the OS).
+- **Pros** — minimal data loss (1 second worst case).
+- **Cons** — large file, slow recovery.
+
+### 3.3 Hybrid Persistence (Redis 4.0+)
+
+Production usually runs a **hybrid mode** — the first half of the AOF file is a binary RDB snapshot, and the second half is incremental AOF commands. It balances recovery speed against data safety.
+
+## IV. The Three Big Caching Problems
+
+Misuse a cache and things break. Three classic pitfalls — penetration, breakdown, and avalanche.
+
+### 4.1 Cache Penetration
+
+**Penetration** — querying data that **doesn't exist at all**: it's not in the cache, and it's not in the database. Every request punches through to the database. Malicious attackers love this — they hammer non-existent IDs.
+
+**Solutions**:
+1. **Cache null values** — if the database has nothing, cache a `null` (with a short TTL).
+2. **Bloom Filter** — put a Bloom filter in front of the cache to quickly judge whether a key "might exist." If it doesn't, return immediately.
+
+### 4.2 Cache Breakdown
+
+**Breakdown** — a **hot key** suddenly expires, and a flood of concurrent requests hit the database at once. For example, the inventory key of a flash-sale product expires.
+
+**Solutions**:
+1. **Mutex lock** — let only one thread query the database; the rest wait for the result.
+2. **Never expire hot keys** — refresh the cache asynchronously in the background.
+
+### 4.3 Cache Avalanche
+
+**Avalanche** — a **large number of keys expire at once**, or Redis goes down, and all requests pour into the database.
+
+**Solutions**:
+1. **Add randomness to expiry times** — `expire = base + random(60)`, so they don't all expire together.
+2. **Multi-level cache** — local cache (Caffeine) + Redis; if Redis is down, the local cache can hold the line for a while.
+3. **Redis cluster + rate limiting / circuit breaking** — keep Redis highly available, and protect the database with rate limiting.
+
+## V. Distributed Locks
+
+On a single machine, Java has `synchronized` and `ReentrantLock`. But a distributed system spans multiple JVMs, where both are useless — you need a **distributed lock**.
+
+### 5.1 A Simple Implementation with SETNX
+
+The most bare-bones distributed lock — use `SET key value NX EX timeout`:
+
+- `NX` — set only if the key doesn't exist (mutual exclusion).
+- `EX timeout` — set an expiry, so if the lock-holding process crashes, the lock is eventually released.
+
+```java
+String lockValue = UUID.randomUUID().toString();
+// Grab the lock: NX (set if not exists) + EX (expire in 30 seconds)
+boolean locked = redis.set("lock:order:123", lockValue, "NX", "EX", 30);
+
+if (locked) {
+    try {
+        // Business logic
+    } finally {
+        // Release the lock: must verify the value, don't accidentally delete someone else's lock
+        String script =
+            "if redis.call('get', KEYS[1]) == ARGV[1] then " +
+            "  return redis.call('del', KEYS[1]) " +
+            "else return 0 end";
+        redis.eval(script, Collections.singletonList("lock:order:123"),
+                   Collections.singletonList(lockValue));
+    }
+}
+```
+
+Why a Lua script to release the lock? Because "check value + delete" must be **atomic** — otherwise, after the check but before the delete, the lock could expire, someone else could grab it, and your delete would wipe their lock.
+
+### 5.2 Redisson: The Production-Grade Solution
+
+The SETNX approach has a problem — if business logic runs longer than the lock's TTL, the lock gets taken by someone else while you still think you hold it. **Redisson** solves this with a **watchdog** — a background thread that periodically renews the lock.
+
+```java
+// Redisson client
+Config config = new Config();
+config.useSingleServer().setAddress("redis://localhost:6379");
+RedissonClient redisson = Redisson.create(config);
+
+RLock lock = redisson.getLock("lock:order:123");
+lock.lock();   // Acquire; the watchdog auto-renews
+try {
+    // Business logic
+} finally {
+    lock.unlock();
+}
+```
+
+Redisson also supports **reentrant locks**, **fair locks**, **read-write locks**, and **RedLock** (multi-node fault tolerance) — the first choice for production.
+
+## VI. Java Clients: Lettuce and Jedis
+
+Java has two major Redis clients — **Jedis** and **Lettuce**.
+
+### 6.1 Jedis
+
+Jedis is the veteran client — its API is simple and intuitive, but it's **not thread-safe** — multithreaded use requires a connection pool (JedisPool).
+
+```java
+JedisPool pool = new JedisPool("localhost", 6379);
+try (Jedis jedis = pool.getResource()) {
+    jedis.set("name", "redis");
+    String value = jedis.get("name");
+    jedis.incr("counter");
+}
+```
+
+### 6.2 Lettuce
+
+Lettuce is the modern client — **thread-safe**, built on Netty for async, and supports reactive. Since Spring Boot 2.x, Lettuce is the default.
+
+```java
+RedisClient client = RedisClient.create("redis://localhost:6379");
+StatefulRedisConnection<String, String> conn = client.connect();
+RedisCommands<String, String> sync = conn.sync();
+
+sync.set("name", "redis");
+String value = sync.get("name");
+
+// Async API
+RedisAsyncCommands<String, String> async = conn.async();
+async.set("counter", "1");
+
+conn.close();
+client.shutdown();
+```
+
+### 6.3 Spring Boot Integration
+
+Spring Boot uses `spring-boot-starter-data-redis`, which wraps `RedisTemplate`:
+
+```java
+@Service
+public class UserService {
+    @Autowired
+    private RedisTemplate<String, Object> redis;
+
+    public User getUser(Long id) {
+        String key = "user:" + id;
+        User user = (User) redis.opsForValue().get(key);
+        if (user != null) return user;   // Cache hit
+
+        user = userMapper.selectById(id); // Query the database
+        redis.opsForValue().set(key, user, 60, TimeUnit.MINUTES);
+        return user;
+    }
+}
+```
+
+## VII. Hands-on: Simulating Redis with Java SE
+
+The Piston online environment can't run a Redis server, so we'll use Java SE to simulate Redis's core data structures — the five types (String/List/Hash/Set/ZSet) — and demonstrate each one's operations. We'll also simulate the solutions for cache penetration, cache breakdown, and mutex locks.
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+// 一个迷你 Redis: 用 Java SE 模拟五大数据类型
+class MiniRedis {
+    // String 类型: 简单 key-value
+    private final Map<String, String> strings = new ConcurrentHashMap<>();
+    // List 类型: 双向链表 (用 LinkedList 模拟)
+    private final Map<String, LinkedList<String>> lists = new ConcurrentHashMap<>();
+    // Hash 类型: 字段-值
+    private final Map<String, Map<String, String>> hashes = new ConcurrentHashMap<>();
+    // Set 类型: 无序集合
+    private final Map<String, Set<String>> sets = new ConcurrentHashMap<>();
+    // ZSet 类型: 有序集合 (用 TreeMap 按分数排序)
+    private final Map<String, TreeMap<Double, String>> zsets = new ConcurrentHashMap<>();
+    // 过期时间: key -> 过期时间戳(毫秒)
+    private final Map<String, Long> expireMap = new ConcurrentHashMap<>();
+
+    // === String ===
+    public String set(String key, String value) {
+        strings.put(key, value);
+        return "OK";
+    }
+    public String set(String key, String value, int expireSeconds) {
+        strings.put(key, value);
+        expireMap.put(key, System.currentTimeMillis() + expireSeconds * 1000L);
+        return "OK";
+    }
+    public String get(String key) {
+        if (isExpired(key)) return null;
+        return strings.get(key);
+    }
+    public long incr(String key) {
+        long v = Long.parseLong(strings.getOrDefault(key, "0")) + 1;
+        strings.put(key, String.valueOf(v));
+        return v;
+    }
+    // SETNX: 不存在才设置 (分布式锁基础)
+    public boolean setNx(String key, String value, int expireSeconds) {
+        if (strings.containsKey(key) && !isExpired(key)) return false;
+        strings.put(key, value);
+        expireMap.put(key, System.currentTimeMillis() + expireSeconds * 1000L);
+        return true;
+    }
+    public boolean del(String key) {
+        boolean r = strings.remove(key) != null;
+        expireMap.remove(key);
+        return r;
+    }
+
+    // === List ===
+    public long lPush(String key, String... values) {
+        LinkedList<String> list = lists.computeIfAbsent(key, k -> new LinkedList<>());
+        for (String v : values) list.addFirst(v);
+        return list.size();
+    }
+    public List<String> lRange(String key, int start, int end) {
+        LinkedList<String> list = lists.get(key);
+        if (list == null) return Collections.emptyList();
+        if (end == -1) end = list.size() - 1;
+        return new ArrayList<>(list.subList(start, Math.min(end + 1, list.size())));
+    }
+
+    // === Hash ===
+    public long hSet(String key, String field, String value) {
+        Map<String, String> hash = hashes.computeIfAbsent(key, k -> new HashMap<>());
+        hash.put(field, value);
+        return 1;
+    }
+    public String hGet(String key, String field) {
+        Map<String, String> hash = hashes.get(key);
+        return hash == null ? null : hash.get(field);
+    }
+    public Map<String, String> hGetAll(String key) {
+        return hashes.getOrDefault(key, Collections.emptyMap());
+    }
+
+    // === Set ===
+    public long sAdd(String key, String... members) {
+        Set<String> set = sets.computeIfAbsent(key, k -> new HashSet<>());
+        long added = 0;
+        for (String m : members) if (set.add(m)) added++;
+        return added;
+    }
+    public Set<String> sMembers(String key) {
+        return sets.getOrDefault(key, Collections.emptySet());
+    }
+    public boolean sIsMember(String key, String member) {
+        return sets.getOrDefault(key, Collections.emptySet()).contains(member);
+    }
+
+    // === ZSet (排行榜) ===
+    public long zAdd(String key, double score, String member) {
+        TreeMap<Double, String> zset = zsets.computeIfAbsent(key, k -> new TreeMap<>(Collections.reverseOrder()));
+        // 简化: 移除旧的同名成员
+        zset.values().removeIf(v -> v.equals(member));
+        zset.put(score, member);
+        return 1;
+    }
+    // 按分数降序取前 n 名
+    public List<String> zRevRange(String key, int n) {
+        TreeMap<Double, String> zset = zsets.get(key);
+        if (zset == null) return Collections.emptyList();
+        List<String> r = new ArrayList<>();
+        int i = 0;
+        for (String m : zset.values()) {
+            if (i++ >= n) break;
+            r.add(m);
+        }
+        return r;
+    }
+
+    private boolean isExpired(String key) {
+        Long exp = expireMap.get(key);
+        if (exp == null) return false;
+        if (System.currentTimeMillis() > exp) {
+            strings.remove(key);
+            expireMap.remove(key);
+            return true;
+        }
+        return false;
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Redis 五大数据类型模拟 ===\\n");
+        MiniRedis redis = new MiniRedis();
+
+        // 1. String
+        System.out.println("--- 1. String 类型 ---");
+        redis.set("name", "redis");
+        System.out.println("SET name redis -> " + redis.get("name"));
+        System.out.println("INCR counter 3 次:");
+        for (int i = 0; i < 3; i++) System.out.println("  " + redis.incr("counter"));
+        redis.set("token", "abc", 1);   // 1 秒过期
+        System.out.println("token 立即查: " + redis.get("token"));
+        Thread.sleep(1100);
+        System.out.println("token 1.1 秒后查: " + redis.get("token") + " (已过期)");
+
+        // 2. List
+        System.out.println("\\n--- 2. List 类型 ---");
+        redis.lPush("queue", "a", "b", "c");
+        System.out.println("LPUSH queue a b c");
+        System.out.println("LRANGE queue 0 -1: " + redis.lRange("queue", 0, -1));
+
+        // 3. Hash
+        System.out.println("\\n--- 3. Hash 类型 (存对象) ---");
+        redis.hSet("user:1", "name", "Tom");
+        redis.hSet("user:1", "age", "18");
+        System.out.println("HGETALL user:1: " + redis.hGetAll("user:1"));
+
+        // 4. Set
+        System.out.println("\\n--- 4. Set 类型 (标签) ---");
+        redis.sAdd("tags", "java", "redis", "mysql");
+        System.out.println("SMEMBERS tags: " + redis.sMembers("tags"));
+        System.out.println("SISMEMBER tags java: " + redis.sIsMember("tags", "java"));
+        System.out.println("SISMEMBER tags python: " + redis.sIsMember("tags", "python"));
+
+        // 5. ZSet (排行榜)
+        System.out.println("\\n--- 5. ZSet 类型 (排行榜) ---");
+        redis.zAdd("rank", 100, "alice");
+        redis.zAdd("rank", 90, "bob");
+        redis.zAdd("rank", 95, "carol");
+        System.out.println("排行榜前 3 名: " + redis.zRevRange("rank", 3));
+
+        // 6. 分布式锁模拟
+        System.out.println("\\n--- 6. 分布式锁 (SETNX) ---");
+        boolean locked1 = redis.setNx("lock:order", "uuid-1", 10);
+        System.out.println("线程 A 抢锁: " + locked1);
+        boolean locked2 = redis.setNx("lock:order", "uuid-2", 10);
+        System.out.println("线程 B 抢锁: " + locked2 + " (失败, 锁已被占)");
+        redis.del("lock:order");
+        boolean locked3 = redis.setNx("lock:order", "uuid-2", 10);
+        System.out.println("线程 A 释放后, 线程 B 再抢: " + locked3);
+
+        // 7. 缓存穿透模拟
+        System.out.println("\\n--- 7. 缓存穿透防护 (缓存空值) ---");
+        String userId = "user:999";   // 不存在的用户
+        String cached = redis.get(userId);
+        if (cached == null) {
+            System.out.println("缓存未命中, 查数据库...");
+            String dbResult = null;   // 数据库也没有
+            // 缓存空值, 短过期, 防止穿透
+            redis.set(userId, "NULL", 60);
+            cached = "NULL";
+            System.out.println("数据库无结果, 缓存空值");
+        }
+        System.out.println("再次查询直接返回: " + redis.get(userId) + " (命中, 不打数据库)");
+
+        // 8. 缓存击穿防护 (互斥锁)
+        System.out.println("\\n--- 8. 缓存击穿防护 (互斥锁重建缓存) ---");
+        String hotKey = "hot:product";
+        // 模拟热点 key 过期
+        if (redis.get(hotKey) == null) {
+            System.out.println("热点 key 过期, 用 SETNX 互斥锁重建");
+            if (redis.setNx("lock:" + hotKey, "rebuild", 10)) {
+                try {
+                    System.out.println("抢到锁, 查数据库重建缓存...");
+                    redis.set(hotKey, "product-data", 30);
+                    System.out.println("缓存重建完成");
+                } finally {
+                    redis.del("lock:" + hotKey);
+                }
+            } else {
+                System.out.println("抢锁失败, 等待其他线程重建 (实际会 sleep 重试)");
+            }
+        }
+    }
+}`} />
+
+> **What to watch for**: String's `INCR` is an atomic increment, safe under concurrency; `SETNX` is the cornerstone of distributed locks — returning `true` means the lock was acquired; caching null values blocks repeated queries for non-existent keys; a mutex lock rebuild prevents the database from being crushed during cache breakdown.
+
+## VIII. Cache Consistency: Who Updates First — the Database or the Cache?
+
+Introducing a cache brings a new problem — **data consistency**. When the database updates, what about the cache?
+
+### 8.1 Cache Aside
+
+The most common pattern — on a read, check the cache; if it misses, query the database and write back. On a write, **update the database + delete the cache**.
+
+```java
+public User getUser(Long id) {
+    User user = redis.get("user:" + id);
+    if (user == null) {
+        user = db.selectById(id);
+        redis.set("user:" + id, user);   // Backfill the cache
+    }
+    return user;
+}
+
+public void updateUser(User user) {
+    db.update(user);
+    redis.del("user:" + user.getId());   // Delete the cache (not update)
+}
+```
+
+Why **delete** the cache instead of **updating** it?
+1. To avoid data corruption from concurrent updates.
+2. Some cache values are expensive to compute; updating on every write is wasteful — better to recompute on demand.
+
+### 8.2 Double Delete
+
+After updating the database and deleting the cache, an old read request that was in flight between the delete and the database commit could write stale data back to the cache. **Double delete** — delete the cache first, update the database, then after a delay, delete the cache again.
+
+```java
+redis.del(key);          // First delete
+db.update(user);         // Update the database
+scheduleDeleteAfter(key, 500);   // Delete again after 500ms
+```
+
+## IX. Redis's Limits and Alternatives
+
+Redis is no silver bullet — it has limits:
+- **Memory is expensive** — tens of times the cost of disk; not suitable for storing all your data.
+- **Data may be lost on restart** — even AOF guarantees at most 1 second lost.
+- **Single-threaded model** — CPU-heavy computation blocks (since Redis 6, network I/O is multithreaded, but command execution is still single-threaded).
+
+Alternatives for certain scenarios:
+- **Large-capacity caching** — Memcached (simpler, multithreaded).
+- **When you need transactions / complex queries** — an in-memory table in a relational database.
+- **Local cache** — Caffeine / Guava Cache (no network overhead, but data isn't shared).
+
+## X. Chapter Summary
+
+| Topic | Key Point |
+| --- | --- |
+| Five data types | String / List / Hash / Set / ZSet |
+| Persistence | RDB snapshot, AOF log, hybrid persistence |
+| Cache penetration | Querying non-existent data → cache null values / Bloom filter |
+| Cache breakdown | Hot key expires → mutex lock / never expire |
+| Cache avalanche | Mass key expiry → randomize expiry / multi-level cache |
+| Distributed lock | SETNX + expiry + Lua release; Redisson watchdog |
+| Java clients | Jedis (synchronous, needs pool) / Lettuce (async, Spring default) |
+| Cache consistency | Cache Aside: delete cache on write; double delete |
+
+## Memory Hooks
+
+- **Five types** — String, List, Hash, Set, ZSet.
+- **Three problems** — penetration (querying what's absent), breakdown (hot key expires), avalanche (mass expiry).
+- **Three solutions** — null values stop penetration, mutexes stop breakdown, randomness stops avalanche.
+- **Distributed lock trio** — SETNX to grab, EXPIRE to safeguard, Lua to release.
+- **Choose a client** — Jedis is simple but needs a pool; Lettuce is async and the default.
+
+## Conclusion
+
+Redis has pushed "fast" to the limit — in-memory storage, a single-threaded model, and rich data structures make it the Swiss Army knife of backend systems. But speed isn't free — memory is finite, data can be lost, and cache consistency demands care.
+
+Next chapter we look at **message queues** — when a system needs async decoupling and peak shaving, RabbitMQ and Kafka take the stage. If Redis is the embodiment of "fast," then a message queue is the guardian of "stable" — it lets producers and consumers each run at their own pace without blocking each other.

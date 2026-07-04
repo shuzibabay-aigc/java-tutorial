@@ -1,0 +1,654 @@
+---
+title: "Testing"
+chapter: 65
+stage: "Stage 12"
+stageName: "Engineering and Ecosystem"
+order: 3
+description: "Understand the test pyramid, JUnit 5 (@Test/@BeforeEach/@ParameterizedTest/@DisplayName), assertions (assertEquals/assertThrows/assertAll), Mockito (mock/when/verify), JaCoCo coverage, and a TDD introduction"
+pubDate: 2026-07-03
+tags: ["Java", "JUnit", "Mockito", "Testing", "TDD", "Coverage"]
+---
+
+# Testing
+
+"I changed a bit of code, it should be fine, right?" — this sentence is the moment programmers get proven wrong most often. You change A, and B suddenly breaks; you fix one bug and introduce two new ones. Testing by "manually clicking through" is slow, exhausting, and leaky. **Automated testing** is the antidote — write tests as code, run them automatically on every change, and within minutes know what broke.
+
+This chapter covers the core of the Java testing ecosystem — **JUnit 5** (test framework) + **Mockito** (mocking framework) + **JaCoCo** (coverage) — plus the TDD (Test-Driven Development) mindset.
+
+## 1. Why You Need Tests
+
+A project without tests looks like this:
+
+- **Changing code feels like defusing a bomb** — you don't dare touch it, afraid of triggering a hidden mine.
+- **Bugs keep coming back** — the same bug gets fixed and reintroduced, with no regression protection.
+- **No refactoring** — the code rots but you don't dare touch it, because nobody knows what will break.
+- **Manual regression until you throw up** — clicking through every feature before release takes all night.
+
+The benefits of writing tests:
+
+1. **Regression protection** — instantly know whether a change broke existing functionality.
+2. **Design feedback** — hard-to-test code is often poorly designed (tightly coupled); tests force you to decouple.
+3. **Living documentation** — test cases are concrete examples of "how should this code be used".
+4. **Confidence to refactor** — with tests as a safety net, you dare to clean up bad code.
+5. **Less manual testing** — run thousands of tests with one command, saving human effort.
+
+## 2. The Test Pyramid
+
+The Test Pyramid — layers from bottom to top:
+
+```
+        /\
+       /E2E\          Few and slow (end-to-end, starts the whole app)
+      /------\
+     /Integration\    Medium (multi-module collaboration, real database)
+    /----------\
+   /  Unit Tests  \   Many and fast (single method, mocked dependencies)
+  /--------------\
+```
+
+| Layer | Scope | Speed | Quantity |
+| --- | --- | --- | --- |
+| **Unit tests** | Single class/method | Milliseconds | 70%+ |
+| **Integration tests** | Multi-module collaboration | Seconds | 20% |
+| **End-to-end tests (E2E)** | Whole system | Minutes | 10% |
+
+The base should be thick — unit tests are the most numerous and fastest, run on every commit. The tip should be thin — E2E tests are slow and brittle, so run only the critical paths. An inverted pyramid (lots of E2E, few unit tests) is an anti-pattern — slow and hard to maintain.
+
+## 3. JUnit 5
+
+**JUnit** is the de facto standard testing framework for Java. JUnit 5 (2017) consists of three submodules:
+
+- **JUnit Platform** — the foundational platform for running tests.
+- **JUnit Jupiter** — the new programming and extension model (where `@Test` and friends live).
+- **JUnit Vintage** — compatibility for legacy JUnit 3/4 tests.
+
+### 3.1 Maven Integration
+
+```xml
+<dependency>
+    <groupId>org.junit.jupiter</groupId>
+    <artifactId>junit-jupiter</artifactId>
+    <version>5.10.0</version>
+    <scope>test</scope>
+</dependency>
+
+<build>
+    <plugins>
+        <plugin>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <version>3.1.2</version>
+        </plugin>
+    </plugins>
+</build>
+```
+
+### 3.2 Your First Test
+
+```java
+import org.junit.jupiter.api.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+class CalculatorTest {
+    private Calculator calc;
+
+    @BeforeEach
+    void setUp() {
+        calc = new Calculator();   // Runs before every test
+    }
+
+    @Test
+    @DisplayName("Addition should return the sum of two numbers")
+    void shouldAddTwoNumbers() {
+        assertEquals(5, calc.add(2, 3));
+        assertEquals(0, calc.add(-1, 1));
+        assertEquals(-5, calc.add(-2, -3));
+    }
+
+    @Test
+    void shouldThrowOnDivideByZero() {
+        assertThrows(ArithmeticException.class, () -> calc.divide(1, 0));
+    }
+}
+
+class Calculator {
+    int add(int a, int b) { return a + b; }
+    int divide(int a, int b) {
+        if (b == 0) throw new ArithmeticException("/ by zero");
+        return a / b;
+    }
+}
+```
+
+### 3.3 Common Annotations
+
+| Annotation | Purpose |
+| --- | --- |
+| `@Test` | Marks a test method |
+| `@BeforeEach` | Runs before each test method (setup) |
+| `@AfterEach` | Runs after each test method (cleanup) |
+| `@BeforeAll` | Runs once before all tests (static, init heavy resources) |
+| `@AfterAll` | Runs once after all tests (static, cleanup heavy resources) |
+| `@DisplayName` | Custom test display name |
+| `@Disabled` | Skip this test |
+| `@Tag` | Tag tests for selective execution |
+| `@Nested` | Nested test class (group by scenario) |
+| `@ParameterizedTest` | Parameterized test (same logic, multiple data sets) |
+| `@ValueSource` | Data source for parameterized tests |
+
+### 3.4 Parameterized Tests
+
+Test the same logic with multiple data sets and avoid duplicate code:
+
+```java
+@ParameterizedTest
+@DisplayName("Addition parameterized test")
+@ValueSource(ints = {1, 5, 10, 100, -1})
+void shouldAddCorrectly(int n) {
+    assertEquals(n + n, calc.add(n, n));
+}
+
+@ParameterizedTest(name = "{0} + {1} = {2}")
+@CsvSource({
+    "1, 2, 3",
+    "0, 0, 0",
+    "-1, 1, 0",
+    "100, 200, 300"
+})
+void shouldAddCsv(int a, int b, int expected) {
+    assertEquals(expected, calc.add(a, b));
+}
+```
+
+`@ParameterizedTest` combined with a data source (`@ValueSource`/`@CsvSource`/`@MethodSource`) runs multiple data sets; the name uses `{0}`/`{1}` placeholders to display parameter values.
+
+### 3.5 Assertions
+
+| Assertion | Purpose |
+| --- | --- |
+| `assertEquals(expected, actual)` | Equality |
+| `assertNotEquals` | Inequality |
+| `assertTrue(cond)` / `assertFalse` | True/false |
+| `assertNull` / `assertNotNull` | null/non-null |
+| `assertSame` | Same object (==) |
+| `assertArrayEquals` | Array equality |
+| `assertIterableEquals` | Iterable equality |
+| `assertThrows(Exception.class, () -＞ ...)` | Throws exception |
+| `assertDoesNotThrow` | Does not throw |
+| `assertAll(...)` | Batch assertions, runs all before reporting |
+| `assertTimeout` | Timeout |
+
+`assertAll` is a standout — ordinary assertions stop at the first failure, but `assertAll` runs every assertion and reports them all together:
+
+```java
+@Test
+void shouldValidateUser() {
+    User u = new User("Alice", 20);
+    assertAll("User properties",
+        () -> assertEquals("Alice", u.getName()),
+        () -> assertEquals(20, u.getAge()),
+        () -> assertNotNull(u.getId())
+    );
+    // Even if the first fails, the rest still run; you see all problems at once
+}
+```
+
+## 4. Mockito: Mocking Dependencies
+
+The class under test often depends on other classes (database, network, time). Unit tests shouldn't really connect to a database — that's slow and unstable. **Mockito** provides mock objects — tell it "when X is called, return Y", and verify "was X called?".
+
+### 4.1 mock and when
+
+```java
+import static org.mockito.Mockito.*;
+
+// 1. Create a mock
+UserRepository mockRepo = mock(UserRepository.class);
+
+// 2. Stub: when X then Y
+when(mockRepo.findById(1)).thenReturn(new User(1, "Alice"));
+when(mockRepo.findById(99)).thenThrow(new RuntimeException("not found"));
+
+// 3. Use
+User u = mockRepo.findById(1);   // Returns Alice
+User u2 = mockRepo.findById(2);  // Returns null (not configured)
+
+// 4. Verify: was it actually called
+verify(mockRepo).findById(1);          // At least once
+verify(mockRepo, times(2)).findById(anyInt());  // Called 2 times
+verify(mockRepo, never()).deleteById(anyInt()); // Never called
+```
+
+### 4.2 Testing a Service (depending on a Repository)
+
+```java
+class UserService {
+    private final UserRepository repo;
+    public UserService(UserRepository repo) { this.repo = repo; }
+    public String getUserName(int id) {
+        User u = repo.findById(id);
+        if (u == null) throw new IllegalArgumentException("User not found");
+        return u.getName();
+    }
+}
+
+class UserServiceTest {
+    @Test
+    void shouldReturnName() {
+        UserRepository mockRepo = mock(UserRepository.class);
+        when(mockRepo.findById(1)).thenReturn(new User(1, "Alice"));
+
+        UserService service = new UserService(mockRepo);
+        assertEquals("Alice", service.getUserName(1));
+        verify(mockRepo).findById(1);   // Verify it was actually called
+    }
+
+    @Test
+    void shouldThrowWhenUserNotFound() {
+        UserRepository mockRepo = mock(UserRepository.class);
+        when(mockRepo.findById(99)).thenReturn(null);
+
+        UserService service = new UserService(mockRepo);
+        assertThrows(IllegalArgumentException.class, () -> service.getUserName(99));
+    }
+}
+```
+
+Mocks let you focus on the class under test — `UserService` depends on `UserRepository`; mock the repo and concentrate on testing the Service's logic. This is what "unit testing" means — testing one unit.
+
+## 5. Test Coverage: JaCoCo
+
+**Coverage** — how many lines of code the tests executed. `JaCoCo` (Java Code Coverage) is the mainstream tool.
+
+```xml
+<plugin>
+    <groupId>org.jacoco</groupId>
+    <artifactId>jacoco-maven-plugin</artifactId>
+    <version>0.8.11</version>
+    <executions>
+        <execution>
+            <goals><goal>prepare-agent</goal></goals>
+        </execution>
+        <execution>
+            <id>report</id>
+            <phase>test</phase>
+            <goals><goal>report</goal></goals>
+        </execution>
+    </executions>
+</plugin>
+```
+
+After `mvn test`, `target/site/jacoco/index.html` shows the coverage per class:
+
+- **Line coverage** — proportion of executed code lines.
+- **Branch coverage** — proportion of if/else branches executed.
+- **Method coverage** — proportion of methods invoked.
+
+**Important caveat**: high coverage ≠ high quality. 100% coverage can still miss critical boundaries — for example, testing only `add(2, 3)` but not `add(Integer.MAX_VALUE, 1)` overflow. Coverage is a "floor", not a "target". Blindly chasing 100% pushes teams to write meaningless tests to game the metric.
+
+## 6. TDD: Test-Driven Development
+
+**TDD (Test-Driven Development)** — a development rhythm proposed by Kent Beck: **write the test first, then the implementation**. A three-step cycle (Red-Green-Refactor):
+
+```
+Red: write a test -> run -> fails (feature not implemented yet)
+Green: write the minimum code to make the test pass
+Refactor: improve code structure, tests must still pass
+```
+
+Example — developing a Fibonacci method:
+
+```java
+// 1. Red: write the test first
+@Test
+void shouldReturn1ForFib1() {
+    assertEquals(1, fib(1));
+}
+```
+
+```java
+// 2. Green: minimal implementation (hardcoded)
+static int fib(int n) { return 1; }
+```
+
+```java
+// 3. Add a new test
+@Test
+void shouldReturn2ForFib3() {
+    assertEquals(2, fib(3));
+}
+```
+
+```java
+// 4. Revise the implementation
+static int fib(int n) {
+    if (n <= 2) return 1;
+    return fib(n - 1) + fib(n - 2);
+}
+```
+
+Benefits of TDD:
+
+- **Small steps forward** — add one test at a time, always in a "green" state.
+- **Design driven** — writing tests first forces you to think "how should this method be used", driving good API design.
+- **Regression protection from the start** — the implementation has tests from day one.
+
+But TDD doesn't fit every scenario — UI, exploratory prototypes, pure algorithm research. It's a tool, not dogma.
+
+## 7. Hands-On: JUnit + Mockito-Style Tests
+
+Since the Piston online environment **doesn't have JUnit and Mockito dependencies**, below we use a **mini test framework** that simulates their APIs — demonstrating the core ideas of `@Test`, assertions, mock, and verify. In a real local project using JUnit + Mockito, the code style is identical.
+
+<CodeRunner code={`import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+import java.util.function.*;
+
+// === 迷你测试框架 (模拟 JUnit + Mockito 核心 API) ===
+
+// 注解
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface Test {}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface BeforeEach {}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface DisplayName {
+    String value();
+}
+
+// 断言工具 (模拟 org.junit.jupiter.api.Assertions)
+class Assert {
+    static void assertEquals(Object expected, Object actual) {
+        if (!Objects.equals(expected, actual)) {
+            throw new AssertionError("期望 " + expected + ", 实际 " + actual);
+        }
+    }
+    static void assertTrue(boolean cond) {
+        if (!cond) throw new AssertionError("期望 true, 实际 false");
+    }
+    static void assertNotNull(Object o) {
+        if (o == null) throw new AssertionError("期望非 null");
+    }
+    static void assertThrows(Class<? extends Throwable> ex, Runnable code) {
+        try {
+            code.run();
+        } catch (Throwable t) {
+            if (ex.isInstance(t)) return;
+            throw new AssertionError("期望抛 " + ex.getSimpleName()
+                + ", 实际抛 " + t.getClass().getSimpleName());
+        }
+        throw new AssertionError("期望抛 " + ex.getSimpleName() + ", 但没抛");
+    }
+    static void assertAll(String name, Runnable... checks) {
+        List<String> fails = new ArrayList<>();
+        for (int i = 0; i < checks.length; i++) {
+            try { checks[i].run(); }
+            catch (AssertionError e) { fails.add("  [" + i + "] " + e.getMessage()); }
+        }
+        if (!fails.isEmpty()) {
+            throw new AssertionError("assertAll(" + name + ") 失败:\n"
+                + String.join("\n", fails));
+        }
+    }
+}
+
+// 迷你测试运行器
+class TestRunner {
+    public static void run(Class<?> testClass) {
+        System.out.println("=== 运行测试: " + testClass.getSimpleName() + " ===");
+        Object instance;
+        try {
+            instance = testClass.getDeclaredConstructor().newInstance();
+        } catch (Exception e) { throw new RuntimeException(e); }
+
+        // 找所有 @BeforeEach
+        List<Method> befores = Arrays.stream(testClass.getDeclaredMethods())
+            .filter(m -> m.isAnnotationPresent(BeforeEach.class))
+            .toList();
+
+        int passed = 0, failed = 0;
+        for (Method m : testClass.getDeclaredMethods()) {
+            if (!m.isAnnotationPresent(Test.class)) continue;
+            DisplayName dn = m.getAnnotation(DisplayName.class);
+            String label = dn != null ? dn.value() : m.getName();
+            try {
+                for (Method b : befores) { b.setAccessible(true); b.invoke(instance); }
+                m.setAccessible(true);
+                m.invoke(instance);
+                System.out.println("  [PASS] " + label);
+                passed++;
+            } catch (InvocationTargetException e) {
+                System.out.println("  [FAIL] " + label + " -> " + e.getCause().getMessage());
+                failed++;
+            } catch (Exception e) {
+                System.out.println("  [ERROR] " + label + " -> " + e);
+                failed++;
+            }
+        }
+        System.out.println("结果: " + passed + " 通过, " + failed + " 失败\\n");
+    }
+}
+
+// === 迷你 Mockito (mock/when/verify 的核心思想) ===
+class MiniMock {
+    interface InvocationHandler {
+        Object handle(String method, Object[] args);
+    }
+
+    // 极简 mock: 用 Map 记录每次调用的"桩"和"次数"
+    static <T> T mock(Class<T> iface) {
+        Map<String, Object> stubs = new HashMap<>();   // method#argstring -> return
+        Map<String, Integer> calls = new HashMap<>();  // method -> count
+        InvocationHandler handler = (method, args) -> {
+            calls.merge(method, 1, Integer::sum);
+            String key = method + "#" + Arrays.toString(args);
+            Object stub = stubs.get(key);
+            if (stub instanceof Supplier) return ((Supplier<?>) stub).get();
+            if (stubs.containsKey(key)) return stub;
+            // 通用匹配: method + any
+            String anyKey = method + "#ANY";
+            if (stubs.containsKey(anyKey)) {
+                Object v = stubs.get(anyKey);
+                if (v instanceof Supplier) return ((Supplier<?>) v).get();
+                return v;
+            }
+            return null;
+        };
+        // 用动态代理生成 mock 实例
+        return (T) java.lang.reflect.Proxy.newProxyInstance(
+            iface.getClassLoader(), new Class[]{iface},
+            (proxy, m, args) -> {
+                if ("toString".equals(m.getName())) return "Mock[" + iface.getSimpleName() + "]";
+                return handler.handle(m.getName(), args);
+            });
+    }
+
+    // 把 mock 的"调用计数器"暴露出来给 verify 用
+    // 简化: 我们用一个全局 Map (生产框架里 mock 对象自己持有)
+    static Map<Object, Map<String, Integer>> callTracker = new java.util.IdentityHashMap<>();
+}
+
+// === 被测代码 ===
+interface UserRepository {
+    String findById(int id);
+    void save(String name);
+}
+
+class UserService {
+    private final UserRepository repo;
+    public UserService(UserRepository repo) { this.repo = repo; }
+    public String getUserName(int id) {
+        String name = repo.findById(id);
+        if (name == null) throw new IllegalArgumentException("用户不存在: " + id);
+        return name.toUpperCase();
+    }
+}
+
+// === 测试类 ===
+class CalculatorTest {
+    private Calculator calc;
+
+    @BeforeEach
+    void setUp() { calc = new Calculator(); }
+
+    @Test
+    @DisplayName("加法: 2 + 3 = 5")
+    void shouldAdd() {
+        Assert.assertEquals(5, calc.add(2, 3));
+    }
+
+    @Test
+    @DisplayName("加法: 负数加正数")
+    void shouldAddNegative() {
+        Assert.assertEquals(0, calc.add(-1, 1));
+    }
+
+    @Test
+    @DisplayName("除以零应抛异常")
+    void shouldThrowOnDivByZero() {
+        Assert.assertThrows(ArithmeticException.class, () -> calc.divide(1, 0));
+    }
+
+    @Test
+    @DisplayName("assertAll 一次检查多个属性")
+    void shouldHaveMultipleProperties() {
+        Calculator c = new Calculator();
+        Assert.assertAll("Calculator 属性",
+            () -> Assert.assertEquals(0, c.add(0, 0)),
+            () -> Assert.assertEquals(2, c.add(1, 1)),
+            () -> Assert.assertEquals(-2, c.add(-1, -1))
+        );
+    }
+}
+
+class Calculator {
+    int add(int a, int b) { return a + b; }
+    int divide(int a, int b) {
+        if (b == 0) throw new ArithmeticException("/ by zero");
+        return a / b;
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== 测试框架演示 (模拟 JUnit + Mockito) ===\\n");
+
+        // 1. 运行 Calculator 测试
+        TestRunner.run(CalculatorTest.class);
+
+        // 2. Mockito 风格: mock Repository 测 Service
+        System.out.println("=== Mockito 风格测试 ===");
+        UserRepository mockRepo = MiniMock.mock(UserRepository.class);
+        // when(mockRepo.findById(1)).thenReturn("alice") 简化版:
+        // 这里直接演示 Service 用 mock 的行为
+
+        UserService service = new UserService(mockRepo);
+        try {
+            service.getUserName(99);   // mock 默认返回 null -> 抛异常
+            System.out.println("[FAIL] 应该抛异常");
+        } catch (IllegalArgumentException e) {
+            System.out.println("[PASS] 用户不存在抛异常: " + e.getMessage());
+        }
+
+        System.out.println("\\n=== 测试最佳实践 ===");
+        System.out.println("1. 测试金字塔: 单元 70% / 集成 20% / E2E 10%");
+        System.out.println("2. 单个测试只测一件事 (单一职责)");
+        System.out.println("3. 测试名表达意图: shouldXxxWhenYyy");
+        System.out.println("4. AAA 模式: Arrange 准备 / Act 执行 / Assert 断言");
+        System.out.println("5. mock 外部依赖, 不 mock 被测对象本身");
+        System.out.println("6. 覆盖率是下限不是目标");
+        System.out.println("7. TDD: 红 (失败) -> 绿 (通过) -> 重构");
+    }
+}`} />
+
+> **Key observations**:
+> - **`@Test` marks test methods, `@BeforeEach` runs before each test** — the core mechanism of JUnit.
+> - **`assertEquals`/`assertThrows`/`assertAll`** — test equality, exception throwing, and batch assertions respectively.
+> - **`assertAll` reports all failures at once** — friendlier than ordinary assertions.
+> - **mock replaces `UserRepository` with a controllable object** — the Service test doesn't depend on a real database.
+> - **Test names express intent** — `shouldThrowOnDivByZero` is far more readable than `test1`.
+
+## 8. Testing Best Practices
+
+### 8.1 Naming
+
+Test names should express intent:
+
+```java
+// Bad
+@Test void test1() { ... }
+@Test void testAdd() { ... }
+
+// Good
+@Test void shouldReturn5WhenAdd2And3() { ... }
+@Test void shouldThrowWhenDivideByZero() { ... }
+```
+
+### 8.2 The AAA Pattern
+
+Every test follows three sections:
+
+```java
+@Test
+void shouldReturnSum() {
+    // Arrange (setup)
+    Calculator calc = new Calculator();
+
+    // Act (execute)
+    int result = calc.add(2, 3);
+
+    // Assert (verify)
+    assertEquals(5, result);
+}
+```
+
+### 8.3 One Test, One Thing
+
+A test should assert one behavior — when it fails you immediately know what broke. Use `assertAll` for multiple related assertions.
+
+### 8.4 Tests Must Be Independent
+
+Tests must not depend on execution order — JUnit doesn't guarantee order. Each test prepares its own data (`@BeforeEach`) and shares no state.
+
+### 8.5 Don't Mock the Class Under Test
+
+```java
+// Wrong: mocking the class under test is testing nothing
+UserService mock = mock(UserService.class);
+when(mock.getName(1)).thenReturn("Alice");
+assertEquals("Alice", mock.getName(1));   // Meaningless!
+
+// Right: mock the dependencies of the class under test
+UserRepository mockRepo = mock(UserRepository.class);
+when(mockRepo.findById(1)).thenReturn(new User("Alice"));
+UserService service = new UserService(mockRepo);   // The class under test is real
+```
+
+## 9. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| Test pyramid | Many fast unit tests, few slow E2E tests |
+| JUnit 5 | `@Test`/`@BeforeEach`/`@ParameterizedTest` |
+| Assertions | `assertEquals`/`assertThrows`/`assertAll` |
+| Mockito | `mock`/`when().thenReturn()`/`verify` |
+| Coverage | A floor, not a target; JaCoCo is the mainstream tool |
+| TDD | Red-Green-Refactor; write tests before implementation |
+| AAA | Arrange-Act-Assert three-section pattern |
+
+**Mnemonic**:
+
+- **Pyramid** — many unit tests, medium integration, few E2E.
+- **JUnit annotations** — `@Test` tests, `@BeforeEach` runs before, `@ParameterizedTest` parameterizes.
+- **Three assertion musketeers** — `assertEquals` for equality, `assertThrows` for exceptions, `assertAll` for batch.
+- **Mockito three steps** — `mock` creates, `when().thenReturn()` stubs, `verify` checks.
+- **Don't mock the class under test** — mock its dependencies, test itself.
+- **Coverage is a floor** — 100% doesn't mean no bugs.
+
+## Conclusion: From Runs to Testable
+
+This chapter covered testing — from JUnit to Mockito, from coverage to TDD. Being able to write code doesn't equal being able to write good code; being able to test is the dividing line for engineers. The next chapter looks at another engineering weapon — **logging frameworks**, so you can see clearly what your program is doing in production.

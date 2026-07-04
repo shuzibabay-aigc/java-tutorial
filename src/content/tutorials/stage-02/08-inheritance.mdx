@@ -1,0 +1,508 @@
+---
+title: "继承"
+chapter: 8
+stage: "第二阶段"
+stageName: "面向对象编程"
+order: 3
+description: "掌握 extends、super、方法重写、final 关键字、Object 类，以及 == 与 equals 的区别"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "继承", "final", "Object", "equals"]
+---
+
+# 继承
+
+咖啡店里有拿铁、卡布奇诺、摩卡、玛奇朵……它们的配方各有不同，但都共享一个共同的基础——**浓缩咖啡（Espresso）**。如果为每种咖啡从头写一份配方，重复的内容会让人抓狂：都要磨豆、都要萃取、都要……
+
+**继承（Inheritance）**就是面向对象解决"复用"问题的利器。它让我们定义一个"父类"描述共性，再让"子类"继承父类并扩展个性。子类自动拥有父类的字段和方法，又可以在其上添砖加瓦。
+
+本章我们将学习 `extends`、`super`、方法重写、`final` 关键字，以及所有 Java 类的"老祖宗"——`Object` 类。最后，我们会厘清一个经典面试题：`==` 与 `equals` 到底有什么区别。
+
+## 一、extends 关键字：血脉的延续
+
+### 1.1 基本语法
+
+用 `extends` 关键字声明子类：
+
+```java
+class 子类 extends 父类 { ... }
+```
+
+子类（Subclass）也叫派生类（Derived Class）；父类（Superclass）也叫基类（Base Class）。
+
+让我们用咖啡来举例：定义一个 `Coffee` 父类，包含所有咖啡共有的字段和方法；再用 `Latte` 继承它。
+
+```java
+// 父类：咖啡
+public class Coffee {
+    String name;
+    int size;
+
+    public Coffee(String name, int size) {
+        this.name = name;
+        this.size = size;
+    }
+
+    public void brew() {
+        System.out.println("冲泡一杯 " + size + "ml 的" + name);
+    }
+}
+
+// 子类：拿铁（继承 Coffee）
+public class Latte extends Coffee {
+    int milkML;   // 拿铁特有的字段：牛奶量
+
+    public Latte(int size, int milkML) {
+        super("拿铁", size);   // 调用父类构造方法
+        this.milkML = milkML;
+    }
+
+    public void showRecipe() {
+        System.out.println(name + "：浓缩咖啡 " + (size - milkML) + "ml + 牛奶 " + milkML + "ml");
+    }
+}
+```
+
+`Latte` 自动获得了 `Coffee` 的 `name`、`size` 字段和 `brew()` 方法，又添加了自己的 `milkML` 字段和 `showRecipe()` 方法。这就是继承的力量——**子类无需重复编写父类的代码**。
+
+### 1.2 继承的规则
+
+- Java 是**单继承**：一个类只能 `extends` 一个直接父类（不像 C++ 支持多继承）。
+- 所有类的最终父类是 `java.lang.Object`。如果不写 `extends`，默认继承 `Object`。
+- 子类不能继承父类的 `private` 成员（虽然存在，但无法直接访问）。
+- 子类不能继承父类的**构造方法**（构造方法名与类名绑定，无法继承）。
+- `final` 修饰的类不能被继承（如 `String`、`Integer`）。
+
+## 二、子类构造过程：先有父，再有子
+
+### 2.1 super() 必须是第一条语句
+
+子类构造方法的第一件事，必须是调用父类的构造方法。这通过 `super(...)` 完成：
+
+```java
+public Latte(int size, int milkML) {
+    super("拿铁", size);   // 必须是第一条语句！
+    this.milkML = milkML;
+}
+```
+
+> ⚠️ 如果子类构造方法中没有显式调用 `super(...)`，编译器会**自动插入**一个无参的 `super()`。此时若父类没有无参构造方法，编译报错。
+
+### 2.2 为什么必须先调用 super()
+
+道理很朴素：**子类是在父类的基础上扩展的，必须先把父类部分初始化好**。就像盖房子，必须先打地基（父类），再建上层（子类）。如果父类的字段还没初始化，子类方法访问它们就会读到乱七八糟的默认值。
+
+构造方法的调用顺序：
+
+```
+new Latte(350, 100)
+  ↓
+调用 Latte 构造方法
+  ↓
+第一行 super("拿铁", 350) → 调用 Coffee 构造方法
+  ↓
+Coffee 构造方法执行（初始化 name、size）
+  ↓
+回到 Latte 构造方法继续执行（初始化 milkML）
+```
+
+如果父类还有父类，会一路向上追溯到 `Object` 的构造方法，再自上而下执行。
+
+## 三、super 关键字：通往父类的桥梁
+
+`super` 有三种用法：
+
+### 3.1 调用父类构造方法
+
+`super(参数)` —— 上面已演示，必须是子类构造方法的第一条语句。
+
+### 3.2 调用父类方法
+
+`super.方法名(...)` —— 当子类重写了父类方法，但仍想调用父类版本时使用：
+
+```java
+public class Latte extends Coffee {
+    @Override
+    public void brew() {
+        super.brew();          // 先调用父类的 brew
+        System.out.println("加入 " + milkML + "ml 牛奶，完成拿铁");
+    }
+}
+```
+
+### 3.3 访问父类字段
+
+`super.字段名` —— 当子类隐藏了父类同名字段时使用（较少见，不推荐这样设计）。
+
+```java
+class Parent { int x = 1; }
+class Child extends Parent {
+    int x = 2;   // 隐藏了父类的 x
+    void show() {
+        System.out.println(x);        // 2（子类的 x）
+        System.out.println(super.x);  // 1（父类的 x）
+    }
+}
+```
+
+## 四、方法重写（Override）：青出于蓝
+
+### 4.1 什么是重写
+
+当子类对父类的某个方法"不满意"，想提供自己的实现时，可以**重写**（Override）该方法。重写后，通过子类对象调用该方法时，执行的是子类的版本。
+
+```java
+class Animal {
+    public void speak() {
+        System.out.println("动物发出声音");
+    }
+}
+
+class Dog extends Animal {
+    @Override   // 重写注解
+    public void speak() {
+        System.out.println("汪汪！");
+    }
+}
+
+class Cat extends Animal {
+    @Override
+    public void speak() {
+        System.out.println("喵喵！");
+    }
+}
+```
+
+调用时：
+
+```java
+Animal a = new Dog();
+a.speak();   // 输出"汪汪！"——这就是多态的雏形
+```
+
+### 4.2 重写的规则（"两同两小一大"）
+
+- **方法名相同**：与父类方法名一致。
+- **参数列表相同**：参数个数、类型、顺序完全一致。
+- **返回类型相同或更小**：子类返回类型可以是父类返回类型的子类（协变返回，covariant return）。
+- **访问权限相同或更宽**：子类不能比父类更严格（父 `public`，子不能 `protected`）。
+- **抛出异常相同或更小**：子类抛出的检查异常不能比父类更多更宽。
+
+> ⚠️ **重写 vs 重载**：
+> - 重写（Override）：父子类之间，方法签名**完全相同**，运行时多态。
+> - 重载（Overload）：同一个类中，方法名相同但**参数列表不同**，编译时多态。
+> - 记忆：Override 是"覆盖旧版本"，Overload 是"加载多个版本"。
+
+### 4.3 @Override 注解
+
+`@Override` 是一个**注解**（Annotation），告诉编译器"这个方法是重写父类的"。如果方法名拼错或参数不匹配，编译器会立即报错。**强烈建议重写时始终加上 `@Override`**，避免低级错误。
+
+例如，把 `speak` 误写成 `speark`，没有 `@Override` 时编译器会以为是新方法，bug 难以察觉；有了 `@Override` 立即报错。
+
+### 4.4 不能被重写的情况
+
+- `private` 方法：子类看不到，根本谈不上重写（即使写了同名方法，也是新方法，不是重写）。
+- `static` 方法：类方法，不参与动态绑定。子类写同名静态方法叫**隐藏**（Hiding），不是重写。
+- `final` 方法：被 `final` 修饰，禁止重写。
+
+## 五、final 关键字：不可改变的承诺
+
+`final` 是一个"封印"修饰符，根据修饰的位置不同有三种含义。
+
+### 5.1 final 类：不可继承
+
+```java
+public final class String { ... }   // String 是 final 类
+```
+
+`String` 类被 `final` 修饰，意味着**没有任何类能继承它**。这是出于安全性和性能考虑——如果有人继承 `String` 并改写其行为，可能破坏字符串的不可变性，导致安全漏洞（如 SQL 注入、类加载器问题）。
+
+其他常见 final 类：`Integer`、`Math`、`Void`、所有包装类。
+
+### 5.2 final 方法：不可重写
+
+```java
+public class Account {
+    public final void audit() {   // 子类不能重写 audit
+        // 关键业务逻辑，不允许子类篡改
+    }
+}
+```
+
+`final` 方法确保关键逻辑不被子类改写，常用于安全敏感或核心算法方法。
+
+### 5.3 final 变量：不可重新赋值
+
+```java
+final int MAX_SIZE = 100;   // 常量，只能赋值一次
+MAX_SIZE = 200;             // 编译错误！
+```
+
+注意三种情况：
+
+- **基本类型**：值不可变。
+- **引用类型**：引用不可变（不能指向新对象），但**对象内容可变**：
+
+```java
+final StringBuilder sb = new StringBuilder("a");
+sb.append("b");              // ✅ 可以修改对象内容
+sb = new StringBuilder("c"); // ❌ 不能重新指向新对象
+```
+
+- **局部变量**：方法参数也可用 `final` 修饰，常用于 lambda 表达式和匿名内部类中（它们只能捕获 effectively final 的变量）。
+
+> 💡 **static final 常量**：`public static final double PI = 3.14159;` 是定义常量的标准写法。常量名全大写，单词间用下划线分隔。
+
+## 六、Object 类：万类之祖
+
+### 6.1 所有类的根
+
+在 Java 中，**每一个类都直接或间接继承自 `java.lang.Object`**。即使你不写 `extends`，编译器也会自动加上"继承 Object"。这意味着 `Object` 的方法，所有类都有。
+
+`Object` 提供了几个关键方法，每个 Java 程序员都应该熟悉：
+
+| 方法 | 作用 |
+| --- | --- |
+| `toString()` | 返回对象的字符串表示 |
+| `equals(Object obj)` | 判断是否"相等" |
+| `hashCode()` | 返回哈希码（与 equals 配套） |
+| `getClass()` | 返回运行时类信息 |
+| `clone()` | 浅拷贝（需实现 Cloneable） |
+| `wait()` / `notify()` / `notifyAll()` | 线程同步（多线程章节） |
+
+### 6.2 toString()
+
+默认实现返回 `类名@哈希码十六进制`，如 `Dog@1b6d3586`。这种输出几乎无用，所以**强烈建议每个类都重写 `toString()`**：
+
+```java
+@Override
+public String toString() {
+    return "Dog{name='" + name + "', age=" + age + "}";
+}
+```
+
+重写后，`System.out.println(dog)` 会自动调用 `dog.toString()`，输出友好信息。IDE 同样可以自动生成 `toString()`。
+
+> 💡 `System.out.println(obj)` 内部会调用 `String.valueOf(obj)`，而 `String.valueOf` 会在 `obj` 非 null 时调用 `obj.toString()`。所以 println 一个对象，本质是调用它的 toString。
+
+### 6.3 equals() 与 hashCode()
+
+`Object` 默认的 `equals` 就是 `==`——比较两个引用是否指向同一对象。但很多时候我们希望"内容相等"就算相等，比如两个 `Dog` 名字和年龄都相同，应该认为是"相等"的狗。这时需要重写 `equals`：
+
+```java
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;             // 同一对象
+    if (o == null || getClass() != o.getClass()) return false;  // null 或类型不同
+    Dog dog = (Dog) o;                       // 向下转型
+    return age == dog.age && Objects.equals(name, dog.name);
+}
+
+@Override
+public int hashCode() {
+    return Objects.hash(name, age);
+}
+```
+
+> ⚠️ **equals 与 hashCode 的契约**：如果两个对象 `equals` 返回 `true`，它们的 `hashCode` 必须相同；反之不要求。重写 `equals` 时**必须同时重写 `hashCode`**，否则在 `HashMap`、`HashSet` 等基于哈希的容器中会出 bug。IDE 可一键生成这两个方法。
+
+## 七、== vs equals：经典面试题
+
+这是 Java 面试的"必考题"，也是新手最容易踩的坑之一。
+
+### 7.1 == 的本质
+
+`==` 比较的是**栈中的值**：
+
+- **基本类型**：比较值本身。`int a = 10; int b = 10; a == b` 为 `true`。
+- **引用类型**：比较引用（地址）。两个对象即使内容一模一样，只要不是同一个，`==` 就返回 `false`。
+
+### 7.2 equals 的本质
+
+`equals` 是 `Object` 的方法，**默认行为与 `==` 相同**（比较地址）。但许多类（如 `String`、`Integer`）重写了它，使其变成"内容比较"。
+
+```java
+String s1 = new String("hello");
+String s2 = new String("hello");
+
+System.out.println(s1 == s2);        // false（两个不同的对象）
+System.out.println(s1.equals(s2));   // true（内容相同）
+```
+
+### 7.3 经典陷阱：字符串常量池
+
+```java
+String a = "hello";
+String b = "hello";
+String c = new String("hello");
+
+System.out.println(a == b);          // true（常量池复用，同一引用）
+System.out.println(a == c);          // false（new 创建了新对象）
+System.out.println(a.equals(c));     // true（内容相同）
+```
+
+字面量 `"hello"` 会进入**字符串常量池**，相同字面量复用同一对象。而 `new String("hello")` 一定在堆中创建新对象。所以**永远用 `equals` 比较字符串内容**，不要用 `==`。
+
+### 7.4 一图胜千言
+
+| 比较 | `==` | `equals`（默认） | `equals`（重写后，如 String） |
+| --- | --- | --- | --- |
+| 基本类型 | 比较值 | — | — |
+| 引用类型 | 比较地址 | 比较地址 | 比较内容 |
+
+### 7.5 完整示例
+
+<CodeRunner code={`public class Main {
+    static class Dog {
+        String name;
+        int age;
+
+        public Dog(String name, int age) {
+            this.name = name;
+            this.age = age;
+        }
+
+        @Override
+        public String toString() {
+            return "Dog{name='" + name + "', age=" + age + "}";
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            Dog dog = (Dog) o;
+            return age == dog.age && (name == null ? dog.name == null : name.equals(dog.name));
+        }
+
+        @Override
+        public int hashCode() {
+            int result = name == null ? 0 : name.hashCode();
+            result = 31 * result + age;
+            return result;
+        }
+    }
+
+    public static void main(String[] args) {
+        Dog d1 = new Dog("旺财", 3);
+        Dog d2 = new Dog("旺财", 3);
+        Dog d3 = d1;
+
+        System.out.println("=== == 比较 ===");
+        System.out.println("d1 == d2: " + (d1 == d2));   // false（不同对象）
+        System.out.println("d1 == d3: " + (d1 == d3));   // true（同一对象）
+
+        System.out.println("\\n=== equals 比较 ===");
+        System.out.println("d1.equals(d2): " + d1.equals(d2));  // true（内容相同）
+
+        System.out.println("\\n=== toString ===");
+        System.out.println(d1);   // 自动调用 toString
+
+        System.out.println("\\n=== 字符串陷阱 ===");
+        String s1 = "hello";
+        String s2 = "hello";
+        String s3 = new String("hello");
+        System.out.println("s1 == s2: " + (s1 == s2));        // true（常量池）
+        System.out.println("s1 == s3: " + (s1 == s3));        // false（new）
+        System.out.println("s1.equals(s3): " + s1.equals(s3));// true（内容）
+    }
+}`} />
+
+## 八、继承的完整演练
+
+把本章内容串起来，看一个完整的咖啡继承体系：
+
+<CodeRunner code={`public class Main {
+    // 父类
+    static class Coffee {
+        protected String name;
+        protected int size;
+
+        public Coffee(String name, int size) {
+            this.name = name;
+            this.size = size;
+            System.out.println("  [Coffee 构造] name=" + name + ", size=" + size);
+        }
+
+        public void brew() {
+            System.out.println("冲泡 " + size + "ml 的" + name);
+        }
+
+        @Override
+        public String toString() {
+            return name + "(" + size + "ml)";
+        }
+    }
+
+    // 子类：拿铁
+    static class Latte extends Coffee {
+        private int milkML;
+
+        public Latte(int size, int milkML) {
+            super("拿铁", size);     // 调用父类构造
+            this.milkML = milkML;
+            System.out.println("  [Latte 构造] milkML=" + milkML);
+        }
+
+        @Override   // 重写 brew
+        public void brew() {
+            super.brew();            // 先调用父类版本
+            System.out.println("加入 " + milkML + "ml 牛奶");
+        }
+    }
+
+    // 子类：美式（不可再被继承，因为 final）
+    static final class Americano extends Coffee {
+        private int waterML;
+
+        public Americano(int size, int waterML) {
+            super("美式", size);
+            this.waterML = waterML;
+            System.out.println("  [Americano 构造] waterML=" + waterML);
+        }
+
+        @Override
+        public void brew() {
+            super.brew();
+            System.out.println("加入 " + waterML + "ml 热水");
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println("--- 创建拿铁 ---");
+        Latte latte = new Latte(350, 100);
+        latte.brew();
+        System.out.println(latte);   // 调用继承自父类的 toString
+
+        System.out.println("\\n--- 创建美式 ---");
+        Americano ame = new Americano(400, 300);
+        ame.brew();
+
+        System.out.println("\\n--- final 常量 ---");
+        final int MAX_CUP = 10;
+        System.out.println("今日限售：" + MAX_CUP + " 杯");
+    }
+}`} />
+
+观察输出：**父类构造方法先执行，子类构造方法后执行**——这正是"先有父，再有子"的体现。
+
+## 九、本章小结
+
+| 概念 | 要点 |
+| --- | --- |
+| `extends` | 单继承，子类获得父类的非 private 成员 |
+| `super(...)` | 调用父类构造方法，必须是子类构造方法第一条语句 |
+| `super.方法` | 调用父类被重写的方法 |
+| 方法重写 | 父子类间，方法签名相同，运行时多态 |
+| `@Override` | 重写注解，强烈建议显式写出 |
+| `final` 类 | 不可继承（如 String） |
+| `final` 方法 | 不可重写 |
+| `final` 变量 | 只能赋值一次（引用不可变，对象内容可变） |
+| `Object` | 所有类的根，提供 toString/equals/hashCode 等 |
+| `==` | 基本类型比值，引用类型比地址 |
+| `equals` | 默认比地址，重写后比内容 |
+
+## 结语
+
+继承让我们站在巨人的肩膀上——子类复用父类的代码，又扩展自己的特性。但继承是一把双刃剑：层级过深会让代码难以维护，强耦合的父子类会让一处改动牵连甚广。所以业界常说"**组合优于继承**"——能用"持有对象"解决的问题，就别用"继承关系"。
+
+不过，继承真正的威力不在"复用"，而在"多态"。当父类引用指向子类对象，同一个方法调用能展现出千变万化的行为时，面向对象的优雅才真正显现。下一章，我们就来揭开多态的面纱——那是 OOP 三大特性中最迷人、也最深刻的一个。

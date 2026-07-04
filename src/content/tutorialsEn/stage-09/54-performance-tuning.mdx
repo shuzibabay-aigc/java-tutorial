@@ -1,0 +1,611 @@
+---
+title: "Performance Monitoring and Tuning"
+chapter: 54
+stage: "Stage 9"
+stageName: "JVM Deep Dive"
+order: 4
+description: "Master JDK-bundled tools jps/jstat/jstack/jmap/jcmd, JConsole and VisualVM, JFR and JMC, async-profiler flame graphs, JVM tuning parameters, and OOM/CPU-spike troubleshooting in practice"
+pubDate: 2026-07-03
+tags: ["Java", "JVM", "jstack", "jmap", "JFR", "VisualVM", "OOM", "调优"]
+---
+
+# Performance Monitoring and Tuning
+
+The previous three chapters covered the JVM memory model, GC, and class loading — that's "theory." This chapter is "hands-on practice" — using tools to observe a running JVM and troubleshoot real problems like OOM, CPU spikes, and pauses. This is the Java engineer's core "diagnostic ability" — writing code is foundational; locating problems is advanced.
+
+This chapter covers the most commonly used production tools and troubleshooting thought processes in one go.
+
+## 1. JDK-Bundled Command-Line Tools
+
+The JDK ships a set of command-line tools in `$JAVA_HOME/bin`. They're small and focused, need no extra installation, and are the "first responder" tools for troubleshooting.
+
+### 1.1 jps: Listing Java Processes
+
+`jps` (JVM Process Status Tool) lists Java processes on the current machine, like `ps` but only for Java:
+
+```bash
+$ jps
+12345 Main
+23456 org.eclipse.jetty.start.Main
+34567 sun.tools.jps.Jps
+
+$ jps -lvm   # full package name + main args + JVM args
+12345 com.example.Main --port=8080 -Xmx2g -XX:+UseG1GC
+```
+
+`-l` shows the full package name, `-v` shows JVM args, `-m` shows main method args.
+
+### 1.2 jstat: GC Statistics
+
+`jstat` (JVM Statistics Monitoring Tool) monitors GC, class loading, compilation stats — most commonly used for GC:
+
+```bash
+# Output once per second, 10 times, see GC
+$ jstat -gcutil 12345 1000 10
+  S0     S1     E      O      M     CCS    YGC   YGCT   FGC  FGCT   GCT
+  0.00  85.42  73.12  45.67  92.34  88.12   23   0.234   2  0.456  0.690
+  ...
+
+# Column meanings:
+# S0/S1: Survivor 0/1 usage
+# E: Eden usage
+# O: Old usage
+# M: Metaspace usage
+# CCS: Compressed class space usage
+# YGC: Young GC count
+# YGCT: Young GC total time
+# FGC: Full GC count
+# FGCT: Full GC total time
+# GCT: Total GC time
+```
+
+`-gcutil` shows usage percentages, `-gc` shows bytes, `-gc_capacity` shows capacities, `-gccause` shows GC causes.
+
+### 1.3 jstack: Thread Stack
+
+`jstack` (JVM Stack Tool) prints all thread stacks of the JVM — a powerful weapon for **deadlocks, CPU spikes, and pauses**:
+
+```bash
+$ jstack 12345 > thread_dump.txt
+
+# Find deadlocks
+$ jstack -l 12345 | grep -A 20 "Found .* deadlock"
+
+# Force print (when process is unresponsive)
+$ jstack -F 12345
+```
+
+`jstack` outputs for each thread:
+
+- **Thread name, priority, thread ID (nid, hex)**.
+- **Thread state** — `RUNNABLE`, `BLOCKED`, `WAITING`, `TIMED_WAITING`.
+- **Call stack** — the currently executing Java method stack.
+
+```
+"http-nio-8080-exec-3" #25 daemon prio=5 os_prio=0 tid=0x... nid=0x... waiting on condition
+   java.lang.Thread.State: WAITING (parking)
+        at sun.misc.Unsafe.park(Native Method)
+        - parking to wait for  <0x...> (a java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject)
+        at java.util.concurrent.locks.LockSupport.park(LockSupport.java:175)
+        at java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:2039)
+        at java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:442)
+        at org.apache.tomcat.util.threads.TaskQueue.take(TaskQueue.java:103)
+        ...
+```
+
+#### Finding the CPU-Spike Culprit
+
+The standard CPU-spike troubleshooting flow (Linux):
+
+```bash
+# 1. Find the Java process using the most CPU
+$ top -c
+# Assume PID = 12345
+
+# 2. Find the thread using the most CPU in that process
+$ top -Hp 12345
+# Assume thread PID = 12378
+
+# 3. Convert thread PID to hex
+$ printf "%x\\n" 12378
+# 0x305a
+
+# 4. In jstack output find the thread with nid=0x305a
+$ jstack 12345 | grep "nid=0x305a" -A 30
+```
+
+That thread's call stack is the CPU-spiking code — could be an infinite loop, regex disaster, crypto algorithm, GC thread, etc.
+
+### 1.4 jmap: Heap Dump
+
+`jmap` (JVM Memory Map) prints heap memory usage and generates heap dump files:
+
+```bash
+# Heap memory summary
+$ jmap -heap 12345
+
+# Histogram: object count and size per class (sorted by size)
+$ jmap -histo 12345 | head -20
+ num     #instances         #bytes  class name
+   1:        1234567      123456789  [B  (byte array)
+   2:         234567       23456789  java.lang.String
+   3:         123456        9876543  java.util.HashMap$Node
+   ...
+
+# Only live objects (triggers Full GC, use with caution!)
+$ jmap -histo:live 12345 | head -20
+
+# Generate heap dump (production uses -dump:format=b,file=...)
+$ jmap -dump:format=b,file=heap.hprof 12345
+```
+
+`jmap -histo` is the first step in locating **memory leaks** — see which classes have abnormally many objects. `-histo:live` triggers Full GC to see only live objects; **use cautiously in production** — it STWs for a while.
+
+### 1.5 jcmd: The Universal Tool
+
+`jcmd` (JVM Command) is a JDK 8 "unified command-line tool" that can do everything the previous tools do, plus more:
+
+```bash
+$ jcmd                       # list all Java processes
+$ jcmd 12345 help            # list all commands this process supports
+$ jcmd 12345 Thread.print    # equivalent to jstack
+$ jcmd 12345 GC.class_stats  # class metadata stats
+$ jcmd 12345 GC.heap_info    # heap info
+$ jcmd 12345 VM.flags        # JVM args
+$ jcmd 12345 VM.system_properties   # system properties
+$ jcmd 12345 GC.heap_dump heap.hprof   # heap dump
+$ jcmd 12345 JFR.start duration=60s filename=recording.jfr   # start JFR
+```
+
+`jcmd` is the modern recommended tool — unified interface, more powerful than the scattered jps/jstat/jstack/jmap.
+
+## 2. JConsole and VisualVM
+
+### 2.1 JConsole
+
+**JConsole** (Java Monitoring and Management Console) is a JDK-bundled GUI tool for monitoring JVM memory, threads, classes, GC, and MBeans.
+
+```bash
+$ jconsole   # start, choose the process to connect to
+```
+
+Features:
+
+- **Memory** — real-time usage curves for heap/non-heap/each memory pool.
+- **Threads** — real-time thread count curve, each thread's state and stack, **deadlock detection** ("Detect Deadlock" button).
+- **Classes** — curves of loaded/unloaded class counts.
+- **VM Summary** — JVM args, uptime, CPU usage.
+- **MBeans** — view MBean attributes, invoke MBean operations.
+
+Suited for **development debugging** — intuitive curves, but rarely used in production (GUI is resource-intensive, remote connection needs JMX config).
+
+### 2.2 VisualVM
+
+**VisualVM** (All-in-One Java Troubleshooting Tool) is more powerful than JConsole — integrating multiple features:
+
+- **Overview** — JVM info, args, system properties.
+- **Monitor** — real-time curves for CPU, memory, threads, classes.
+- **Threads** — thread timeline, see when threads are BLOCKED/WAITING.
+- **Sampler** — CPU/memory sampling, see which method uses the most CPU.
+- **Profiler** — finer-grained CPU/memory profiling (intrusive, affects performance).
+- **Snapshots** — save thread dumps, heap dumps.
+
+```bash
+$ jvisualvm   # bundled before JDK 9
+# JDK 9+ download separately: https://visualvm.github.io/
+```
+
+VisualVM can open `.hprof` files for **offline analysis** — the standard for memory leak troubleshooting.
+
+## 3. JFR and JMC
+
+### 3.1 JFR (Java Flight Recorder)
+
+**JFR** (Java Flight Recorder) is Oracle's "black box" — continuously records JVM runtime data with very low overhead (＜1%), can run long-term in production. Open-sourced in JDK 11 (was a commercial feature before).
+
+JFR-recorded events include:
+
+- **GC events** — details of every GC.
+- **Method sampling** — which methods execute most (CPU profile).
+- **Lock events** — lock contention, blocking time.
+- **IO events** — file, socket IO.
+- **Class loading, exceptions, threads**, etc.
+
+```bash
+# Enable JFR at startup, record 60 seconds to file
+$ java -XX:StartFlightRecording=duration=60s,filename=recording.jfr MyApp
+
+# Start while running
+$ jcmd 12345 JFR.start duration=60s filename=recording.jfr
+
+# View recording
+$ jcmd 12345 JFR.check
+```
+
+JFR is the "low-overhead, continuous monitoring" solution — better suited for long-term production than the "snapshot" diagnosis of jstack/jmap.
+
+### 3.2 JMC (JDK Mission Control)
+
+**JMC** (JDK Mission Control) is JFR's GUI analysis tool — open `.jfr` files, see curves, flame graphs, hot methods, GC details. More professional than VisualVM, Oracle's recommended production-grade analysis tool.
+
+```bash
+# Download separately: https://www.oracle.com/java/technologies/jdk-mission-control.html
+$ jmc   # start, open the .jfr file
+```
+
+JMC 7+ supports auto-analysis — it points out "which events might have problems," like "GC pauses too long," "lock waits too many."
+
+## 4. async-profiler and Flame Graphs
+
+**async-profiler** is a community open-source low-overhead profiler — better than JFR for CPU flame-graph analysis. Based on `perf` or async signals, very low overhead, can pinpoint JVM internal calls.
+
+### 4.1 Installation
+
+```bash
+# macOS
+$ brew install async-profiler
+
+# Or download: https://github.com/async-profiler/async-profiler/releases
+```
+
+### 4.2 CPU Flame Graph
+
+```bash
+# Sample 30 seconds, output flame graph
+$ asprof -d 30 -f flame.html 12345
+
+# Or
+$ asprof -e cpu -d 30 -f flame.html 12345
+```
+
+Open `flame.html` — a flame graph; the x-axis is the method call stack depth, the y-axis is the sample count (CPU usage). Wide methods are CPU hotspots.
+
+### 4.3 Memory Allocation Flame Graph
+
+```bash
+$ asprof -e alloc -d 30 -f alloc.html 12345
+```
+
+See which methods allocate the most objects — locate the source of "memory pressure."
+
+Flame graphs are the most intuitive tool for CPU performance troubleshooting — far more efficient than sampling jstack. Brendan Gregg's flame-graph concept is widely adopted.
+
+## 5. Common JVM Parameters
+
+### 5.1 Memory Parameters
+
+| Parameter | Effect | Example |
+| --- | --- | --- |
+| `-Xms` | Heap initial size | `-Xms4g` |
+| `-Xmx` | Heap max size | `-Xmx8g` |
+| `-Xmn` | Young gen size | `-Xmn2g` |
+| `-Xss` | Thread stack size | `-Xss512k` |
+| `-XX:MetaspaceSize` | Metaspace initial | `-XX:MetaspaceSize=256m` |
+| `-XX:MaxMetaspaceSize` | Metaspace max | `-XX:MaxMetaspaceSize=512m` |
+| `-XX:MaxDirectMemorySize` | Max direct memory | `-XX:MaxDirectMemorySize=1g` |
+| `-XX:NewRatio` | Old:Young | `-XX:NewRatio=2` |
+| `-XX:SurvivorRatio` | Eden:S | `-XX:SurvivorRatio=8` |
+
+### 5.2 GC Parameters
+
+| Parameter | Effect |
+| --- | --- |
+| `-XX:+UseSerialGC` | Serial GC |
+| `-XX:+UseParallelGC` | Parallel GC (JDK 8 default) |
+| `-XX:+UseG1GC` | G1 (JDK 9+ default) |
+| `-XX:+UseZGC` | ZGC |
+| `-XX:+UseShenandoahGC` | Shenandoah |
+| `-XX:MaxGCPauseMillis` | Target GC pause |
+| `-XX:+PrintGCDetails` | Print GC details (JDK 8) |
+| `-Xlog:gc*` | GC log (JDK 9+) |
+| `-XX:+HeapDumpOnOutOfMemoryError` | Auto dump on OOM |
+| `-XX:HeapDumpPath` | Dump path |
+
+### 5.3 Recommended Production Config
+
+```bash
+java \
+  -Xms4g -Xmx4g \              # same heap size, avoid dynamic expansion
+  -XX:MetaspaceSize=256m \
+  -XX:MaxMetaspaceSize=512m \
+  -XX:+UseG1GC \               # G1 collector
+  -XX:MaxGCPauseMillis=200 \   # target 200ms pause
+  -XX:+HeapDumpOnOutOfMemoryError \
+  -XX:HeapDumpPath=/var/dumps/ \
+  -Xlog:gc*:file=/var/log/gc.log:time,uptime,level,tags \
+  -jar app.jar
+```
+
+## 6. OOM Troubleshooting in Practice
+
+### 6.1 OOM Types
+
+OOM isn't only "heap overflow" — different regions overflow differently:
+
+| OOM message | Cause | Troubleshoot direction |
+| --- | --- | --- |
+| `java.lang.OutOfMemoryError: Java heap space` | Heap overflow | Memory leak or heap too small |
+| `GC overhead limit exceeded` | GC can't keep up, 98% time in GC | Same as above |
+| `Metaspace` | Metaspace overflow | Too many dynamic classes (CGLIB/Groovy) |
+| `Direct buffer memory` | Direct memory overflow | NIO/Netty leak |
+| `unable to create new native thread` | Too many threads | Thread leak, tune `-Xss` or OS limits |
+| `StackOverflowError` | Stack overflow | Recursion too deep |
+
+### 6.2 Troubleshooting Steps
+
+```bash
+# 1. Get a heap dump (recommend adding -XX:+HeapDumpOnOutOfMemoryError at startup)
+$ jmap -dump:format=b,file=heap.hprof 12345
+
+# 2. Open with MAT (Eclipse Memory Analyzer)
+# Download: https://www.eclipse.org/mat/
+
+# 3. MAT's key reports
+#   - Leak Suspects Report   leak suspect report
+#   - Dominator Tree         dominator tree, see which object "holds" the most memory
+#   - Histogram              object count and size by class
+#   - Path to GC Roots       see why an object wasn't GC'd (find the reference chain)
+```
+
+MAT's **Leak Suspects** auto-analyzes and points out "which object retained X MB" — usually directly locates the leak.
+
+### 6.3 Common Leak Patterns
+
+- **Static collections** — `static Map` keeps adding, never removing.
+- **ThreadLocal** — in a thread pool, ThreadLocal not removed, leaking until thread destruction.
+- **Listeners/callbacks** — registered without unregistering.
+- **Cache without eviction** — hand-rolled HashMap cache without LRU/expiry.
+- **Resources not closed** — IO/Connection not closed.
+- **Inner class holding outer** — non-static inner class holds outer reference; outer can't be reclaimed.
+
+## 7. CPU-Spike Troubleshooting in Practice
+
+```bash
+# 1. top finds the Java process using high CPU
+$ top
+# PID = 12345, CPU 200%
+
+# 2. top -Hp finds the "culprit thread" in that process
+$ top -Hp 12345
+# Thread PID = 12378, at 200%
+
+# 3. Convert thread PID to hex
+$ printf "%x\\n" 12378
+305a
+
+# 4. jstack finds the thread with nid=0x305a
+$ jstack 12345 > td.txt
+$ grep "nid=0x305a" -A 30 td.txt
+```
+
+That thread's call stack is the CPU-spiking code — common causes:
+
+- **Infinite loop** — `while(true)` without exit condition.
+- **Regex disaster** — `Pattern` repeatedly compiled on hot path, or catastrophic backtracking.
+- **Serialization/deserialization** — large object JSON/Gson.
+- **GC threads** — frequent GC, CPU all in GC.
+- **Crypto/compression** — AES, ZIP on large data.
+- **Stream parallel** — `parallelStream` competing for cores on CPU-intensive tasks.
+
+## 8. Practice: Demonstrating Tool Usage
+
+The following example demonstrates triggering different problems in Java code (OOM, CPU spike, deadlock) and shows how to monitor with MXBeans.
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+public class Main {
+    // Simulate memory leak: static Map keeps growing
+    static Map<String, byte[]> leakMap = new HashMap<>();
+    static AtomicInteger counter = new AtomicInteger();
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Performance Monitoring and Tuning Demo ===\\n");
+        System.out.println("(This demo doesn't actually trigger OOM/deadlock, just shows monitoring APIs)\\n");
+
+        // 1. View memory usage
+        System.out.println("--- 1. Memory Usage ---");
+        Runtime rt = Runtime.getRuntime();
+        long MB = 1024 * 1024;
+        System.out.println("Heap: used " + (rt.totalMemory() - rt.freeMemory()) / MB
+            + " / " + rt.totalMemory() / MB
+            + " MB (max " + rt.maxMemory() / MB + " MB)");
+
+        // Detailed memory pools
+        System.out.println("\\nMemory pools:");
+        for (java.lang.management.MemoryPoolMXBean pool :
+             java.lang.management.ManagementFactory.getMemoryPoolMXBeans()) {
+            java.lang.management.MemoryUsage u = pool.getUsage();
+            if (u.getUsed() > 0) {
+                System.out.println("  " + pool.getName() + ": "
+                    + u.getUsed() / MB + "/" + u.getCommitted() / MB + " MB");
+            }
+        }
+
+        // 2. GC info
+        System.out.println("\\n--- 2. GC Info ---");
+        for (java.lang.management.GarbageCollectorMXBean gc :
+             java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+            System.out.println("  " + gc.getName() + ": "
+                + gc.getCollectionCount() + " collections, "
+                + gc.getCollectionTime() + " ms");
+        }
+
+        // 3. Thread info
+        System.out.println("\\n--- 3. Thread Info ---");
+        java.lang.management.ThreadMXBean tb =
+            java.lang.management.ManagementFactory.getThreadMXBean();
+        System.out.println("  Live threads: " + tb.getThreadCount());
+        System.out.println("  Peak threads: " + tb.getPeakThreadCount());
+        System.out.println("  Daemon threads: " + tb.getDaemonThreadCount());
+
+        // List all thread states
+        System.out.println("\\n  Thread state distribution:");
+        Map<Thread.State, Long> stateCount = new HashMap<>();
+        for (java.lang.management.ThreadInfo ti : tb.dumpAllThreads(false, false)) {
+            stateCount.merge(ti.getThreadState(), 1L, Long::sum);
+        }
+        stateCount.forEach((s, c) -> System.out.println("    " + s + ": " + c));
+
+        // 4. Deadlock detection
+        System.out.println("\\n--- 4. Deadlock Detection ---");
+        long[] deadlocks = tb.findDeadlockedThreads();
+        System.out.println("  Deadlocked threads: " + (deadlocks == null ? "none" : Arrays.toString(deadlocks)));
+        System.out.println("  (In production use jstack -l or JConsole to detect deadlocks)");
+
+        // 5. Class loading info
+        System.out.println("\\n--- 5. Class Loading ---");
+        java.lang.management.ClassLoadingMXBean cl =
+            java.lang.management.ManagementFactory.getClassLoadingMXBean();
+        System.out.println("  Currently loaded: " + cl.getLoadedClassCount());
+        System.out.println("  Total loaded: " + cl.getTotalLoadedClassCount());
+        System.out.println("  Unloaded: " + cl.getUnloadedClassCount());
+
+        // 6. CPU usage (process level)
+        System.out.println("\\n--- 6. CPU/System Load ---");
+        java.lang.management.OperatingSystemMXBean os =
+            java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+        System.out.println("  CPU cores: " + os.getAvailableProcessors());
+        System.out.println("  System load (1 min): " + os.getSystemLoadAverage());
+        if (os instanceof com.sun.management.OperatingSystemMXBean) {
+            com.sun.management.OperatingSystemMXBean sun = (com.sun.management.OperatingSystemMXBean) os;
+            System.out.println("  JVM CPU usage: " + String.format("%.2f", sun.getProcessCpuLoad() * 100) + "%");
+            System.out.println("  System CPU usage: " + String.format("%.2f", sun.getSystemCpuLoad() * 100) + "%");
+        }
+
+        // 7. Simulate CPU-intensive computation (short, demonstrates async-profiler approach)
+        System.out.println("\\n--- 7. Simulate CPU-Intensive (1 second) ---");
+        long start = System.currentTimeMillis();
+        long sum = 0;
+        while (System.currentTimeMillis() - start < 1000) {
+            for (int i = 0; i < 100000; i++) {
+                sum += i * i;
+            }
+        }
+        System.out.println("  1 second computation sum = " + sum);
+        System.out.println("  (Use async-profiler asprof -d 30 -f flame.html PID to see flame graph)");
+
+        // 8. Simulate memory pressure (small amount, doesn't actually OOM)
+        System.out.println("\\n--- 8. Simulate Memory Pressure ---");
+        for (int i = 0; i < 100; i++) {
+            leakMap.put("key-" + counter.incrementAndGet(), new byte[1024 * 100]);   // 100KB
+        }
+        System.out.println("  Added 100 100KB objects to leakMap, total ~" + leakMap.size() * 100 / 1024 + " MB");
+        System.out.println("  Current heap used: " + (rt.totalMemory() - rt.freeMemory()) / MB + " MB");
+        System.out.println("  (In production, this 'static Map that only adds' is a typical leak)");
+
+        // 9. Monitor own runtime
+        System.out.println("\\n--- 9. Runtime Info ---");
+        System.out.println("  Java: " + System.getProperty("java.version"));
+        System.out.println("  JVM: " + System.getProperty("java.vm.name"));
+        System.out.println("  Start time: " + new Date(java.lang.management.RuntimeMXBean.class.cast(
+            java.lang.management.ManagementFactory.getRuntimeMXBean()).getStartTime()));
+        System.out.println("  Uptime: " + (System.currentTimeMillis() -
+            java.lang.management.ManagementFactory.getRuntimeMXBean().getStartTime()) / 1000 + " seconds");
+
+        // 10. JVM args
+        System.out.println("\\n--- 10. JVM Args ---");
+        List<String> jvmArgs = java.lang.management.ManagementFactory.getRuntimeMXBean().getInputArguments();
+        if (jvmArgs.isEmpty()) {
+            System.out.println("  (No JVM args, using defaults)");
+        } else {
+            jvmArgs.forEach(a -> System.out.println("  " + a));
+        }
+
+        System.out.println("\\n=== Troubleshooting Quick Reference ===");
+        System.out.println("OOM:");
+        System.out.println("  jmap -dump:format=b,file=h.hprof PID");
+        System.out.println("  MAT open hprof, see Leak Suspects");
+        System.out.println("CPU spike:");
+        System.out.println("  top -Hp PID → thread PID → printf '%x' → jstack find nid");
+        System.out.println("  or async-profiler asprof -d 30 -f flame.html PID");
+        System.out.println("Deadlock:");
+        System.out.println("  jstack -l PID | grep -A 20 'deadlock'");
+        System.out.println("  or jconsole 'Detect Deadlock' button");
+        System.out.println("GC:");
+        System.out.println("  jstat -gcutil PID 1000");
+        System.out.println("  jcmd PID JFR.start duration=60s filename=r.jfr");
+    }
+}`} />
+
+> **Key observations**:
+> - **`MemoryPoolMXBean`** lists each memory pool — Eden, Survivor, Old, Metaspace actual usage.
+> - **`ThreadMXBean.findDeadlockedThreads()`** returns null if no deadlock — programmatic deadlock detection.
+> - **`com.sun.management.OperatingSystemMXBean`** can get JVM/system CPU usage — JConsole's data source.
+> - **`RuntimeMXBean.getInputArguments()`** lists JVM startup args — see the actually effective config.
+> - **`leakMap` only adds, never removes** — this is a typical leak pattern; in production MAT can locate such `static Map`.
+
+## 9. Tuning Thought Process Summary
+
+### 9.1 Three Tuning Principles
+
+1. **Don't tune prematurely** — first correct, then performant. First monitor, then tune.
+2. **Tune based on data** — based on jstat/jfr/profiler data, not guesses.
+3. **One parameter at a time** — changing multiple at once hides which one was effective.
+
+### 9.2 Common Scenario Tuning
+
+| Scenario | Tuning direction |
+| --- | --- |
+| Frequent Minor GC | Increase `-Xmn` or young-gen ratio |
+| Many Full GCs | Increase heap, check memory leaks, switch to G1/ZGC |
+| Long GC pauses | Switch to G1 (`MaxGCPauseMillis`), ZGC |
+| OOM | Dump analysis, find leak point |
+| CPU 100% | jstack to find hot threads, see if infinite loop/GC thread |
+| Metaspace overflow | Increase `-XX:MaxMetaspaceSize`, check dynamic class generation |
+| Direct memory overflow | Check NIO/Netty DirectByteBuffer leaks |
+| Slow startup | Reduce `MetaspaceSize`, CDS/AppCDS |
+
+### 9.3 Monitoring Infrastructure
+
+Production environments must build monitoring:
+
+- **Prometheus + Grafana** — long-term metrics monitoring, JVM exporter collects JVM metrics.
+- **ELK** — centralized GC log, application log analysis.
+- **APM** (SkyWalking/Pinpoint) — distributed tracing, locate slow calls.
+- **JFR long-term recording** — low overhead, can replay when problems occur.
+
+Monitoring is the precondition for tuning — "tuning without monitoring" is just guessing.
+
+## 10. Chapter Summary
+
+| Tool | Use |
+| --- | --- |
+| jps | List Java processes |
+| jstat | GC/memory stats |
+| jstack | Thread stack, deadlock detection |
+| jmap | Heap dump, object histogram |
+| jcmd | Universal tool, unified interface |
+| JConsole | GUI monitoring (dev use) |
+| VisualVM | GUI analysis (open hprof) |
+| JFR | Low-overhead continuous recording (production-ready) |
+| JMC | JFR analysis GUI |
+| async-profiler | Flame-graph profiler |
+| MAT | Heap dump analysis |
+
+**Troubleshooting quick reference**:
+
+| Problem | Tool chain |
+| --- | --- |
+| OOM | `jmap -dump` → MAT → Leak Suspects |
+| CPU spike | `top -Hp` → `printf %x` → `jstack` find nid |
+| Deadlock | `jstack -l` or JConsole |
+| Frequent GC | `jstat -gcutil` see YGC/FGC |
+| Pauses | JFR recording, see GC events |
+| Method hotspots | async-profiler flame graph |
+
+**Mnemonics**:
+
+- **jps finds processes, jstat sees GC, jstack sees threads, jmap sees heap** — the four-piece set.
+- **jcmd is the universal key** — one tool does it all.
+- **OOM uses MAT** — Leak Suspects auto-locates leaks.
+- **CPU uses flame graphs** — async-profiler's one graph finds hotspots.
+- **JFR is the black box** — can run long-term in production, ＜1% overhead.
+- **Tune on data, not guesses** — first monitor, then analyze, then tune.
+
+## Conclusion: Tuning Is "Diagnostics"
+
+Performance tuning is like a doctor seeing a patient — symptoms (pauses/OOM), lab tests (jstack/jmap/JFR), diagnosis (MAT/flame graph), treatment (tune params/change code). Writing code is "doing surgery"; tuning is "diagnosing illness" — the latter is rarer.
+
+This chapter covered tools and approaches. The next chapter — Stage 9's final chapter — covers **Bytecode Basics**. The previous four chapters looked at the JVM at the "usage layer"; the next dives into the `.class` file, seeing what bytecode instructions really look like, how `i++` and `++i` differ at the bytecode level, what generic erasure looks like in bytecode, and what try-with-resources compiles into — peeling back the JVM's "last layer of mystery." See you in the next chapter.

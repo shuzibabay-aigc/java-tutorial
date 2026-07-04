@@ -1,0 +1,502 @@
+---
+title: "Queue and Deque"
+chapter: 22
+stage: "Stage 4"
+stageName: "Collections Framework"
+order: 5
+description: "A deep dive into PriorityQueue's min-heap implementation, ArrayDeque's circular array, techniques for using a Deque as both a stack and a queue, and an overview of the BlockingQueue family"
+pubDate: 2026-07-03
+tags: ["Java", "Queue", "Deque", "PriorityQueue", "ArrayDeque", "BlockingQueue", "堆", "栈"]
+---
+
+# Queue and Deque
+
+While the earlier `List`, `Set`, and `Map` care about "what to hold," `Queue` (queue) and `Deque` (double-ended queue) care about "how things enter and how they leave." They are containers organized by "entry and exit rules"—first-in-first-out, last-in-first-out, by priority—each rule corresponds to a data structure and a class of application scenarios.
+
+In this chapter, we look at how `PriorityQueue` uses a min-heap to implement "VIP first," how `ArrayDeque` uses a circular array to excel as both a stack and a queue, and how `BlockingQueue` bridges producers and consumers.
+
+## 1. The Queue Interface: Two Behaviors
+
+`Queue<E>` extends `Collection<E>` and defines the behavior of a "queue." It has two sets of methods, corresponding to "throw an exception on failure" and "return a special value on failure" styles:
+
+| Operation | Throws Exception | Returns Special Value |
+| --- | --- | --- |
+| Enqueue | `add(e)` | `offer(e)` |
+| Dequeue (retrieve and remove) | `remove()` | `poll()` |
+| Peek at head (retrieve without removing) | `element()` | `peek()` |
+
+The `offer`/`poll`/`peek` set is generally preferred—they are friendlier when the queue is capacity-limited or empty, as they don't throw exceptions.
+
+The default semantics of `Queue` are **FIFO** (first-in-first-out)—the first element enqueued is the first dequeued, like lining up at a cafeteria. But `Queue` has a sub-interface `Deque` that allows entry and exit at both ends, capable of playing three roles: FIFO queue, LIFO stack, and double-ended queue.
+
+## 2. PriorityQueue: A Priority Queue
+
+### 2.1 Not by Insertion Order, but by Priority
+
+`PriorityQueue` breaks "first-in-first-out"—the element dequeued is always the one with the "highest priority." By default it is a **min-heap**, meaning each `poll` returns the smallest element:
+
+```java
+PriorityQueue<Integer> pq = new PriorityQueue<>();
+pq.offer(5);
+pq.offer(1);
+pq.offer(3);
+System.out.println(pq.poll());   // 1 (smallest)
+System.out.println(pq.poll());   // 3
+System.out.println(pq.poll());   // 5
+```
+
+Note: **the iteration order of a priority queue is NOT the sorted order!** `toString` and the iterator simply display elements in array order, which does not represent priority order. To see the sorting effect, you must `poll` elements one by one.
+
+### 2.2 The Min-Heap Implementation
+
+`PriorityQueue` is backed by an array representing a **binary heap**. It satisfies the "heap property": each node is less than or equal to its children (min-heap).
+
+```
+Min-heap example:       Array representation:
+       1               [1, 3, 5, 7, 9, 6]
+      / \
+     3   5
+    / \  / \
+   7  9 6
+```
+
+The beauty of the array representation: node `i`'s parent is `(i-1)/2`, its left child is `2i+1`, and its right child is `2i+2`—no pointers needed, pure arithmetic positioning.
+
+**Enqueue (offer)**: the new element is placed at the end of the array, then **sifts up**—compared with its parent, swapped if smaller, until the heap property is satisfied.
+
+```java
+// Simplified sift up
+private void siftUp(int k, E x) {
+    while (k > 0) {
+        int parent = (k - 1) >>> 1;
+        if (comparator.compare(x, queue[parent]) >= 0) break;
+        queue[k] = queue[parent];
+        k = parent;
+    }
+    queue[k] = x;
+}
+```
+
+**Dequeue (poll)**: the root (minimum) is removed, the last element is moved to the root position, then **sifts down**—compared with the smaller child, swapped if larger, until the heap property is satisfied.
+
+```java
+// Simplified sift down
+private void siftDown(int k, E x) {
+    int half = size >>> 1;
+    while (k < half) {
+        int child = 2 * k + 1;       // left child
+        int right = child + 1;
+        if (right < size && comparator.compare(queue[child], queue[right]) > 0)
+            child = right;            // pick the smaller child
+        if (comparator.compare(x, queue[child]) <= 0) break;
+        queue[k] = queue[child];
+        k = child;
+    }
+    queue[k] = x;
+}
+```
+
+Both enqueue and dequeue are O(log n)—the height of the heap is log n.
+
+### 2.3 Custom Priority
+
+The default is a min-heap (smallest first out). For "largest first out" (max-heap), pass a reversed Comparator:
+
+```java
+PriorityQueue<Integer> maxHeap = new PriorityQueue<>(Comparator.reverseOrder());
+```
+
+How to order custom objects? Pass a `Comparator`:
+
+```java
+PriorityQueue<Task> pq = new PriorityQueue<>(
+    Comparator.comparingInt(Task::getPriority)   // ascending by priority number
+);
+```
+
+### 2.4 Application: The Top K Problem
+
+A classic application of `PriorityQueue` is **Top K**—finding the top K largest/smallest elements. The technique is to maintain a min-heap of size K and iterate through all elements: if the heap isn't full, add; if the new element is larger than the heap top, replace the top. The heap ends up holding the Top K.
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 基本优先队列
+        PriorityQueue<Integer> pq = new PriorityQueue<>();
+        pq.offer(5);
+        pq.offer(1);
+        pq.offer(3);
+        pq.offer(7);
+        pq.offer(2);
+        System.out.println("--- 最小堆，poll 出来是升序 ---");
+        while (!pq.isEmpty()) {
+            System.out.print(pq.poll() + " ");
+        }
+        System.out.println();
+
+        // 2. 最大堆
+        PriorityQueue<Integer> maxHeap = new PriorityQueue<>(Comparator.reverseOrder());
+        maxHeap.offer(5);
+        maxHeap.offer(1);
+        maxHeap.offer(3);
+        System.out.println("\\n--- 最大堆，poll 出来是降序 ---");
+        while (!maxHeap.isEmpty()) {
+            System.out.print(maxHeap.poll() + " ");
+        }
+        System.out.println();
+
+        // 3. Top 3 最大的元素
+        int[] nums = {3, 1, 5, 7, 2, 8, 4, 9, 6};
+        System.out.println("\\n--- Top 3 最大 ---");
+        List<Integer> top3 = topK(nums, 3);
+        System.out.println(top3);
+
+        // 4. 任务调度：按优先级处理
+        System.out.println("\\n--- 任务调度 ---");
+        PriorityQueue<Task> tasks = new PriorityQueue<>(
+            Comparator.comparingInt(Task::getPriority)
+        );
+        tasks.offer(new Task("写文档", 3));
+        tasks.offer(new Task("修紧急bug", 1));   // 优先级 1 最高
+        tasks.offer(new Task("回复邮件", 5));
+        tasks.offer(new Task("开会议", 2));
+        while (!tasks.isEmpty()) {
+            System.out.println("处理: " + tasks.poll());
+        }
+    }
+
+    // 找前 k 大的元素（用小堆）
+    static List<Integer> topK(int[] nums, int k) {
+        PriorityQueue<Integer> minHeap = new PriorityQueue<>(k);
+        for (int n : nums) {
+            if (minHeap.size() < k) {
+                minHeap.offer(n);
+            } else if (n > minHeap.peek()) {
+                minHeap.poll();
+                minHeap.offer(n);
+            }
+        }
+        List<Integer> result = new ArrayList<>(minHeap);
+        Collections.sort(result, Comparator.reverseOrder());
+        return result;
+    }
+}
+
+class Task implements Comparable<Task> {
+    String name;
+    int priority;   // 数值越小优先级越高
+
+    Task(String name, int priority) {
+        this.name = name;
+        this.priority = priority;
+    }
+
+    int getPriority() { return priority; }
+
+    @Override
+    public int compareTo(Task o) {
+        return Integer.compare(this.priority, o.priority);
+    }
+
+    @Override
+    public String toString() {
+        return name + "(优先级=" + priority + ")";
+    }
+}`} />
+
+## 3. ArrayDeque: A Circular-Array Double-Ended Queue
+
+### 3.1 The Multi-Talented "Swiss Army Knife"
+
+`ArrayDeque` is an underrated container—it works as a **stack** (replacing the old `Stack`), and as a **queue** (replacing `LinkedList`), outperforming both in each role. It is based on a **circular array**.
+
+The core idea of a circular array: maintain two pointers, `head` and `tail`, with the array wrapping around—when `tail` reaches the end of the array, it wraps back to the beginning. This way, insertions and deletions at both ends are O(1), with no element shifting.
+
+```
+Capacity 8, head=2, tail=6
+Index: 0  1  2  3  4  5  6  7
+Data:  -  -  A  B  C  D  -  -
+          ↑head       ↑tail
+```
+
+### 3.2 As a Stack: push / pop / peek
+
+The `Deque`'s `push`/`pop`/`peek` semantics correspond to a stack (LIFO):
+
+```java
+Deque<String> stack = new ArrayDeque<>();
+stack.push("A");      // push onto stack (add at head)
+stack.push("B");
+stack.push("C");
+System.out.println(stack.pop());   // C (last-in-first-out)
+System.out.println(stack.peek());  // B (peek at top without removing)
+```
+
+`push` actually calls `addFirst`, and `pop` calls `removeFirst`—a stack is simply "a double-ended queue that only operates at the head."
+
+> 💡 **Why not use `java.util.Stack`?** `Stack` extends `Vector`, so all its methods are `synchronized`, hurting performance. It also exposes List methods like `get(i)`, breaking the stack abstraction. The Java documentation explicitly recommends using `ArrayDeque` instead of `Stack`.
+
+### 3.3 As a Queue: offer / poll / peek
+
+When `Deque` is used as a queue (FIFO), `offer` adds at the tail and `poll` removes from the head:
+
+```java
+Deque<String> queue = new ArrayDeque<>();
+queue.offer("A");     // enqueue (add at tail)
+queue.offer("B");
+queue.offer("C");
+System.out.println(queue.poll());   // A (first-in-first-out)
+```
+
+`offer` calls `addLast`, and `poll` calls `removeFirst`—a queue is simply "a double-ended queue that enters at the tail and exits at the head."
+
+### 3.4 Performance Characteristics
+
+`ArrayDeque` has O(1) for almost all operations:
+
+| Operation | Complexity |
+| --- | --- |
+| `push` / `pop` / `peek` | O(1) |
+| `offer` / `poll` / `peek` | O(1) |
+| `addFirst` / `addLast` / `removeFirst` / `removeLast` | O(1) |
+| `contains` | O(n) |
+
+It's faster than `LinkedList`—no per-node object overhead, cache-friendly. It's faster than `Stack`—no `synchronized`. **Conclusion: for both stacks and queues, `ArrayDeque` is the first choice.**
+
+Note: `ArrayDeque` **does not allow null**—it uses null to identify "empty slots," so adding null would be indistinguishable from an empty slot. If you need to store null, use `LinkedList`.
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 栈操作
+        Deque<String> stack = new ArrayDeque<>();
+        stack.push("第一层");
+        stack.push("第二层");
+        stack.push("第三层");
+        System.out.println("--- 栈（后进先出）---");
+        System.out.println("peek: " + stack.peek());   // 第三层
+        while (!stack.isEmpty()) {
+            System.out.println("pop: " + stack.pop());
+        }
+
+        // 2. 队列操作
+        Deque<String> queue = new ArrayDeque<>();
+        queue.offer("Alice");
+        queue.offer("Bob");
+        queue.offer("Charlie");
+        System.out.println("\\n--- 队列（先进先出）---");
+        while (!queue.isEmpty()) {
+            System.out.println("poll: " + queue.poll());
+        }
+
+        // 3. 双端操作
+        Deque<Integer> deque = new ArrayDeque<>();
+        deque.addFirst(2);
+        deque.addFirst(1);
+        deque.addLast(3);
+        deque.addLast(4);
+        System.out.println("\\n--- 双端队列 ---");
+        System.out.println("deque: " + deque);     // [1, 2, 3, 4]
+        System.out.println("getFirst: " + deque.getFirst());   // 1
+        System.out.println("getLast: " + deque.getLast());     // 4
+        deque.removeFirst();
+        deque.removeLast();
+        System.out.println("removeFirst/Last 后: " + deque);   // [2, 3]
+
+        // 4. 括号匹配：栈的经典应用
+        System.out.println("\\n--- 括号匹配检查 ---");
+        String[] exprs = {"(a+b)", "([)]", "((()))", "{[()]}"};
+        for (String expr : exprs) {
+            System.out.println(expr + " -> " + (isBalanced(expr) ? "合法" : "非法"));
+        }
+    }
+
+    static boolean isBalanced(String expr) {
+        Deque<Character> stack = new ArrayDeque<>();
+        Map<Character, Character> pairs = Map.of(')', '(', ']', '[', '}', '{');
+        for (char c : expr.toCharArray()) {
+            if (c == '(' || c == '[' || c == '{') {
+                stack.push(c);
+            } else if (c == ')' || c == ']' || c == '}') {
+                if (stack.isEmpty() || stack.pop() != pairs.get(c)) {
+                    return false;
+                }
+            }
+        }
+        return stack.isEmpty();
+    }
+}`} />
+
+## 4. BlockingQueue: The Blocking Queue
+
+`BlockingQueue` is the concurrent version of `Queue`, designed specifically for the **producer-consumer** model. Its characteristics:
+
+- **Blocks on enqueue when full**: when the queue is full, `put` blocks until space is available.
+- **Blocks on dequeue when empty**: when the queue is empty, `take` blocks until an element is available.
+- **Thread-safe**: thread safety is guaranteed internally; no external locking needed.
+
+### 4.1 Main Implementations
+
+| Implementation | Underlying | Characteristics |
+| --- | --- | --- |
+| `ArrayBlockingQueue` | Array | Bounded, FIFO, single lock |
+| `LinkedBlockingQueue` | Linked list | Optionally bounded (default Integer.MAX_VALUE), FIFO, two locks (read/write separation) |
+| `SynchronousQueue` | None | Capacity 0, every put must wait for a take |
+| `PriorityBlockingQueue` | Heap | Unbounded, dequeues by priority |
+| `DelayQueue` | Heap | Elements can only be taken out after expiring; suited for scheduled tasks |
+| `LinkedBlockingDeque` | Linked list | Double-ended blocking queue |
+
+### 4.2 Four Sets of Methods
+
+`BlockingQueue` divides methods into four categories by behavior:
+
+| Behavior | Throws Exception | Returns Special Value | Blocks | Times Out |
+| --- | --- | --- | --- | --- |
+| Enqueue | `add(e)` | `offer(e)` | `put(e)` | `offer(e, time, unit)` |
+| Dequeue | `remove()` | `poll()` | `take()` | `poll(time, unit)` |
+| Peek | `element()` | `peek()` | - | - |
+
+The most commonly used are `put`/`take`—they block, and are the core of the producer-consumer pattern.
+
+### 4.3 Producer-Consumer Example
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws InterruptedException {
+        BlockingQueue<String> queue = new ArrayBlockingQueue<>(3);
+
+        // 生产者
+        Thread producer = new Thread(() -> {
+            try {
+                for (int i = 1; i <= 5; i++) {
+                    String item = "商品-" + i;
+                    queue.put(item);   // 满了会阻塞
+                    System.out.println("生产: " + item + " (队列大小 " + queue.size() + ")");
+                    Thread.sleep(50);
+                }
+                queue.put("END");   // 结束信号
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }, "生产者");
+
+        // 消费者
+        Thread consumer = new Thread(() -> {
+            try {
+                while (true) {
+                    String item = queue.take();   // 空了会阻塞
+                    if ("END".equals(item)) break;
+                    System.out.println("  消费: " + item);
+                    Thread.sleep(150);   // 消费比生产慢
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }, "消费者");
+
+        producer.start();
+        consumer.start();
+        producer.join();
+        consumer.join();
+        System.out.println("完成！");
+
+        // 演示 DelayQueue
+        System.out.println("\\n--- DelayQueue 演示 ---");
+        DelayQueue<DelayedTask> dq = new DelayQueue<>();
+        long now = System.currentTimeMillis();
+        dq.offer(new DelayedTask("1秒后", now + 1000));
+        dq.offer(new DelayedTask("3秒后", now + 3000));
+        dq.offer(new DelayedTask("500毫秒后", now + 500));
+        while (!dq.isEmpty()) {
+            DelayedTask t = dq.take();   // 到期才能取出
+            System.out.println("取出: " + t.name + " (实际 " + (System.currentTimeMillis() - now) + "ms)");
+        }
+    }
+}
+
+class DelayedTask implements Delayed {
+    final String name;
+    final long executeTime;
+
+    DelayedTask(String name, long executeTime) {
+        this.name = name;
+        this.executeTime = executeTime;
+    }
+
+    @Override
+    public long getDelay(TimeUnit unit) {
+        return unit.convert(executeTime - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    @Override
+    public int compareTo(Delayed o) {
+        return Long.compare(this.executeTime, ((DelayedTask) o).executeTime);
+    }
+}`} />
+
+`DelayQueue` is an interesting special case—elements must implement `Delayed`, and can only be taken out by `take` when they expire (when `getDelay` returns a value not greater than 0). It is commonly used for scheduled task execution, cache expiration cleanup, and so on.
+
+## 5. The Relationship Between Queue and Deque
+
+```
+Collection
+└── Queue
+    ├── PriorityQueue (priority queue, heap)
+    └── Deque (double-ended queue)
+        ├── ArrayDeque (circular array, strongly recommended)
+        └── LinkedList (linked list, also works as a Deque)
+    └── BlockingQueue (blocking queue, for concurrency)
+        ├── ArrayBlockingQueue
+        ├── LinkedBlockingQueue
+        ├── SynchronousQueue
+        ├── PriorityBlockingQueue
+        └── DelayQueue
+```
+
+Note that `Deque` extends `Queue`—so a `Deque` can do everything a `Queue` can, plus the extra "both-ends" capability.
+
+## 6. When to Use What
+
+| Scenario | Recommendation |
+| --- | --- |
+| Stack (LIFO) | `ArrayDeque` |
+| Queue (FIFO) | `ArrayDeque` (unbounded) or `LinkedBlockingQueue` (bounded concurrent) |
+| Process by priority | `PriorityQueue` |
+| Top K | `PriorityQueue` (a heap of size K) |
+| Producer-consumer | `ArrayBlockingQueue` / `LinkedBlockingQueue` |
+| Scheduled tasks | `DelayQueue` |
+| Task handoff (direct transfer) | `SynchronousQueue` |
+
+## 7. Chapter Summary
+
+| Topic | Key Points |
+| --- | --- |
+| Queue two method sets | add/remove/element (throw exception) vs offer/poll/peek (return special value) |
+| PriorityQueue | Min-heap, poll returns the smallest, O(log n) |
+| Sift up/down | Enqueue sifts up, dequeue sifts down |
+| Max-heap | `Comparator.reverseOrder()` |
+| Top K | Min-heap maintaining the K largest elements |
+| ArrayDeque | Circular array, both-ends O(1) |
+| Stack | `push`/`pop`/`peek` (operates at the head) |
+| Queue | `offer`/`poll`/`peek` (enter at tail, exit at head) |
+| Replace Stack | Use `ArrayDeque`, not `Stack` |
+| BlockingQueue | Blocking queue, producer-consumer |
+| Four method sets | Throw exception / return value / block / time out |
+| DelayQueue | Elements can only be taken out after expiring |
+
+## Conclusion: The Art of Entry and Exit
+
+`Queue` and `Deque` may seem "low-key," but they are key building blocks for many algorithms and systems:
+
+- **Stacks** underpin function calls, expression evaluation, and backtracking algorithms.
+- **Queues** underpin BFS, message passing, and flow control.
+- **Priority queues** underpin Dijkstra's algorithm, Huffman coding, and task scheduling.
+- **Blocking queues** underpin thread pools, producer-consumer, and message middleware.
+
+`ArrayDeque` is the answer for 90% of everyday scenarios—fast, lean, versatile. When you need "priority processing," switch to `PriorityQueue`; when you need "handing off tasks across threads," switch to `BlockingQueue`. These three tools are enough to handle the vast majority of entry-and-exit scenarios.
+
+In the next chapter, we look at the `Collections` utility class—the "Swiss Army knife" of the collections framework—and the immutable factory methods introduced in Java 9+.

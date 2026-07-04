@@ -1,0 +1,452 @@
+---
+title: "反射机制"
+chapter: 56
+stage: "第十阶段"
+stageName: "反射与注解进阶"
+order: 1
+description: "掌握 Class 对象的三种获取方式、反射操作字段/方法/构造器、setAccessible 突破访问控制、反射与泛型、Array 类操作数组、反射的性能代价，并实现一个简易 ORM 框架"
+pubDate: 2026-07-03
+tags: ["Java", "反射", "Reflection", "Class", "ORM"]
+---
+
+# 反射机制
+
+欢迎来到第十阶段——**反射与注解进阶**。前面九个阶段我们写的代码都是"看得到"的：调用什么方法、访问什么字段，编译期就确定了。但 Java 还有一项"透视"能力——**反射（Reflection）**：在运行时动态地"看穿"一个类的结构，甚至调用它的私有成员。
+
+反射就像给了你一副 X 光眼镜。戴上它，类的字段、方法、构造器、注解都无所遁形。Spring 的 IoC、MyBatis 的 Mapper、JUnit 的测试发现、Lombok 的字节码增强——这些耳熟能详的框架，背后都靠反射撑起半边天。这一章我们就把反射从原理到实战一次说透。
+
+## 一、为什么需要反射
+
+先回答"为什么"。假设你在写一个框架，要让用户在自己的类上加个注解，框架就能自动创建实例、调用方法——你在写框架时根本不知道用户会写什么类。这种"运行时才知道类型"的场景，编译期写死的代码搞不定，必须有运行时"探查"的能力。
+
+典型场景：
+
+- **框架的 IoC 容器**——Spring 扫描带 `@Component` 的类，反射 new 出 Bean 注入。
+- **序列化/反序列化**——Jackson 把 JSON 字符串反射成对象。
+- **ORM**——MyBatis 把数据库行反射成实体。
+- **测试框架**——JUnit 扫描带 `@Test` 的方法反射调用。
+- **动态代理**——AOP 的底层就是反射 + 动态代理。
+
+一句话：**编译期写死的代码是"应用"，运行期动态操作的代码是"框架"**。反射是框架的灵魂。
+
+## 二、Class 对象：一切反射的起点
+
+每个类加载到 JVM 后，都会有一个唯一的 `Class` 对象——它是这个类的"户口本"，记录了类的所有元信息。反射的一切操作都从拿到 `Class` 对象开始。
+
+### 2.1 三种获取方式
+
+```java
+// 方式一: 类名.class  (编译期已知类型)
+Class<String> c1 = String.class;
+
+// 方式二: 实例.getClass()  (运行期从实例拿)
+String s = "hello";
+Class<?> c2 = s.getClass();
+
+// 方式三: Class.forName(全限定名)  (运行期从字符串拿, 最灵活)
+Class<?> c3 = Class.forName("java.lang.String");
+
+System.out.println(c1 == c2);   // true
+System.out.println(c2 == c3);   // true  —— 同一个类的 Class 对象全局唯一
+```
+
+三种方式拿到的 `Class` 对象是**同一个**（JVM 保证每个类的 Class 全局唯一）。区别在于"何时知道类型"：
+
+- `.class` —— 编译期已知，性能最高（编译器优化）。
+- `getClass()` —— 运行期从实例拿，常用于通用方法。
+- `Class.forName()` —— 运行期从字符串拿，最灵活但要做异常处理（类可能不存在）。
+
+`Class.forName()` 是框架最常用的——配置文件里写类名，运行时动态加载。JDBC 加载驱动就是这句 `Class.forName("com.mysql.cj.jdbc.Driver")`。
+
+### 2.2 Class 的常用方法
+
+```java
+Class<?> c = String.class;
+c.getName();              // java.lang.String  全限定名
+c.getSimpleName();        // String            简单名
+c.getSuperclass();        // class java.lang.Object  父类
+c.getInterfaces();        // 接口数组
+c.getFields();            // 所有 public 字段(含继承)
+c.getDeclaredFields();    // 本类声明的所有字段(含 private)
+c.getMethods();           // 所有 public 方法(含继承)
+c.getDeclaredMethods();   // 本类声明的所有方法
+c.getConstructors();      // 所有 public 构造器
+c.getDeclaredConstructors(); // 本类声明的所有构造器
+c.getModifiers();         // 修饰符(public/static/final 的位掩码)
+c.isInterface();          // 是否接口
+c.isArray();              // 是否数组
+c.isRecord();             // Java 14+ 是否 record
+```
+
+注意 `getXxx` 和 `getDeclaredXxx` 的区别——这是反射最易踩的坑之一：
+
+- `getXxx()` —— 只返回 **public** 成员，**包括继承的**。
+- `getDeclaredXxx()` —— 返回**本类声明**的所有成员（含 private），**不包括继承的**。
+
+## 三、反射操作字段
+
+拿到 `Class` 后，就能反射读写对象的字段。
+
+```java
+public class User {
+    private String name = "默认";
+    public int age;
+}
+
+Class<?> c = User.class;
+User u = new User();
+
+// 1. 获取字段 (getDeclaredField 能拿 private)
+Field nameField = c.getDeclaredField("name");
+Field ageField = c.getField("age");   // public, 可直接 getField
+
+// 2. 突破 private 访问控制
+nameField.setAccessible(true);
+
+// 3. 读字段
+Object nameVal = nameField.get(u);   // 等价于 u.name
+System.out.println(nameVal);         // 默认
+
+// 4. 写字段
+nameField.set(u, "张三");             // 等价于 u.name = "张三"
+ageField.set(u, 18);
+System.out.println(u.name + " " + u.age);   // 张三 18
+```
+
+`setAccessible(true)` 是反射的"破墙术"——它会绕过 Java 的访问检查。这就是为什么反射能调用 `private` 成员。Java 9+ 的模块系统对这点做了限制，但 `--add-opens` 仍可放开。
+
+## 四、反射操作方法
+
+```java
+public class Calculator {
+    public int add(int a, int b) { return a + b; }
+    private String secret() { return "私密"; }
+}
+
+Calculator calc = new Calculator();
+Class<?> c = calc.getClass();
+
+// 1. 获取方法 (方法名 + 参数类型)
+Method add = c.getMethod("add", int.class, int.class);
+Method secret = c.getDeclaredMethod("secret");
+
+// 2. 调用
+Object result = add.invoke(calc, 3, 5);   // 等价于 calc.add(3, 5)
+System.out.println(result);                // 8
+
+// 3. 调用私有方法
+secret.setAccessible(true);
+Object s = secret.invoke(calc);
+System.out.println(s);                      // 私密
+```
+
+`invoke(Object obj, Object... args)`——第一个参数是接收者（实例），静态方法传 `null`；后面是参数。`getMethod` 要指定**方法名 + 参数类型**——因为 Java 有重载，光靠名字不够。
+
+## 五、反射操作构造器
+
+```java
+public class Person {
+    private String name;
+    private int age;
+    public Person() { this.name = "无参"; }
+    public Person(String name, int age) { this.name = name; this.age = age; }
+}
+
+Class<?> c = Person.class;
+
+// 1. 获取构造器 (按参数类型)
+Constructor<?> noArg = c.getDeclaredConstructor();
+Constructor<?> twoArg = c.getDeclaredConstructor(String.class, int.class);
+
+// 2. 反射创建对象
+Object p1 = noArg.newInstance();                 // 无参构造
+Object p2 = twoArg.newInstance("李四", 20);       // 有参构造
+
+System.out.println(((Person) p1).name);          // 无参
+System.out.println(((Person) p2).name);          // 李四
+```
+
+Java 9+ 推荐用 `Constructor.newInstance()` 而不是过时的 `Class.newInstance()`——后者把构造器的异常直接抛出，破坏了"构造异常应该被包装"的约定。
+
+## 六、setAccessible：突破访问控制
+
+`setAccessible(true)` 是反射最强大的能力之一。它绕过 `private`/`protected`/包级私有 的访问限制，让你能直接读写私有字段、调用私有方法、调用私有构造器。
+
+```java
+public class SecretBox {
+    private String secret = "我的小秘密";
+    private SecretBox() {}   // 私有构造, 外部 new 不出来
+}
+
+Class<?> c = SecretBox.class;
+Constructor<?> ctor = c.getDeclaredConstructor();
+ctor.setAccessible(true);                   // 突破私有构造
+SecretBox box = (SecretBox) ctor.newInstance();
+
+Field f = c.getDeclaredField("secret");
+f.setAccessible(true);                       // 突破私有字段
+System.out.println(f.get(box));              // 我的小秘密
+f.set(box, "已经被偷看");
+System.out.println(f.get(box));              // 已经被偷看
+```
+
+这就是为什么反射既能"造物"（new 私有构造的对象），也能"窥私"（读 private 字段）。框架的 ORM、序列化都靠它。
+
+**注意**：Java 9+ 模块系统对 `setAccessible` 做了限制——对 JDK 内部模块（如 `java.base`）的 `private` 成员调用 `setAccessible(true)` 会抛 `InaccessibleObjectException`。要解开需要在启动参数加 `--add-opens java.base/java.lang=ALL-UNNAMED`。
+
+## 七、反射与泛型
+
+泛型在运行时**擦除**，但反射能从 `Signature` 属性读回泛型信息（上一章字节码讲过）。
+
+```java
+public class Box<T> {
+    private T value;
+    public void set(T value) { this.value = value; }
+    public T get() { return value; }
+    public List<String> names() { return new ArrayList<>(); }
+}
+
+Class<?> c = Box.class;
+
+// 字段的泛型类型 (ParameterizedType)
+Field valueField = c.getDeclaredField("value");
+System.out.println(valueField.getGenericType());   // T  (TypeVariable)
+
+// 方法的泛型参数类型
+Method setMethod = c.getMethod("set", Object.class);   // 擦除成 Object
+System.out.println(setMethod.getGenericParameterTypes()[0]);  // T
+
+// 方法的泛型返回类型
+Method namesMethod = c.getMethod("names");
+System.out.println(namesMethod.getGenericReturnType());  // java.util.List<String>
+System.out.println(namesMethod.getReturnType());         // interface java.util.List (擦除)
+```
+
+`getGenericType()` 返回 `java.lang.reflect.Type`——可能是 `Class`（普通类型）、`ParameterizedType`（`List＜String＞`）、`TypeVariable＜T＞`（`T`）、`GenericArrayType`（`T[]`）等。这是 Jackson、Gson 反序列化泛型集合的关键。
+
+## 八、Array 类：反射操作数组
+
+`java.lang.reflect.Array` 提供了数组反射操作——创建数组、读写元素、获取长度。常用于不知道数组类型的通用方法。
+
+```java
+// 1. 反射创建数组
+Object intArr = Array.newInstance(int.class, 5);   // new int[5]
+Array.set(intArr, 0, 42);
+Array.set(intArr, 1, 99);
+System.out.println(Array.get(intArr, 0));   // 42
+System.out.println(Array.getLength(intArr)); // 5
+
+// 2. 处理"可能是数组也可能不是"的通用场景
+Object maybeArr = new String[]{"a", "b", "c"};
+if (maybeArr.getClass().isArray()) {
+    int len = Array.getLength(maybeArr);
+    for (int i = 0; i < len; i++) {
+        System.out.println(Array.get(maybeArr, i));
+    }
+}
+```
+
+为什么需要它？写一个通用 `toString(Object obj)` 时，`obj` 可能是 `int[]`、`String[]`、`Object[]`——不能直接强转成 `Object[]`（基本类型数组不行），用 `Array` 才能统一处理。
+
+## 九、反射的性能代价
+
+反射不是免费的午餐。它的开销远大于直接调用：
+
+- **方法查找**——`getMethod` 要遍历方法表，按名字+签名匹配。
+- **参数装箱**——`invoke` 的参数是 `Object...`，基本类型要装箱。
+- **访问检查**——每次 `invoke` 都做访问检查（`setAccessible(true)` 后可省）。
+- **JIT 难优化**——反射调用对 JIT 来说不透明，难以内联。
+
+实测下来反射调用比直接调用**慢 10~100 倍**（具体看场景和 JIT 状态）。下面代码会演示这个差距。
+
+**优化策略**：
+
+1. **缓存 `Method`/`Field` 对象**——查找一次，反复用。
+2. **`setAccessible(true)`**——跳过访问检查，能省 20%~50%。
+3. **`MethodHandle`**（Java 7+）——比反射快，接近直接调用。
+4. **`VarHandle`**（Java 9+）——字段访问的轻量方案。
+5. **代码生成**——ASM/ByteBuddy 生成字节码，最彻底（Spring 5+ 的反射优化）。
+
+## 十、实战：简易 ORM 框架
+
+理论够了，来点实战。我们用注解 + 反射实现一个简易 ORM——把对象映射成 `Map`，类似 MyBatis 的结果映射。
+
+<CodeRunner code={`import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+
+// 自定义注解: 标记表名和列名
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@interface Table {
+    String value();
+}
+
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+@interface Column {
+    String value();
+}
+
+@Table("t_user")
+class User {
+    @Column("user_id")
+    private int id;
+    @Column("user_name")
+    private String name;
+    @Column("user_age")
+    private int age;
+    // 未标注解的字段不会被映射
+    private String ignoreMe = "我不映射";
+
+    public User() {}
+    public User(int id, String name, int age) {
+        this.id = id; this.name = name; this.age = age;
+    }
+    @Override
+    public String toString() {
+        return "User{id=" + id + ", name='" + name + "', age=" + age + "}";
+    }
+}
+
+// 简易 ORM 核心
+class MiniOrm {
+    // 对象 -> Map (模拟把对象存到数据库行)
+    public static Map<String, Object> toRow(Object obj) throws Exception {
+        Map<String, Object> row = new LinkedHashMap<>();
+        Class<?> c = obj.getClass();
+        for (Field f : c.getDeclaredFields()) {
+            Column col = f.getAnnotation(Column.class);
+            if (col == null) continue;   // 没标注解, 跳过
+            f.setAccessible(true);
+            row.put(col.value(), f.get(obj));
+        }
+        return row;
+    }
+
+    // Map -> 对象 (模拟从数据库行读出对象)
+    public static <T> T fromRow(Map<String, Object> row, Class<T> clazz) throws Exception {
+        Constructor<T> ctor = clazz.getDeclaredConstructor();
+        ctor.setAccessible(true);
+        T obj = ctor.newInstance();
+        for (Field f : clazz.getDeclaredFields()) {
+            Column col = f.getAnnotation(Column.class);
+            if (col == null) continue;
+            Object val = row.get(col.value());
+            if (val != null) {
+                f.setAccessible(true);
+                f.set(obj, val);
+            }
+        }
+        return obj;
+    }
+
+    // 读表名
+    public static String tableName(Class<?> clazz) {
+        Table t = clazz.getAnnotation(Table.class);
+        return t != null ? t.value() : clazz.getSimpleName().toLowerCase();
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 简易 ORM 框架演示 ===\\n");
+
+        User u = new User(1, "张三", 20);
+        System.out.println("原始对象: " + u);
+
+        // 1. 对象 -> Map (模拟存库)
+        Map<String, Object> row = MiniOrm.toRow(u);
+        System.out.println("表名: " + MiniOrm.tableName(User.class));
+        System.out.println("映射成行 (Map): " + row);
+
+        // 2. Map -> 对象 (模拟读库)
+        User u2 = MiniOrm.fromRow(row, User.class);
+        System.out.println("从行还原对象: " + u2);
+
+        // 3. 性能对比: 反射 vs 直接调用
+        System.out.println("\\n=== 性能对比: 反射 vs 直接调用 ===");
+        int times = 10_000_000;
+        Calculator calc = new Calculator();
+
+        // 直接调用
+        long t1 = System.nanoTime();
+        long sum1 = 0;
+        for (int i = 0; i < times; i++) sum1 += calc.add(i, i);
+        long directNs = System.nanoTime() - t1;
+
+        // 反射调用 (缓存 Method)
+        Method add = Calculator.class.getMethod("add", int.class, int.class);
+        add.setAccessible(true);
+        long t2 = System.nanoTime();
+        long sum2 = 0;
+        for (int i = 0; i < times; i++) {
+            sum2 += (int) add.invoke(calc, i, i);
+        }
+        long reflectNs = System.nanoTime() - t2;
+
+        System.out.printf("直接调用: %d 次, 耗时 %d ms, sum=%d%n",
+            times, directNs / 1_000_000, sum1);
+        System.out.printf("反射调用: %d 次, 耗时 %d ms, sum=%d%n",
+            times, reflectNs / 1_000_000, sum2);
+        System.out.printf("反射慢约 %.1f 倍%n", reflectNs / (double) directNs);
+
+        // 4. 反射读泛型信息
+        System.out.println("\\n=== 反射读泛型信息 ===");
+        Method namesMethod = Box.class.getMethod("names");
+        System.out.println("Box.names() 擦除返回类型: " + namesMethod.getReturnType());
+        System.out.println("Box.names() 泛型返回类型: " + namesMethod.getGenericReturnType());
+
+        // 5. Array 反射操作
+        System.out.println("\\n=== Array 反射操作 ===");
+        Object arr = Array.newInstance(String.class, 3);
+        Array.set(arr, 0, "a");
+        Array.set(arr, 1, "b");
+        Array.set(arr, 2, "c");
+        System.out.println("数组类型: " + arr.getClass().getSimpleName()
+            + ", 长度: " + Array.getLength(arr));
+        for (int i = 0; i < Array.getLength(arr); i++) {
+            System.out.println("  [" + i + "] = " + Array.get(arr, i));
+        }
+    }
+
+    static class Calculator { public int add(int a, int b) { return a + b; } }
+    static class Box<T> {
+        private T value;
+        public List<String> names() { return new ArrayList<>(); }
+    }
+}`} />
+
+> **观察重点**：
+> - **对象被映射成 `Map{user_id=1, user_name=张三, user_age=20}`**——`@Column` 注解的字段被反射读出来，没注解的 `ignoreMe` 被跳过。
+> - **从 `Map` 还原出 `User` 对象**——反射调无参构造 + 反射写字段，这就是 ORM 的核心逻辑。
+> - **反射比直接调用慢约几十倍**——一万次循环里差距明显，所以框架都要缓存 `Method` 对象。
+> - **`getGenericReturnType()` 能读出 `List＜String＞`**——泛型擦除后，反射仍能从 `Signature` 属性读回泛型。
+
+## 十一、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| `Class` 对象 | 每个类一个全局唯一，反射的起点 |
+| 三种获取方式 | `.class` / `getClass()` / `Class.forName()` |
+| `getField` vs `getDeclaredField` | 前者只 public 含继承，后者本类所有含 private |
+| `setAccessible(true)` | 绕过访问检查，能调 private |
+| `Method.invoke` | 反射调方法，静态方法传 `null` |
+| `Constructor.newInstance` | 反射创建对象，Java 9+ 推荐 |
+| `getGenericType` | 读泛型签名（Signature 属性） |
+| `Array.newInstance` | 反射创建/操作数组 |
+| 性能代价 | 比直接调用慢 10~100 倍，要缓存 Method |
+
+**记忆口诀**：
+
+- **三种拿 Class**——`.class`、`getClass()`、`forName()`，三种用法三种时机。
+- **Declared 看本类**——`getDeclaredXxx` 只看本类但能拿 private，`getXxx` 看 public 含继承。
+- **`setAccessible(true)` 破墙**——访问控制瞬间失效。
+- **反射慢在查找和装箱**——缓存 `Method`、`setAccessible(true)` 是优化两板斧。
+- **泛型擦除但 Signature 留底**——`getGenericType` 能读回 `List＜String＞`。
+
+## 结语：反射是框架的灵魂
+
+这一章我们把反射从原理到实战过了一遍。反射就像 Java 的"自省"能力——程序在运行时审视自己的结构。它慢、它不安全、它破坏封装，但它**灵活**——灵活到能撑起整个 Spring 生态。
+
+下一章我们继续在反射的基础上，看 Java 的另一项"魔法"——**动态代理**：在运行时凭空生成一个实现指定接口的代理类，让你能在不修改原代码的前提下，给方法调用加钩子。AOP 的底层就是它。

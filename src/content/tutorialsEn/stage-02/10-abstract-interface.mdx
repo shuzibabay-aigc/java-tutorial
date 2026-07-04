@@ -1,0 +1,495 @@
+---
+title: "Abstract Classes and Interfaces"
+chapter: 10
+stage: "Stage 2"
+stageName: "Object-Oriented Programming"
+order: 5
+description: "Master abstract classes, interfaces, default methods, static/private methods, and functional interfaces, and understand the is-a vs can-do design choice"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "抽象类", "接口", "函数式接口", "default"]
+---
+
+# Abstract Classes and Interfaces
+
+In the last chapter we used `interface PaymentMethod` to design a payment system and experienced the power of polymorphism. But you may have a question: what's the difference between an interface and the abstract parent class we learned about earlier? When should you use an interface, and when an abstract class? This chapter will thoroughly clarify these two "abstraction tools".
+
+Imagine a coffee master writing a "Coffee Brewing Manual". Some parts she writes concretely — "water temperature 92°C", "extract for 25 seconds"; some parts she only writes the table of contents, leaving the specific recipes for her apprentices to fill in — "Chapter 1: Extraction of espresso (please complete on your own)". An **abstract class** is like this manual — it can have both "concrete content" and "blanks to be filled"; an **interface** is more like a "recipe checklist" — it only lists "which steps must be done", not caring how you do them.
+
+In this chapter we'll dig into the essence of abstract classes and interfaces, learn about Java 8's `default` methods, Java 9's private methods, and functional interfaces — the cornerstone of Java functional programming.
+
+## 1. Abstract Classes (abstract class)
+
+### 1.1 Why We Need Abstract Classes
+
+Consider a `Shape` class with an `area()` method. But "shape" itself is abstract — rectangles, circles, and triangles all have area, but what is "the area of a shape"? It's meaningless. What should the body of `Shape`'s `area()` method contain?
+
+```java
+class Shape {
+    public double area() {
+        return 0;   // 没意义的占位实现，纯粹是浪费
+    }
+}
+```
+
+A method where "the parent can't give a meaningful implementation but subclasses must implement one" is an **abstract method**. A class that contains abstract methods must be declared **abstract**.
+
+### 1.2 Defining an Abstract Class
+
+Use the `abstract` keyword:
+
+```java
+public abstract class Shape {
+    // 抽象方法：只有声明，没有方法体
+    public abstract double area();
+
+    public abstract double perimeter();
+
+    // 普通方法：可以有具体实现
+    public void describe() {
+        System.out.println("面积：" + area() + "，周长：" + perimeter());
+    }
+}
+```
+
+### 1.3 Rules for Abstract Classes
+
+- **Cannot be instantiated**: `new Shape()` is a compile error. An abstract class is "incomplete" and must be completed by a subclass before it can be used.
+- **May have no abstract methods**: used purely as a "non-instantiable parent class".
+- **A class with abstract methods must be declared abstract**.
+- **Subclasses must implement all abstract methods**, otherwise the subclass must also be declared abstract.
+
+```java
+public class Circle extends Shape {
+    private double radius;
+
+    public Circle(double radius) {
+        this.radius = radius;
+    }
+
+    @Override
+    public double area() {
+        return Math.PI * radius * radius;
+    }
+
+    @Override
+    public double perimeter() {
+        return 2 * Math.PI * radius;
+    }
+}
+
+public class Rectangle extends Shape {
+    private double width, height;
+
+    public Rectangle(double width, double height) {
+        this.width = width;
+        this.height = height;
+    }
+
+    @Override
+    public double area() { return width * height; }
+
+    @Override
+    public double perimeter() { return 2 * (width + height); }
+}
+```
+
+Now you can use them polymorphically:
+
+```java
+Shape s1 = new Circle(5);
+Shape s2 = new Rectangle(3, 4);
+s1.describe();   // 面积：78.54，周长：31.42
+s2.describe();   // 面积：12.0，周长：14.0
+```
+
+### 1.4 The "Template Method" Pattern of Abstract Classes
+
+A classic use of abstract classes is the **Template Method pattern**: the parent defines the skeleton of an algorithm, and subclasses fill in the details.
+
+```java
+public abstract class Beverage {
+    // 模板方法：final 防止子类改写流程
+    public final void prepare() {
+        boilWater();
+        brew();          // 抽象方法，子类实现
+        pourInCup();
+        addCondiments(); // 抽象方法，子类实现
+    }
+
+    private void boilWater() { System.out.println("烧水"); }
+    private void pourInCup() { System.out.println("倒入杯中"); }
+
+    protected abstract void brew();
+    protected abstract void addCondiments();
+}
+
+public class Tea extends Beverage {
+    @Override
+    protected void brew() { System.out.println("泡茶叶"); }
+    @Override
+    protected void addCondiments() { System.out.println("加柠檬"); }
+}
+
+public class Coffee extends Beverage {
+    @Override
+    protected void brew() { System.out.println("冲咖啡粉"); }
+    @Override
+    protected void addCondiments() { System.out.println("加糖和奶"); }
+}
+```
+
+`prepare()` defines the fixed flow of "boil water → brew → pour in cup → add condiments"; subclasses only care about "what to brew" and "what to add". This is the value of abstract classes — **providing shared implementation while leaving extension points open**.
+
+## 2. Interfaces (interface)
+
+### 2.1 Defining an Interface
+
+An interface is a "purer" abstraction than an abstract class — it **only defines contracts** (method signatures) and doesn't care about implementation. Before Java 8, all methods in an interface were abstract; after Java 8, `default` and `static` methods are allowed; after Java 9, `private` methods are allowed.
+
+```java
+public interface Flyable {
+    void fly();    // 默认 public abstract，无需写修饰符
+}
+
+public interface Swimmable {
+    void swim();
+}
+```
+
+### 2.2 Implementing an Interface
+
+Use the `implements` keyword to implement an interface; all abstract methods must be implemented:
+
+```java
+public class Duck implements Flyable, Swimmable {
+    @Override
+    public void fly() { System.out.println("鸭子飞"); }
+
+    @Override
+    public void swim() { System.out.println("鸭子游"); }
+}
+```
+
+Note: **a class can implement multiple interfaces** (making up for Java's single-inheritance limit), but can only inherit from one class. A duck can both fly and swim, so it implements both `Flyable` and `Swimmable`.
+
+### 2.3 Characteristics of Interfaces
+
+- Methods in an interface are `public abstract` by default (the modifiers can be omitted).
+- Fields in an interface are `public static final` by default (i.e. constants) and must be initialized.
+- An interface cannot have constructors (you can't `new` one, but it can have `static` factory methods).
+- An interface can extend multiple parent interfaces: `interface C extends A, B { ... }`.
+
+```java
+public interface Constants {
+    int MAX_SIZE = 100;   // 等价于 public static final int MAX_SIZE = 100
+}
+```
+
+> ⚠️ Don't put fields in an interface — this is an outdated design. Modern Java interfaces should only define behavior; put constants in a dedicated class or enum.
+
+## 3. Default Methods in Interfaces (default, Java 8+)
+
+### 3.1 Solving the Interface Evolution Problem
+
+Imagine you write a `CoffeeMaker` interface implemented by 100 classes. One day you want to add a new method `clean()` to it — if added as an abstract method, all 100 classes must change! This is the "interface evolution" problem.
+
+Java 8 introduced **default methods**: marked with `default`, providing a default implementation that subclasses can choose to override or use directly.
+
+```java
+public interface CoffeeMaker {
+    void brew();
+
+    // 默认方法：有方法体
+    default void clean() {
+        System.out.println("执行标准清洁流程");
+    }
+}
+```
+
+```java
+public class SimpleMaker implements CoffeeMaker {
+    @Override
+    public void brew() { System.out.println("冲咖啡"); }
+    // 不重写 clean()，使用默认实现
+}
+
+public class PremiumMaker implements CoffeeMaker {
+    @Override
+    public void brew() { System.out.println("冲精品咖啡"); }
+
+    @Override
+    public void clean() { System.out.println("深度清洁"); }   // 重写
+}
+```
+
+`SimpleMaker` doesn't override `clean()`, so the default implementation runs when called; `PremiumMaker` overrides it and runs its own version. **Default methods let an interface evolve in a backward-compatible way** — this is exactly how Java 8 could add `stream()` and other methods to the `Collection` interface without breaking old code.
+
+### 3.2 Multiple-Inheritance Conflicts of Default Methods
+
+What happens if a class implements two interfaces that have the same-named default method?
+
+```java
+interface A {
+    default void hello() { System.out.println("A"); }
+}
+interface B {
+    default void hello() { System.out.println("B"); }
+}
+
+class C implements A, B {
+    // 编译错误！必须解决冲突
+    @Override
+    public void hello() {
+        A.super.hello();   // 显式选择 A 的版本
+    }
+}
+```
+
+Resolution: the subclass **must override** the conflicting method, and can call a specific interface's version with `InterfaceName.super.methodName()`.
+
+## 4. Static Methods in Interfaces (Java 8+)
+
+An interface can have `static` methods, serving as utility methods for that interface:
+
+```java
+public interface CoffeeMaker {
+    void brew();
+
+    // 静态方法：通过接口名调用
+    static CoffeeMaker getDefault() {
+        return new SimpleMaker();
+    }
+
+    static void printUsage() {
+        System.out.println("使用方法：先 brew()，再 clean()");
+    }
+}
+
+// 调用：
+CoffeeMaker.printUsage();
+CoffeeMaker maker = CoffeeMaker.getDefault();
+```
+
+Static methods belong to the interface itself and are not inherited by implementing classes. This is similar to static methods in classes. The `java.util.Comparator` interface has static factory methods like `Comparator.naturalOrder()` and `Comparator.reverseOrder()`.
+
+## 5. Private Methods in Interfaces (Java 9+)
+
+As of Java 9, an interface can have `private` methods (including private static methods), used to **reuse code within the interface** and avoid duplication among default methods:
+
+```java
+public interface CoffeeMaker {
+    default void brewLatte() {
+        prepareEspresso();
+        System.out.println("加牛奶");
+    }
+
+    default void brewCappuccino() {
+        prepareEspresso();
+        System.out.println("加奶泡");
+    }
+
+    // 私有方法：抽取公共逻辑，不暴露给实现类
+    private void prepareEspresso() {
+        System.out.println("萃取浓缩咖啡");
+    }
+
+    // 私有静态方法：供 static 方法复用
+    private static void log(String msg) {
+        System.out.println("[LOG] " + msg);
+    }
+}
+```
+
+Private methods can only be called from within the interface by default or static methods; implementing classes cannot see or use them.
+
+## 6. Abstract Class vs Interface: When to Use Which
+
+This is a classic OOP design question. The core difference is "is-a" vs "can-do".
+
+### 6.1 Comparison Table
+
+| Feature | Abstract class | Interface |
+| --- | --- | --- |
+| Relationship | is-a (is a kind of) | can-do (is able to do) |
+| Inheritance | Single inheritance (a class can extend one abstract class) | Multiple implementation (a class can implement multiple interfaces) |
+| Fields | Any type, can be instance variables | Only `public static final` constants |
+| Methods | Abstract + concrete methods | Abstract + default + static + private |
+| Constructors | Yes | No |
+| State | Yes (can hold instance state) | No (pure contract) |
+| Design semantics | "What it is" — defines essence | "What it can do" — defines capability |
+
+### 6.2 The Design Choice
+
+- **Use an abstract class** when: a group of classes has a strong is-a relationship and needs to share **state** and **code**. For example, `AbstractList` is the parent of `ArrayList` and `LinkedList`, and they share a lot of list-operation code.
+
+- **Use an interface** when: you want to define a **capability** that spans different inheritance hierarchies. For example, `Comparable` (comparable), `Iterable` (iterable), `Serializable` (serializable) — any class might have these capabilities, regardless of its class hierarchy.
+
+A classic example: `ArrayList` extends `AbstractList` (is-a, the essence of a list), and at the same time implements `List`, `Cloneable`, `Serializable`, and other interfaces (can-do, multiple capabilities). The former provides code reuse; the latter provides capability contracts.
+
+### 6.3 A Common Misconception
+
+"Interfaces have no code-reuse ability" — this was true before Java 8. With `default` methods, interfaces can also provide code reuse. For example, the `sort` and `replaceAll` methods of the `List` interface are default implementations that all `List` implementations can reuse. But interfaces still **cannot have state** (instance fields) — this is the fundamental difference from abstract classes.
+
+## 7. Functional Interfaces (@FunctionalInterface)
+
+### 7.1 Definition
+
+A **Functional Interface** is an interface with **exactly one abstract method** (default and static methods don't count). This kind of interface is the basis for Java 8 Lambda expressions — the type of a Lambda is a functional interface.
+
+```java
+@FunctionalInterface
+public interface Comparator<T> {
+    int compare(T o1, T o2);    // 唯一的抽象方法
+    // 还可以有多个 default 方法
+}
+```
+
+`@FunctionalInterface` is an annotation telling the compiler "this is a functional interface". If you accidentally add a second abstract method, the compiler immediately errors. **It is recommended to add this annotation explicitly**, similar to the role of `@Override`.
+
+### 7.2 Built-in Functional Interfaces in Java
+
+The `java.util.function` package provides many commonly used functional interfaces, avoiding the need to redefine them:
+
+| Interface | Abstract method | Meaning |
+| --- | --- | --- |
+| `Supplier＜T＞` | `T get()` | Provider: no args, returns T |
+| `Consumer＜T＞` | `void accept(T)` | Consumer: takes T, returns nothing |
+| `Function＜T,R＞` | `R apply(T)` | Function: T → R |
+| `Predicate＜T＞` | `boolean test(T)` | Predicate: T → boolean |
+| `BiFunction＜T,U,R＞` | `R apply(T,U)` | Two-argument function |
+| `UnaryOperator＜T＞` | `T apply(T)` | Unary operator: T → T |
+
+### 7.3 Working with Lambda
+
+The biggest value of functional interfaces is their use with Lambda expressions:
+
+```java
+// 传统写法：匿名内部类
+Comparator<String> cmp1 = new Comparator<>() {
+    public int compare(String a, String b) {
+        return a.length() - b.length();
+    }
+};
+
+// Lambda 写法：简洁得多
+Comparator<String> cmp2 = (a, b) -> a.length() - b.length();
+```
+
+The detailed syntax of Lambda is covered in a later chapter; here you only need to understand: **a functional interface is the "type" of a Lambda** — without functional interfaces, there would be no Lambda.
+
+## 8. Comprehensive Hands-On
+
+Putting this chapter together, here's a complete example:
+
+<CodeRunner code={`public class Main {
+    // 1. 抽象类：定义"是什么" + 共享代码
+    static abstract class Animal {
+        protected String name;
+
+        public Animal(String name) {
+            this.name = name;
+        }
+
+        // 抽象方法：子类必须实现
+        public abstract String sound();
+
+        // 模板方法：final 防止改写
+        public final void introduce() {
+            System.out.println("我是" + name + "，我会" + sound());
+        }
+    }
+
+    // 2. 接口：定义"能做什么"
+    interface Swimmable {
+        void swim();
+
+        // 默认方法
+        default void dive() {
+            System.out.println("潜水ing");
+        }
+    }
+
+    interface Flyable {
+        void fly();
+
+        // 静态方法
+        static Flyable getDefault() {
+            return () -> System.out.println("默认飞行");
+        }
+    }
+
+    // 3. 子类：继承抽象类 + 实现多个接口
+    static class Duck extends Animal implements Swimmable, Flyable {
+        public Duck(String name) {
+            super(name);
+        }
+
+        @Override
+        public String sound() { return "嘎嘎"; }
+
+        @Override
+        public void swim() { System.out.println(name + " 在游泳"); }
+
+        @Override
+        public void fly() { System.out.println(name + " 在飞"); }
+    }
+
+    // 4. 函数式接口
+    @FunctionalInterface
+    interface Greeter {
+        void greet(String name);
+
+        // 可以有 default 方法
+        default void greetLoudly(String name) {
+            greet(name.toUpperCase() + "!!!");
+        }
+    }
+
+    public static void main(String[] args) {
+        // 抽象类 + 接口的多态
+        Duck duck = new Duck("唐老鸭");
+        duck.introduce();      // 模板方法
+        duck.swim();
+        duck.fly();
+        duck.dive();           // 接口的默认方法
+
+        System.out.println("\\n--- 多态演示 ---");
+        Animal a = duck;       // 向上转型为抽象类
+        a.introduce();
+
+        Swimmable s = duck;    // 向上转型为接口
+        s.swim();
+
+        Flyable f = duck;
+        f.fly();
+
+        System.out.println("\\n--- 函数式接口 + Lambda ---");
+        Greeter g = n -> System.out.println("你好，" + n + "！");
+        g.greet("Java");
+        g.greetLoudly("java");   // 默认方法
+
+        System.out.println("\\n--- 接口静态方法 ---");
+        Flyable def = Flyable.getDefault();
+        def.fly();
+    }
+}`} />
+
+Notice this code: `Duck` is both an `Animal` (is-a) and `Swimmable`/`Flyable` (can-do). It extends the abstract class to gain the `introduce` template method, and implements interfaces to gain the ability to swim and fly. `Greeter` is a functional interface that can be instantiated concisely with a Lambda. This is the complete picture of modern Java's abstraction tools.
+
+## 9. Chapter Summary
+
+| Concept | Key Point |
+| --- | --- |
+| Abstract class | Modified with `abstract`, cannot be instantiated, can have abstract and concrete methods |
+| Interface | Defined with `interface`, pure contract, supports multiple implementation |
+| `default` method | Java 8+, default implementation in an interface, solves interface evolution |
+| `static` method | Java 8+, utility methods of an interface |
+| `private` method | Java 9+, code reuse within an interface |
+| is-a vs can-do | Abstract class expresses "what it is", interface expresses "what it can do" |
+| Functional interface | An interface with exactly one abstract method; the type of a Lambda |
+
+## Conclusion
+
+Abstract classes and interfaces are the two abstraction tools Java provides. They are not an "either-or" opposition, but "allies that fight together" — abstract classes provide code reuse and template skeletons, while interfaces define capability contracts and cross-hierarchy polymorphism. A well-designed system often uses both: abstract classes carry shared traits, interfaces express capabilities.
+
+In the next chapter, we turn our gaze to the "inside" of a class — **inner classes**. A class can be defined inside another class. This seemingly strange design carries important uses like the Builder pattern, closures, and event handling. It is one of the most delicate strokes in the Java language, and a must-pass on the road to advanced OOP.

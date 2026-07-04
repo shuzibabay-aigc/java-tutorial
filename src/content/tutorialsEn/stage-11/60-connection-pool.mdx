@@ -1,0 +1,410 @@
+---
+title: "Connection Pool"
+chapter: 60
+stage: "Stage 11"
+stageName: "Database and Networking"
+order: 2
+description: "Understand why connection pools are necessary, HikariCP configuration and internals, a Druid overview with monitoring, key connection-pool parameters, and simulate the core principles of a connection pool in code"
+pubDate: 2026-07-03
+tags: ["Java", "连接池", "HikariCP", "Druid", "数据库"]
+---
+
+# Connection Pool
+
+In the previous chapter, every JDBC operation called `DriverManager.getConnection` — behind that is establishing a TCP connection, database authentication, and session initialization, taking tens to hundreds of milliseconds. A web app handling hundreds of requests per second, each creating a new connection — the database would be crushed by the handshake overhead alone.
+
+The solution is the **Connection Pool**: pre-build a batch of connections and keep them around; whoever needs one borrows from the pool, and returns it when done — cycling like shared bikes. This chapter looks at why connection pools are necessary, how to use them, and the mainstream implementations HikariCP and Druid.
+
+## 1. Why Connection Pools Are Necessary
+
+First, let's quantify the cost of "creating a new connection each time":
+
+- **TCP three-way handshake** — the network round trip between client and server.
+- **Database authentication** — username/password verification, permission loading.
+- **Session initialization** — setting charset, timezone, transaction isolation level, etc.
+- **Closing the connection** — TCP four-way wave.
+
+All together, that's about 5–20ms for a local MySQL, and possibly 50–200ms for a remote database. For a 50ms SQL query, just building the connection eats 80% of the time — a classic case of "startup overhead exceeding business overhead."
+
+What a connection pool does:
+
+1. **At startup**, pre-build N connections and keep them around.
+2. **On borrow**, hand out an idle connection directly — an O(1) operation, no network handshake.
+3. **On return**, don't really close; mark as idle for next use.
+4. **Scale up/down on demand** — grow to the max during busy times, shrink to the min idle during quiet times.
+
+The effect: the cost of building connections is amortized over startup; at runtime, each borrow takes ＜ 1ms. That's the "magic" of connection pools.
+
+## 2. HikariCP: The Fastest Connection Pool
+
+**HikariCP** (the "light" connection pool) is a pool open-sourced by Brett Wooldridge in 2013, billed as the "fastest." Spring Boot 2.0+ ships with it by default. Its speed comes from:
+
+- **Bytecode-level optimization** — generates proxy classes with Javassist, avoiding reflection.
+- **ConcurrentBag** — a custom concurrent collection, faster than `BlockingQueue`.
+- **Lock-free design** — favors CAS over locks wherever possible.
+- **Lean code** — under 3000 lines of source, an order of magnitude smaller than DBCP.
+
+### 2.1 Basic Configuration
+
+```xml
+<dependency>
+    <groupId>com.zaxxer</groupId>
+    <artifactId>HikariCP</artifactId>
+    <version>5.1.0</version>
+</dependency>
+```
+
+```java
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import javax.sql.DataSource;
+import java.sql.Connection;
+
+HikariConfig config = new HikariConfig();
+config.setJdbcUrl("jdbc:mysql://localhost:3306/test");
+config.setUsername("root");
+config.setPassword("123456");
+config.setMaximumPoolSize(10);          // max connections
+config.setMinimumIdle(2);               // min idle connections
+config.setConnectionTimeout(30_000);    // get-connection timeout (ms)
+config.setIdleTimeout(600_000);         // idle connection timeout (ms)
+config.setMaxLifetime(1_800_000);       // max connection lifetime (ms)
+config.setPoolName("MyHikariPool");
+
+DataSource ds = new HikariDataSource(config);
+
+// borrow -> use -> return (close actually returns it)
+try (Connection conn = ds.getConnection()) {
+    // business SQL...
+}
+```
+
+Note a key point — **the `Connection` borrowed from the pool, when you call `close()`, isn't really closed; it's returned to the pool**. This is the pool's "sleight of hand": business code looks exactly like raw JDBC, but the semantics of `close` are quietly swapped.
+
+### 2.2 HikariCP Key Parameters
+
+| Parameter | Meaning | Recommended |
+| --- | --- | --- |
+| `maximumPoolSize` | Max connections | CPU cores × 2 + disk count (rule of thumb) |
+| `minimumIdle` | Min idle | Same as max (HikariCP recommends) |
+| `connectionTimeout` | Borrow timeout | 30s |
+| `idleTimeout` | Idle connection lifetime | 10min |
+| `maxLifetime` | Max connection lifetime | 30min (must be less than the DB's wait_timeout) |
+| `leakDetectionThreshold` | Leak detection threshold | 60s (for debugging) |
+
+**How to size maximumPoolSize?** This is a classic question. HikariCP's official rule of thumb (from the PostgreSQL team):
+
+```
+pool_size = (cores × 2) + effective_spindle_count
+```
+
+Why isn't bigger always better? Because more connections compete for the database CPU — context-switching overhead exceeds the parallelism gain. Generally 10–20 connections can hold up most applications.
+
+### 2.3 HikariCP Internals
+
+HikariCP's core data structure is the **ConcurrentBag** — a concurrent collection that supports "stealing":
+
+- On borrow, first check whether the current thread's ThreadLocal has a "dedicated" connection (recently used); if so, grab it directly.
+- If not, CAS-grab one from the shared queue.
+- If none, queue up to wait, or create a new one (if under max).
+- On return, mark it STATE_NOT_IN_USE and wake one waiting thread.
+
+This design avoids the lock contention of `BlockingQueue.poll` — threads first take their own "dedicated connection," reducing cross-thread handoff. That's why it's fast.
+
+## 3. Druid: Alibaba's Connection Pool
+
+**Druid** is Alibaba's open-source connection pool, widely used in China. Highlights:
+
+- **Built-in monitoring** — ships with a web console showing SQL execution stats, slow queries, and pool status.
+- **SQL firewall** — can intercept dangerous SQL like `DELETE FROM xxx` (no where clause).
+- **Rich configuration** — many more tuning parameters than HikariCP.
+
+```xml
+<dependency>
+    <groupId>com.alibaba</groupId>
+    <artifactId>druid</artifactId>
+    <version>1.2.20</version>
+</dependency>
+```
+
+```java
+DruidDataSource ds = new DruidDataSource();
+ds.setUrl("jdbc:mysql://localhost:3306/test");
+ds.setUsername("root");
+ds.setPassword("123456");
+ds.setInitialSize(2);          // initial connections
+ds.setMinIdle(2);              // min idle
+ds.setMaxActive(20);           // max active
+ds.setMaxWait(10_000);         // get timeout
+ds.setTimeBetweenEvictionRunsMillis(60_000);   // detection interval
+ds.setMinEvictableIdleTimeMillis(300_000);     // min idle time
+ds.setValidationQuery("SELECT 1");             // health-check SQL
+ds.setTestWhileIdle(true);                     // test while idle
+
+// start monitoring (built-in Servlet, configured in web apps)
+// StatViewServlet serves /druid/* for the monitoring page
+```
+
+Druid's monitoring is its killer feature — visit `/druid/datasource.html` to see:
+
+- Pool current/peak/active counts
+- SQL execution counts, average time, slowest SQL
+- Slow query logs
+- Error SQL statistics
+
+For tracking down SQL performance issues in production, Druid's monitoring is more intuitive than APM tools.
+
+## 4. HikariCP vs Druid
+
+| Aspect | HikariCP | Druid |
+| --- | --- | --- |
+| Performance | **Fastest** | Excellent (slightly behind Hikari) |
+| Monitoring | Weak (relies on Dropwizard Metrics) | **Strong** (built-in console) |
+| SQL firewall | None | **Yes** |
+| Config complexity | Simple | More options |
+| Spring Boot default | **Yes** | No (needs a starter) |
+| Usage in China | High | **Higher** |
+
+**Selection advice**:
+
+- Pursuing extreme performance, simple config → HikariCP (Spring Boot default).
+- Need monitoring, SQL firewall → Druid (common at large Chinese companies).
+- In practice the gap is small — use whichever you know better.
+
+## 5. Connection Pool Parameters In Depth
+
+Understanding a few key parameters matters for tuning:
+
+### 5.1 Max Connections `maximumPoolSize`/`maxActive`
+
+How many connections the pool can hold at most. Too small — concurrent requests queue up and time out; too large — database pressure spikes and things actually slow down. Usually 10–30, adjusted to the database instance size (a single MySQL instance typically caps at 100–500 connections, shared across applications).
+
+### 5.2 Min Idle `minimumIdle`/`minIdle`
+
+How many idle connections the pool keeps at minimum. Below this, it proactively creates more. HikariCP officially recommends `minimumIdle == maximumPoolSize` — a fixed-size pool, avoiding the latency of dynamic scaling.
+
+### 5.3 Get Timeout `connectionTimeout`/`maxWait`
+
+How long to wait when borrowing a connection. On timeout, throws `SQLTransientConnectionException`. This exception means "pool too small or SQL too slow."
+
+### 5.4 Idle Timeout `idleTimeout`
+
+How long an idle connection lives. Past this, it gets closed. Must be less than the database's `wait_timeout` (MySQL default 8 hours) — otherwise the database closes first while the pool still thinks the connection is good, and the next use fails with "Communications link failure."
+
+### 5.5 Max Lifetime `maxLifetime`
+
+How long a single connection can live at most. When reached, it's proactively rebuilt. Why is this needed? Because long-running connections can go "bad" from network jitter, database restarts, etc. — periodic rebuilding keeps them fresh. **Must be less than the database's `wait_timeout`** — this is the iron rule of configuration.
+
+### 5.6 Health Check `validationQuery`/`testWhileIdle`
+
+Periodically execute `SELECT 1` while idle to check whether a connection is healthy — unhealthy ones get evicted. HikariCP defaults to `Connection.isValid()` and needs no `validationQuery`; Druid does.
+
+## 6. Hands-On: Simulating Connection Pool Internals
+
+Below is a pure-Java simulation of a connection pool — the core is "pre-build + borrow + return."
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// 模拟一个数据库连接 (真实是 java.sql.Connection)
+class MockConnection implements AutoCloseable {
+    private static final AtomicLong SEQ = new AtomicLong();
+    final long id = SEQ.incrementAndGet();
+    private boolean closed = false;
+    private long lastUsedAt = System.currentTimeMillis();
+
+    void execute(String sql) {
+        if (closed) throw new IllegalStateException("连接已关闭: " + id);
+        lastUsedAt = System.currentTimeMillis();
+        System.out.println("    [连接#" + id + "] 执行: " + sql);
+    }
+
+    void reallyClose() {
+        closed = true;
+        System.out.println("    [连接#" + id + "] 真正关闭 (归还数据库)");
+    }
+
+    boolean isIdleLongerThan(long ms) {
+        return System.currentTimeMillis() - lastUsedAt > ms;
+    }
+
+    @Override
+    public void close() {
+        // 注意: 从池子借的连接, close 实际是归还 (由池子重写)
+        throw new UnsupportedOperationException("用 pool.releaseConnection 归还");
+    }
+}
+
+// 简易连接池
+class SimpleConnectionPool {
+    private final BlockingQueue<MockConnection> idle;
+    private final Set<MockConnection> all = ConcurrentHashMap.newKeySet();
+    private final int maxSize;
+    private final AtomicLong borrowCount = new AtomicLong();
+    private final AtomicLong waitCount = new AtomicLong();
+
+    public SimpleConnectionPool(int initialSize, int maxSize) {
+        this.maxSize = maxSize;
+        this.idle = new LinkedBlockingQueue<>();
+        for (int i = 0; i < initialSize; i++) {
+            MockConnection c = new MockConnection();
+            all.add(c);
+            idle.offer(c);
+        }
+        System.out.println("  [池] 初始化 " + initialSize + " 个连接, 最大 " + maxSize);
+    }
+
+    // 借连接 (带超时)
+    public MockConnection borrow(long timeoutMs) throws InterruptedException {
+        borrowCount.incrementAndGet();
+        MockConnection c = idle.poll();
+        if (c != null) {
+            System.out.println("  [池] 借出空闲连接 #" + c.id + " (无需新建)");
+            return c;
+        }
+        // 没空闲, 看能否扩容
+        if (all.size() < maxSize) {
+            c = new MockConnection();
+            all.add(c);
+            System.out.println("  [池] 扩容新建连接 #" + c.id + " (当前总数 " + all.size() + ")");
+            return c;
+        }
+        // 满了, 等待
+        waitCount.incrementAndGet();
+        System.out.println("  [池] 已达最大连接, 等待归还...");
+        c = idle.poll(timeoutMs, TimeUnit.MILLISECONDS);
+        if (c == null) {
+            throw new RuntimeException("获取连接超时! (borrow=" + borrowCount
+                + ", wait=" + waitCount + ")");
+        }
+        System.out.println("  [池] 等到归还的连接 #" + c.id);
+        return c;
+    }
+
+    // 归还连接 (注意: 不是真关!)
+    public void release(MockConnection c) {
+        if (!all.contains(c)) return;
+        System.out.println("  [池] 归还连接 #" + c.id + " (放回池中, 不真正关闭)");
+        idle.offer(c);
+    }
+
+    public int idleCount() { return idle.size(); }
+    public int totalCount() { return all.size(); }
+    public long borrowCount() { return borrowCount.get(); }
+    public long waitCount() { return waitCount.get(); }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 连接池原理演示 ===\\n");
+
+        SimpleConnectionPool pool = new SimpleConnectionPool(2, 4);
+
+        // 1. 基本借用/归还
+        System.out.println("\\n--- 1. 基本借用/归还 ---");
+        MockConnection c1 = pool.borrow(1000);
+        MockConnection c2 = pool.borrow(1000);
+        System.out.println("  池状态: 总数=" + pool.totalCount() + ", 空闲=" + pool.idleCount());
+
+        c1.execute("SELECT 1");
+        pool.release(c1);
+        System.out.println("  归还 c1 后: 总数=" + pool.totalCount() + ", 空闲=" + pool.idleCount());
+
+        MockConnection c3 = pool.borrow(1000);  // 复用 c1
+        System.out.println("  再次借用, 复用了空闲连接");
+
+        // 2. 扩容
+        System.out.println("\\n--- 2. 超过初始数, 触发扩容 ---");
+        MockConnection c4 = pool.borrow(1000);  // 需要新建 (第 3 个)
+        MockConnection c5 = pool.borrow(1000);  // 需要新建 (第 4 个, 达到 maxSize)
+        System.out.println("  池状态: 总数=" + pool.totalCount() + " (达到最大)");
+
+        // 3. 超过最大数, 需要等待
+        System.out.println("\\n--- 3. 超过最大连接, 等待归还 ---");
+        ExecutorService exec = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(2);
+
+        // 两个线程同时借第 5、6 个连接 (要等待)
+        exec.submit(() -> {
+            try {
+                start.await();
+                MockConnection c = pool.borrow(500);
+                System.out.println("  [线程A] 拿到连接 #" + c.id + ", 执行业务");
+                Thread.sleep(200);
+                pool.release(c);
+                done.countDown();
+            } catch (Exception e) {
+                System.out.println("  [线程A] 异常: " + e.getMessage());
+                done.countDown();
+            }
+        });
+        exec.submit(() -> {
+            try {
+                start.await();
+                MockConnection c = pool.borrow(500);
+                System.out.println("  [线程B] 拿到连接 #" + c.id + ", 执行业务");
+                Thread.sleep(200);
+                pool.release(c);
+                done.countDown();
+            } catch (Exception e) {
+                System.out.println("  [线程B] 异常: " + e.getMessage());
+                done.countDown();
+            }
+        });
+
+        start.countDown();
+        done.await();
+        exec.shutdown();
+
+        // 4. 释放所有, 看池状态
+        System.out.println("\\n--- 4. 释放剩余连接 ---");
+        pool.release(c2); pool.release(c3); pool.release(c4); pool.release(c5);
+        System.out.println("  最终: 总数=" + pool.totalCount() + ", 空闲=" + pool.idleCount());
+        System.out.println("  统计: 借用次数=" + pool.borrowCount() + ", 等待次数=" + pool.waitCount());
+
+        System.out.println("\\n=== 连接池关键点 ===");
+        System.out.println("1. close() 实际是归还, 不是真关 (这是连接池的核心障眼法)");
+        System.out.println("2. 借用顺序: 空闲队列 -> 扩容新建 -> 等待");
+        System.out.println("3. maximumPoolSize 是硬上限, 超了要等待");
+        System.out.println("4. connectionTimeout 是获取超时, 超时报错");
+        System.out.println("5. maxLifetime 要小于数据库 wait_timeout");
+        System.out.println("6. 生产用 HikariCP/Druid, 不要自己造轮子");
+    }
+}`} />
+
+> **Key observations**:
+> - **The 2 pre-built connections get borrowed repeatedly** — after `c1` is returned, the next borrow reuses the same connection (same id).
+> - **Exceeding the initial size triggers scaling** — the 3rd and 4th connections are newly created, up to `maxSize`.
+> - **Past maxSize, threads must wait** — when concurrently borrowing the 5th and 6th, they must wait for earlier ones to be returned.
+> - **`close()` is a return, not a real close** — this is the pool's core mechanism; business code using `try-with-resources` is just as safe.
+> - **Borrow/wait counts are tracked** — a high wait count means the pool is too small.
+
+## 7. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| Why a pool | Avoids per-call handshake overhead |
+| `close()` semantics | Returns, not really closes |
+| HikariCP | Fastest, Spring Boot default |
+| Druid | Alibaba's, with monitoring and firewall |
+| `maximumPoolSize` | Max connections, formula `cores×2+disks` |
+| `connectionTimeout` | Borrow timeout |
+| `maxLifetime` | Must be less than the DB's `wait_timeout` |
+| `validationQuery` | Health-check SQL (Druid uses it, HikariCP doesn't) |
+
+**Mnemonic**:
+
+- **The pool pre-builds connections** — built at startup, borrowed and returned at runtime.
+- **`close` is a return** — business code looks like raw JDBC, but the semantics are swapped.
+- **HikariCP is the fastest** — Spring Boot default.
+- **Druid has strong monitoring** — common at large Chinese companies.
+- **`maxLifetime ＜ wait_timeout`** — prevents the database from closing the connection first.
+- **Don't build your own pool** — HikariCP/Druid are good enough.
+
+## Closing: From Connection Pools to Networking
+
+This chapter looked at why connection pools are necessary and the mainstream implementations. In real projects you basically never write your own pool — just configure HikariCP or Druid. But understanding the principles helps you tune parameters and troubleshoot "get-connection timeout" type issues.
+
+The next chapter leaves databases behind and turns to network programming — **Socket and ServerSocket** — letting you write your own TCP/UDP servers.

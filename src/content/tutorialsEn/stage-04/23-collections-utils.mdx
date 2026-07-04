@@ -1,0 +1,381 @@
+---
+title: "The Collections Utility Class"
+chapter: 23
+stage: "Stage 4"
+stageName: "Collections Framework"
+order: 6
+description: "Master the Collections utility class for sorting/reversing/shuffling, immutable and synchronized wrappers, and Java 9+ List.of/Map.of/Set.of immutable factory methods and copyOf"
+pubDate: 2026-07-03
+tags: ["Java", "Collections", "不可变集合", "List.of", "Map.of", "Set.of", "同步包装"]
+---
+
+# The Collections Utility Class
+
+If the earlier `List`, `Set`, and `Map` are various "containers," then `Collections` is the "Swiss Army knife" for this set of containers—it provides a bunch of static utility methods that make containers easier to use: sorting, reversing, shuffling, searching, immutable wrappers, synchronized wrappers... In addition, the `List.of`/`Set.of`/`Map.of` factory methods introduced in Java 9 and `copyOf` in Java 10 make "creating an immutable collection" easier than ever.
+
+In this chapter, we take these tools out one by one and see what each is good for.
+
+## 1. Collections.sort: Sorting
+
+`Collections.sort(list)` is the classic sorting method. It requires elements to implement `Comparable`, or you can pass a `Comparator`:
+
+```java
+List<Integer> nums = new ArrayList<>(List.of(5, 1, 3, 2, 4));
+Collections.sort(nums);                 // [1, 2, 3, 4, 5]
+Collections.sort(nums, Comparator.reverseOrder());   // [5, 4, 3, 2, 1]
+```
+
+Under the hood: before Java 7 it used merge sort; from Java 7 onward it switched to **TimSort** (a hybrid of merge and insertion sort, particularly fast on "partially ordered" data). `List.sort()` actually converts the list to an array, sorts it, then writes it back—so `ArrayList` sorts quickly, while `LinkedList` sorts slowly (it has to convert to an array first).
+
+> 💡 **From Java 8 onward**, `list.sort(comparator)` is preferred—it's a default method on the `List` interface and is more "object-oriented" than `Collections.sort`.
+
+## 2. reverse and shuffle
+
+### 2.1 reverse: Reversing
+
+```java
+List<Integer> list = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+Collections.reverse(list);    // [5, 4, 3, 2, 1]
+```
+
+It's implemented by "swapping head and tail," O(n).
+
+### 2.2 shuffle: Shuffling
+
+```java
+Collections.shuffle(list);              // randomly shuffle
+Collections.shuffle(list, new Random(42));   // specify a random seed (reproducible)
+```
+
+The shuffling algorithm is the classic **Fisher-Yates**—traverse from back to front, swapping each element with a random position before it. This guarantees every permutation appears with equal probability.
+
+`shuffle` is commonly used in game development (card shuffling), machine learning (data shuffling), and random sampling.
+
+## 3. swap and fill
+
+```java
+List<Integer> list = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+Collections.swap(list, 0, 4);    // swap positions 0 and 4 → [5, 2, 3, 4, 1]
+
+Collections.fill(list, 0);       // fill everything with 0 → [0, 0, 0, 0, 0]
+```
+
+`swap` exchanges two positions; `fill` replaces all elements with a specified value. Simple but practical.
+
+## 4. Other Common Methods
+
+```java
+List<Integer> list = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+
+Collections.max(list);                      // 5
+Collections.min(list);                      // 1
+Collections.frequency(list, 3);             // 1 (number of occurrences)
+Collections.indexOfSubList(list, List.of(3,4));   // 2
+Collections.replaceAll(list, 3, 30);        // replace all 3s with 30
+Collections.rotate(list, 2);                // rotate right by 2
+Collections.disjoint(List.of(1,2), List.of(3,4)); // true (no intersection)
+```
+
+`rotate(list, distance)` is interesting—it "rotates" the list right by `distance` positions:
+
+```java
+[1, 2, 3, 4, 5] rotate 2 → [4, 5, 1, 2, 3]
+```
+
+## 5. Immutable Wrappers: unmodifiableXxx
+
+Sometimes you want to make a collection "read-only"—give it to others but don't let them modify it. `Collections.unmodifiableXxx` wraps a collection in a "read-only shell"; calling any modification method throws `UnsupportedOperationException`:
+
+```java
+List<String> mutable = new ArrayList<>(List.of("A", "B", "C"));
+List<String> immutable = Collections.unmodifiableList(mutable);
+
+immutable.add("D");   // ❌ UnsupportedOperationException
+immutable.set(0, "X"); // ❌
+immutable.get(0);      // ✅ you can read
+```
+
+**Note**: `unmodifiableList` is a **view**—it shares data with the original collection. Modifying the original collection changes the read-only view too:
+
+```java
+mutable.add("D");
+System.out.println(immutable);   // [A, B, C, D]!
+```
+
+So "immutable" here means "cannot be modified through this reference," not "never changes." For a true snapshot that's immutable, use `List.copyOf` (see below).
+
+Corresponding methods:
+
+- `Collections.unmodifiableList(list)`
+- `Collections.unmodifiableSet(set)`
+- `Collections.unmodifiableMap(map)`
+- `Collections.unmodifiableCollection(c)`
+
+## 6. Synchronized Wrappers: synchronizedXxx
+
+Regular `ArrayList` and `HashMap` are not thread-safe. `Collections.synchronizedXxx` wraps them in a synchronized shell, adding `synchronized` to every method:
+
+```java
+List<String> syncList = Collections.synchronizedList(new ArrayList<>());
+Map<String, Integer> syncMap = Collections.synchronizedMap(new HashMap<>());
+Set<String> syncSet = Collections.synchronizedSet(new HashSet<>());
+```
+
+Thread-safe, but **poor performance**—every operation locks the entire collection, resulting in very low concurrency. Modern Java prefers dedicated concurrent containers like `CopyOnWriteArrayList`, `ConcurrentHashMap`, and `ConcurrentSkipListSet`.
+
+**Key pitfall**: you still need to synchronize manually when iterating!
+
+```java
+List<String> syncList = Collections.synchronizedList(new ArrayList<>());
+// ...
+synchronized (syncList) {     // must synchronize manually!
+    for (String s : syncList) {
+        System.out.println(s);
+    }
+}
+```
+
+Because the iterator itself is not synchronized—if another thread modifies the list during iteration, it still throws `ConcurrentModificationException`. This is the most common pitfall of `synchronizedXxx`.
+
+## 7. Java 9+: Immutable Factory Methods
+
+Java 9 introduced a set of **immutable collection factory methods**—one line of code creates a truly immutable collection:
+
+### 7.1 List.of / Set.of / Map.of
+
+```java
+List<String> list = List.of("A", "B", "C");
+Set<Integer> set = Set.of(1, 2, 3);
+Map<String, Integer> map = Map.of("a", 1, "b", 2);   // up to 10 pairs
+Map<String, Integer> bigMap = Map.ofEntries(
+    Map.entry("a", 1),
+    Map.entry("b", 2),
+    Map.entry("c", 3)
+);
+```
+
+Characteristics:
+
+1. **Immutable**: `add`/`remove`/`set` all throw `UnsupportedOperationException`.
+2. **No null allowed**: passing null throws `NullPointerException`.
+3. **Set/Map don't allow duplicates**: `Set.of(1, 1)` throws `IllegalArgumentException`.
+4. **Serialization-friendly**: the underlying implementation is optimized and uses less memory than `unmodifiableXxx`.
+
+### 7.2 Differences from Arrays.asList / unmodifiableList
+
+| Feature | `Arrays.asList` | `unmodifiableList` | `List.of` |
+| --- | --- | --- | --- |
+| Mutability | Can modify elements, but not add/remove | Fully immutable | Fully immutable |
+| null | Allowed | Allowed | **Not allowed** |
+| Is a view | Yes (shares original array) | Yes (shares original collection) | No (independent) |
+
+`List.of` is "truly immutable"—it doesn't depend on any original collection; it's an independent immutable object.
+
+### 7.3 Java 10+: copyOf
+
+`List.copyOf`, `Set.copyOf`, and `Map.copyOf` create immutable copies from an existing collection:
+
+```java
+List<String> mutable = new ArrayList<>(List.of("A", "B", "C"));
+List<String> snapshot = List.copyOf(mutable);   // immutable snapshot
+
+mutable.add("D");
+System.out.println(snapshot);   // [A, B, C] (unaffected by the original)
+```
+
+`copyOf` is the elegant way to write "defensive copies"—previously you'd need `Collections.unmodifiableList(new ArrayList＜＞(original))`, now one line of `List.copyOf(original)` does it.
+
+Note: if the input is already an immutable collection created by `List.of`, `copyOf` won't copy—it returns the original object directly. This is an optimization.
+
+<CodeRunner code={`import java.util.*;
+import java.util.stream.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 排序、反转、洗牌
+        List<Integer> nums = new ArrayList<>(List.of(5, 1, 3, 2, 4));
+        System.out.println("原始: " + nums);
+        Collections.sort(nums);
+        System.out.println("排序: " + nums);
+        Collections.reverse(nums);
+        System.out.println("反转: " + nums);
+        Collections.shuffle(nums, new Random(42));   // 固定种子可复现
+        System.out.println("洗牌(种子42): " + nums);
+        Collections.swap(nums, 0, nums.size() - 1);
+        System.out.println("交换首尾: " + nums);
+
+        // 2. 其他常用操作
+        System.out.println("\\n--- 常用操作 ---");
+        nums = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+        System.out.println("max: " + Collections.max(nums));
+        System.out.println("min: " + Collections.min(nums));
+        System.out.println("frequency(3): " + Collections.frequency(nums, 3));
+        Collections.rotate(nums, 2);
+        System.out.println("rotate 2: " + nums);
+
+        // 3. 不可变包装
+        System.out.println("\\n--- 不可变包装 ---");
+        List<String> mutable = new ArrayList<>(List.of("A", "B", "C"));
+        List<String> readOnly = Collections.unmodifiableList(mutable);
+        try {
+            readOnly.add("D");
+        } catch (UnsupportedOperationException e) {
+            System.out.println("unmodifiableList 不允许 add");
+        }
+
+        // 4. Java 9+ 不可变工厂方法
+        System.out.println("\\n--- List.of / Set.of / Map.of ---");
+        List<String> imList = List.of("A", "B", "C");
+        Set<Integer> imSet = Set.of(1, 2, 3);
+        Map<String, Integer> imMap = Map.of("apple", 5, "banana", 3);
+
+        System.out.println("List: " + imList);
+        System.out.println("Set: " + imSet);
+        System.out.println("Map: " + imMap);
+
+        try {
+            imList.add("D");
+        } catch (UnsupportedOperationException e) {
+            System.out.println("List.of 不允许 add");
+        }
+        try {
+            imSet.add(4);
+        } catch (UnsupportedOperationException e) {
+            System.out.println("Set.of 不允许 add");
+        }
+
+        // 5. null 不允许
+        try {
+            List<String> hasNull = List.of("A", null);
+        } catch (NullPointerException e) {
+            System.out.println("List.of 不允许 null");
+        }
+
+        // 6. copyOf 防御性复制
+        System.out.println("\\n--- copyOf 防御性复制 ---");
+        List<String> original = new ArrayList<>(List.of("X", "Y", "Z"));
+        List<String> snapshot = List.copyOf(original);
+        original.add("W");
+        System.out.println("原集合: " + original);    // [X, Y, Z, W]
+        System.out.println("快照: " + snapshot);       // [X, Y, Z] 不受影响
+
+        // 7. 实用：方法返回不可变集合
+        System.out.println("\\n--- 实用：方法返回不可变集合 ---");
+        Config config = new Config();
+        config.add("key1", "value1");
+        config.add("key2", "value2");
+        Map<String, String> all = config.getAll();   // 返回不可变副本
+        System.out.println("配置: " + all);
+        try {
+            all.put("key3", "value3");   // 调用方无法修改内部状态
+        } catch (UnsupportedOperationException e) {
+            System.out.println("调用方无法修改返回的配置");
+        }
+    }
+}
+
+class Config {
+    private final Map<String, String> store = new HashMap<>();
+
+    void add(String k, String v) { store.put(k, v); }
+
+    // 返回不可变副本，保护内部状态
+    Map<String, String> getAll() {
+        return Map.copyOf(store);
+    }
+}`} />
+
+## 8. Hands-On: Handling a Deck of Cards with Collections
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 造一副牌
+        List<String> deck = new ArrayList<>();
+        String[] suits = {"♠", "♥", "♣", "♦"};
+        String[] ranks = {"A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"};
+        for (String s : suits) {
+            for (String r : ranks) {
+                deck.add(s + r);
+            }
+        }
+        System.out.println("新牌: " + deck);
+        System.out.println("共 " + deck.size() + " 张");
+
+        // 洗牌
+        Collections.shuffle(deck, new Random(123));
+        System.out.println("\\n洗牌后: " + deck);
+
+        // 发牌给 4 个玩家
+        List<List<String>> players = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            players.add(new ArrayList<>());
+        }
+        for (int i = 0; i < deck.size(); i++) {
+            players.get(i % 4).add(deck.get(i));
+        }
+
+        // 每个玩家整理手牌（排序）
+        System.out.println("\\n--- 发牌（每位玩家排序）---");
+        String[] names = {"东", "南", "西", "北"};
+        for (int i = 0; i < 4; i++) {
+            Collections.sort(players.get(i));
+            System.out.println(names[i] + ": " + players.get(i) + " (" + players.get(i).size() + "张)");
+        }
+
+        // 求每家最大牌（按自定义规则）
+        System.out.println("\\n--- 每家最大牌 ---");
+        Comparator<String> byRank = Comparator.comparingInt(c -> {
+            String r = c.substring(1);
+            return List.of("2","3","4","5","6","7","8","9","10","J","Q","K","A").indexOf(r);
+        });
+        for (int i = 0; i < 4; i++) {
+            String max = Collections.max(players.get(i), byRank);
+            System.out.println(names[i] + " 最大: " + max);
+        }
+
+        // 反转某家手牌展示
+        List<String> east = new ArrayList<>(players.get(0));
+        Collections.reverse(east);
+        System.out.println("\\n东家反转: " + east);
+    }
+}`} />
+
+This example ties together `shuffle`, `sort`, `max`, `reverse`, and a custom `Comparator`—dealing, organizing, and finding the max card in a deck is all handled with a few lines of `Collections`.
+
+## 9. Collections vs Collection
+
+Don't confuse these two nearly identically named things:
+
+- `Collection＜E＞`—an **interface**, the root of all single-element containers (the parent interface of List/Set/Queue).
+- `Collections`—a **utility class**, full of static methods, providing algorithms like sorting, searching, and wrapping.
+
+One is "the container itself"; the other is "the toolbox for operating on containers."
+
+## 10. Chapter Summary
+
+| Topic | Key Points |
+| --- | --- |
+| `sort` | TimSort, requires Comparable or Comparator |
+| `reverse` / `shuffle` / `swap` / `fill` | Common transformations |
+| `max` / `min` / `frequency` / `rotate` | Common queries |
+| `unmodifiableXxx` | Read-only view, still shares the original collection |
+| `synchronizedXxx` | Synchronized wrapper, poor performance, iteration needs manual synchronization |
+| `List.of` / `Set.of` / `Map.of` | Java 9+ immutable factories, no null allowed |
+| `Map.ofEntries` | Java 9+ immutable Map for more than 10 pairs |
+| `copyOf` | Java 10+ defensive copy, truly immutable |
+| `Collections` vs `Collection` | Utility class vs interface |
+
+## Conclusion: Tools Make Containers Stronger
+
+The `Collections` utility class and factory methods like `List.of` are "amplifiers" for the collections framework—they don't create new containers, but they make existing ones easier to use and safer.
+
+Remember a few principles:
+
+1. **When returning a collection to the outside, use `copyOf` or `unmodifiableXxx`**—protect internal state from modification.
+2. **For constant collections, use `List.of` / `Set.of` / `Map.of`**—far more concise than `new ArrayList＜＞` + `add`.
+3. **For concurrency, use dedicated concurrent containers, not `synchronizedXxx`**—`ConcurrentHashMap` and friends are the modern answer.
+4. **`Collections.sort` is history**—from Java 8+, `list.sort()` is more idiomatic.
+
+In the next chapter, we reach the climax of the collections framework—the `Stream API`. It brings "declarative data processing" to Java, transforming collection operations from "how to write it" to "what you want."

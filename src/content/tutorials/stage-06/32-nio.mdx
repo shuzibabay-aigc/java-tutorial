@@ -1,0 +1,419 @@
+---
+title: "NIO"
+chapter: 32
+stage: "第六阶段"
+stageName: "I/O 与 NIO"
+order: 5
+description: "理解 NIO 与传统 IO 的本质差异，掌握 Buffer 的四个核心属性、Channel 通道、Selector 多路复用与零拷贝技术"
+pubDate: 2026-07-03
+tags: ["Java", "NIO", "Buffer", "Channel", "Selector", "零拷贝", "ByteBuffer"]
+---
+
+# NIO
+
+传统 IO（`InputStream`/`OutputStream`）有个本质特征：**面向流、阻塞**。你调 `read()`，线程就卡在那儿等数据——一个连接一个线程，连接多了线程就爆了。这在 1990 年代够用，但互联网时代的高并发场景下，这种"一连接一线程"的模型力不从心。
+
+Java 1.4 引入 NIO（New IO / Non-blocking IO），重新设计了 IO：**面向缓冲区、可非阻塞、支持多路复用**。它不是替代传统 IO——文件读写场景两者性能差不多——而是在**高并发网络通信**中大放异彩。Netty、Mina、Tomcat NIO Connector 都建立在 NIO 之上。
+
+这一章我们看 NIO 的三大核心：Buffer（缓冲区）、Channel（通道）、Selector（选择器），以及它带来的"零拷贝"魔法。
+
+## 一、NIO vs IO：两种世界观
+
+先看本质区别：
+
+| 维度 | 传统 IO | NIO |
+| --- | --- | --- |
+| 流向 | 单向（InputStream 或 OutputStream） | 双向（Channel 可读可写） |
+| 数据单位 | 流式字节（一个个读） | 缓冲区块（一块块读） |
+| 阻塞 | 阻塞（read 卡住直到有数据） | 可非阻塞（read 立即返回） |
+| 多路复用 | 不支持 | Selector 支持 |
+| 适用场景 | 文件、低并发网络 | 高并发网络 |
+
+**面向流 vs 面向缓冲区**是核心区别。传统 IO 像用吸管喝水——一次吸一口，水流过去就没了；NIO 像用桶接水——一次接一桶，慢慢处理，桶里的水不会消失。
+
+这个"桶"就是 **Buffer**。
+
+## 二、Buffer：数据桶
+
+`Buffer` 是 NIO 的核心数据结构——一个**对象化的字节数组**，比裸数组多了"位置追踪"能力。
+
+### 2.1 四个核心属性
+
+每个 Buffer 有四个核心属性：
+
+| 属性 | 含义 |
+| --- | --- |
+| `capacity` | 容量，桶的总大小（创建后不变） |
+| `position` | 当前位置，下一个要读/写的索引 |
+| `limit` | 限制，第一个不能读/写的索引 |
+| `mark` | 标记，可用 `reset()` 回到这里 |
+
+它们满足不变式：`mark ≤ position ≤ limit ≤ capacity`（0 是 mark 的下界）。
+
+### 2.2 Buffer 的状态流转
+
+Buffer 像个"双态机"——写态和读态之间切换：
+
+```
+新建 → 写态（position=0, limit=capacity）
+   ↓ flip()          ← 切换到读态
+读态（position=0, limit=刚才写入了多少）
+   ↓ clear()         ← 切换回写态（清空，position=0, limit=capacity）
+   或 compact()       ← 切换回写态（保留未读数据）
+```
+
+**写数据**：`put` 把数据写入 `position` 处，`position` 后移。
+
+**flip**：写完准备读——`limit = position; position = 0`。这步是"翻转"——把写入边界设为读边界，position 回到起点。
+
+**读数据**：`get` 从 `position` 读，`position` 后移。
+
+**clear**：读完准备再写——`position=0; limit=capacity`。**数据没真的清空**，只是把指针归零，下次 `put` 会覆盖。
+
+**rewind**：`position=0`，但 `limit` 不变——重新读一遍。
+
+**mark / reset**：`mark()` 记下当前位置，`reset()` 跳回 mark 处。
+
+### 2.3 一个完整例子
+
+```java
+ByteBuffer buf = ByteBuffer.allocate(10);   // capacity=10
+
+// 写态：position=0, limit=10
+buf.put((byte) 1);
+buf.put((byte) 2);
+buf.put((byte) 3);
+// 现在 position=3, limit=10
+
+buf.flip();
+// 读态：position=0, limit=3
+
+byte a = buf.get();   // 1, position=1
+byte b = buf.get();   // 2, position=2
+
+buf.clear();
+// 回到写态：position=0, limit=10
+```
+
+> **新手最容易踩的坑**：写完数据忘了 `flip()`，直接读会读到空——因为 `position` 还在写入位置，没有可读数据。`flip` 是 Buffer 的"灵魂操作"，必须记住。
+
+### 2.4 Buffer 类型
+
+`Buffer` 是抽象基类，对应每种基本类型有具体子类：
+
+| 类 | 元素类型 |
+| --- | --- |
+| `ByteBuffer` | `byte`（最常用） |
+| `CharBuffer` | `char` |
+| `ShortBuffer` | `short` |
+| `IntBuffer` | `int` |
+| `LongBuffer` | `long` |
+| `FloatBuffer` | `float` |
+| `DoubleBuffer` | `double` |
+
+最常用的是 `ByteBuffer`——网络和文件 IO 都是字节流。
+
+### 2.5 创建 ByteBuffer
+
+```java
+// 堆内 Buffer（在 JVM 堆里，受 GC 管理）
+ByteBuffer heapBuf = ByteBuffer.allocate(1024);
+
+// 直接 Buffer（在 JVM 堆外，操作系统直接访问）
+ByteBuffer directBuf = ByteBuffer.allocateDirect(1024);
+
+// 包装现有数组
+byte[] arr = new byte[1024];
+ByteBuffer wrapped = ByteBuffer.wrap(arr);
+```
+
+**直接 Buffer** 的内存不在 JVM 堆里，操作系统可以直接用它做 IO——少了"内核缓冲区 ↔ 用户缓冲区"的拷贝，所以大文件、网络 IO 用直接 Buffer 更快。但分配和释放代价高（系统调用），适合长期重用。
+
+## 三、Channel：双向通道
+
+`Channel` 是 NIO 的"管道"，连接数据源与 Buffer。和流不同，**Channel 是双向的**——一个 Channel 既能读又能写。
+
+### 3.1 主要 Channel
+
+| Channel | 用途 |
+| --- | --- |
+| `FileChannel` | 文件读写（无法非阻塞） |
+| `SocketChannel` | TCP 客户端 |
+| `ServerSocketChannel` | TCP 服务端 |
+| `DatagramChannel` | UDP |
+
+### 3.2 FileChannel 基本用法
+
+```java
+import java.io.*;
+import java.nio.*;
+import java.nio.channels.*;
+
+try (RandomAccessFile file = new RandomAccessFile("data.txt", "rw");
+     FileChannel channel = file.getChannel()) {
+
+    ByteBuffer buf = ByteBuffer.allocate(48);
+    int bytesRead = channel.read(buf);   // 读到 buf 里
+
+    while (bytesRead != -1) {
+        buf.flip();                      // 切读态
+        while (buf.hasRemaining()) {
+            System.out.print((char) buf.get());
+        }
+        buf.clear();                     // 切回写态
+        bytesRead = channel.read(buf);
+    }
+}
+```
+
+`FileChannel` 比传统 `FileInputStream` 多了 `position` 控制、`transferTo`/`transferFrom` 零拷贝等能力。注意：`FileChannel` **不能**非阻塞——文件 IO 没必要非阻塞。
+
+### 3.3 网络Channel 的非阻塞
+
+```java
+SocketChannel socket = SocketChannel.open();
+socket.configureBlocking(false);   // 非阻塞模式
+socket.connect(new InetSocketAddress("example.com", 80));
+
+// 非阻塞下，connect 立即返回，连接完成前 finishConnect() 返回 false
+while (!socket.finishConnect()) {
+    // 等连接，可以做别的事
+}
+```
+
+非阻塞模式让一个线程能管多个 Channel——但单凭非阻塞还不够，得配合 Selector 才能"事件驱动"地管理成百上千个连接。
+
+## 四、Selector：多路复用器
+
+`Selector` 是 NIO 高并发的核心——**一个线程管理多个 Channel**。它基于操作系统的 `epoll`/`kqueue`/`select` 系统调用，让一个线程能"等到任意一个 Channel 有事件"。
+
+### 4.1 工作模型
+
+```
+        [Selector]
+            |
+    注册多个 Channel 的感兴趣事件（OP_ACCEPT / OP_READ / OP_WRITE）
+            |
+       select() 阻塞，直到有事件发生
+            |
+    返回"就绪的 Channel 列表"（selectedKeys）
+            |
+    遍历处理每个就绪 Channel
+```
+
+### 4.2 四种事件
+
+`SelectionKey` 定义了四种"感兴趣事件"：
+
+| 常量 | 含义 |
+| --- | --- |
+| `OP_ACCEPT` | 有新连接到达（ServerSocketChannel） |
+| `OP_CONNECT` | 连接建立完成（SocketChannel） |
+| `OP_READ` | 有数据可读 |
+| `OP_WRITE` | 可以写数据（一般不用，写缓冲区很少满） |
+
+### 4.3 服务端骨架代码
+
+```java
+Selector selector = Selector.open();
+
+ServerSocketChannel server = ServerSocketChannel.open();
+server.configureBlocking(false);
+server.bind(new InetSocketAddress(8080));
+server.register(selector, SelectionKey.OP_ACCEPT);
+
+while (true) {
+    selector.select();   // 阻塞，直到有事件
+
+    Set<SelectionKey> selectedKeys = selector.selectedKeys();
+    Iterator<SelectionKey> it = selectedKeys.iterator();
+    while (it.hasNext()) {
+        SelectionKey key = it.next();
+        it.remove();   // 必须手动移除！
+
+        if (key.isAcceptable()) {
+            // 新连接
+            SocketChannel client = server.accept();
+            client.configureBlocking(false);
+            client.register(selector, SelectionKey.OP_READ);
+        } else if (key.isReadable()) {
+            // 可读
+            SocketChannel client = (SocketChannel) key.channel();
+            ByteBuffer buf = ByteBuffer.allocate(1024);
+            int n = client.read(buf);
+            if (n == -1) {
+                client.close();
+            } else {
+                buf.flip();
+                // 处理 buf
+            }
+        }
+    }
+}
+```
+
+**关键细节**：
+
+1. `selectedKeys()` 返回的集合，处理完每个 key 必须 `it.remove()`——否则下次 `select` 还会返回同一个事件，造成重复处理。
+2. 处理 `OP_READ` 时，`read` 返回 `-1` 表示对方关闭连接，要主动 `close`。
+3. `Selector` 的事件模型是"水平触发"——只要你没把数据读完，下次 `select` 还会立刻返回，可能造成"忙等"。
+
+### 4.4 为什么 Selector 神奇
+
+传统阻塞 IO：1000 个连接要 1000 个线程。每个线程 1MB 栈 = 1GB 内存。线程切换上下文开销大。
+
+NIO Selector：1 个线程管 1000 个连接。只有"有事做"时才处理，没事时 `select` 阻塞。这是 Redis、Nginx、Netty 能扛几十万并发的底层逻辑——**事件驱动而非线程驱动**。
+
+## 五、零拷贝：transferTo / transferFrom
+
+传统文件复制：磁盘 → 内核缓冲区 → 用户缓冲区 → Socket 缓冲区 → 网卡。四次拷贝，四次上下文切换。
+
+NIO 的 `transferTo`/`transferFrom` 利用操作系统的 `sendfile` 系统调用——**数据直接从内核到网卡，根本不进用户空间**。这叫"零拷贝"（zero copy），性能提升数倍。
+
+```java
+try (FileChannel src = new FileInputStream("big.dat").getChannel();
+     FileChannel dst = new FileOutputStream("copy.dat").getChannel()) {
+    // 零拷贝：操作系统直接在内核里搬
+    src.transferTo(0, src.size(), dst);
+    // 或 dst.transferFrom(src, 0, src.size());
+}
+```
+
+Kafka 的高吞吐量就靠这个——消费者拉消息时，Broker 用 `transferTo` 直接把日志文件发到网卡，零用户态拷贝。这是单机能扛百万 TPS 的关键之一。
+
+## 六、实战：用 NIO 实现文件复制
+
+下面用 `FileChannel` + `ByteBuffer` 复制文件，对比直接 Buffer 与堆 Buffer 的性能：
+
+<CodeRunner code={`import java.io.*;
+import java.nio.*;
+import java.nio.channels.*;
+import java.nio.file.*;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class Main {
+    public static void main(String[] args) throws IOException {
+        // 准备 5MB 测试文件
+        Path src = Paths.get("src.dat");
+        try (FileChannel ch = FileChannel.open(src,
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            ByteBuffer buf = ByteBuffer.allocate(8192);
+            for (int i = 0; i < buf.capacity(); i++) buf.put((byte) (i & 0xFF));
+            for (int block = 0; block < 640; block++) {   // ~5MB
+                buf.flip();
+                ch.write(buf);
+                buf.clear();
+            }
+        }
+        System.out.println("源文件: " + Files.size(src) + " 字节\\n");
+
+        // 方式 1：FileChannel + 堆 Buffer
+        Path dst1 = Paths.get("dst1.dat");
+        long t1 = System.currentTimeMillis();
+        try (FileChannel in = new FileInputStream(src.toFile()).getChannel();
+             FileChannel out = new FileOutputStream(dst1.toFile()).getChannel()) {
+            ByteBuffer buf = ByteBuffer.allocate(8192);
+            while (in.read(buf) != -1) {
+                buf.flip();
+                out.write(buf);
+                buf.clear();
+            }
+        }
+        long time1 = System.currentTimeMillis() - t1;
+        System.out.println("方式 1（堆 Buffer + Channel）: " + time1 + " ms, 大小=" + Files.size(dst1));
+
+        // 方式 2：transferTo（零拷贝）
+        Path dst2 = Paths.get("dst2.dat");
+        long t2 = System.currentTimeMillis();
+        try (FileChannel in = new FileInputStream(src.toFile()).getChannel();
+             FileChannel out = new FileOutputStream(dst2.toFile()).getChannel()) {
+            in.transferTo(0, in.size(), out);
+        }
+        long time2 = System.currentTimeMillis() - t2;
+        System.out.println("方式 2（transferTo 零拷贝）: " + time2 + " ms, 大小=" + Files.size(dst2));
+
+        // 演示 Buffer 的状态流转
+        System.out.println("\\n--- Buffer 状态流转演示 ---");
+        ByteBuffer demo = ByteBuffer.allocate(10);
+        System.out.println("初始: pos=" + demo.position() + " lim=" + demo.limit() + " cap=" + demo.capacity());
+
+        demo.put((byte) 1).put((byte) 2).put((byte) 3);
+        System.out.println("写 3 字节后: pos=" + demo.position() + " lim=" + demo.limit());
+
+        demo.flip();
+        System.out.println("flip 后（切读态）: pos=" + demo.position() + " lim=" + demo.limit());
+
+        System.out.println("读: " + demo.get() + ", pos=" + demo.position());
+        System.out.println("读: " + demo.get() + ", pos=" + demo.position());
+
+        demo.mark();
+        System.out.println("mark 在 pos=" + demo.position());
+        System.out.println("读: " + demo.get() + ", pos=" + demo.position());
+        demo.reset();
+        System.out.println("reset 后 pos=" + demo.position());
+
+        demo.clear();
+        System.out.println("clear 后（切写态）: pos=" + demo.position() + " lim=" + demo.limit());
+
+        // 清理
+        Files.deleteIfExists(src);
+        Files.deleteIfExists(dst1);
+        Files.deleteIfExists(dst2);
+        System.out.println("\\n清理完毕");
+    }
+}`} />
+
+> **观察重点**：
+> - **transferTo 通常比 Channel+Buffer 快**——它直接走操作系统 `sendfile`，零用户态拷贝。
+> - **Buffer 状态流转**是 NIO 的"语法"——`flip` 写转读、`clear` 读转写、`mark/reset` 标记回退。把这些状态变化内化成本能，写 NIO 代码才不会错。
+> - 小文件上差异不明显（系统调用开销占比大）；文件越大，零拷贝优势越显著。
+
+## 七、NIO 的"难"与 Netty 的诞生
+
+NIO API 虽然强大但难用：
+
+- **Buffer 的 flip/clear 容易出错**——忘 flip 读到空，忘 clear 写不动。
+- **Selector 的事件处理复杂**——`selectedKeys` 要手动 remove，半包问题、粘包问题要自己处理。
+- **没有解码/编码框架**——你得自己把字节流切分成消息。
+
+正因如此，**Netty** 诞生了。它在 NIO 之上封装了：
+
+- **ChannelPipeline**：责任链模式，handler 链式处理事件。
+- **ByteBuf**：比 `ByteBuffer` 更友好的缓冲区（读写指针分离，不用频繁 flip）。
+- **内置编解码器**：`LengthFieldBasedFrameDecoder`、`StringDecoder` 等开箱即用。
+- **零拷贝**：在 `FileRegion` 之上进一步优化。
+
+今天写高性能网络程序，**直接用 NIO 的不多，多数用 Netty**。但理解 NIO 是理解 Netty 的前提——Netty 的设计思路完全建立在 NIO 之上。
+
+## 八、本章速查表
+
+| 概念 | 说明 |
+| --- | --- |
+| `Buffer` | 数据容器，有 capacity/position/limit/mark 四属性 |
+| `allocate(n)` | 创建堆 Buffer |
+| `allocateDirect(n)` | 创建直接 Buffer（堆外，IO 更快） |
+| `flip()` | 写态切读态（limit=position, position=0） |
+| `clear()` | 读态切写态（position=0, limit=capacity） |
+| `rewind()` | position=0（重读，不动 limit） |
+| `compact()` | 把未读数据移到开头，切写态 |
+| `Channel` | 双向数据通道 |
+| `FileChannel` | 文件通道（不能非阻塞） |
+| `SocketChannel` | TCP 客户端 |
+| `ServerSocketChannel` | TCP 服务端 |
+| `Selector` | 多路复用器，一个线程管多个 Channel |
+| `SelectionKey.OP_ACCEPT` | 接受连接事件 |
+| `SelectionKey.OP_READ` | 可读事件 |
+| `transferTo` / `transferFrom` | 零拷贝传输 |
+
+## 结语：从"线程驱动"到"事件驱动"
+
+NIO 不只是"另一个 IO API"，它代表一种思维方式的转变：
+
+- **传统 IO**：一个连接一个线程，每个线程阻塞等待数据。简单，但扩展性差。
+- **NIO**：一个线程管多个连接，用 Selector 事件驱动。复杂，但能扛高并发。
+
+这种"事件驱动"的思维是现代高并发系统的核心——Node.js、Nginx、Redis、Netty 都是这个路子。理解了 NIO，你才真正理解"为什么 Redis 单线程能扛十万 QPS"——它和 NIO 用同一个底层哲学：**避免线程阻塞，让 CPU 一直干活**。
+
+Buffer 和 Channel 是 NIO 的"砖和水泥"，Selector 是 NIO 的"建筑师"，零拷贝是 NIO 的"加速器"。把它们组合起来，你能写出单机扛几十万连接的网络服务——这是传统阻塞 IO 永远做不到的事。
+
+下一章是 NIO.2 的收尾——`Files` 工具类进阶，覆盖大文件流式读取、文件监视、临时文件等高级操作。

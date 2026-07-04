@@ -1,0 +1,512 @@
+---
+title: "垃圾回收"
+chapter: 52
+stage: "第九阶段"
+stageName: "JVM 深度"
+order: 2
+description: "深入 GC 原理：可达性分析与 GC Roots、四种引用类型、GC 算法（标记-清除/复制/标记-整理/分代）、收集器演进 Serial→G1→ZGC→Shenandoah、G1 与 ZGC 详解、GC 日志与调优"
+pubDate: 2026-07-03
+tags: ["Java", "JVM", "GC", "G1", "ZGC", "Shenandoah", "可达性分析"]
+---
+
+# 垃圾回收
+
+上一章讲了 JVM 内存模型，知道堆是"对象的家"。这一章讲——堆上的对象"死后"怎么清理。这就是 **GC（Garbage Collection，垃圾回收）**——Java 比 C/C++ 最大的优势之一：不用手动 `free`/`delete`，JVM 自动找垃圾、回收内存。
+
+但"自动"不等于"免费"——GC 有开销，配置不当会让应用卡顿、OOM、CPU 飙高。理解 GC 原理是 Java 性能调优的核心。这一章我们把 GC 从原理到实践一次讲透。
+
+## 一、判断对象存活：可达性分析
+
+### 1.1 引用计数法（已废弃）
+
+最直观的判断对象是否"死"的方法——**引用计数法（Reference Counting）**：每个对象有个计数器，被引用 +1，引用消失 -1，归零就回收。
+
+**问题**：循环引用。A 引用 B，B 引用 A，两者计数都是 1，但外部谁都不引用——它们应该被回收，但计数永远不归零。
+
+Python 早期用引用计数，靠"周期性 GC"补救。JVM **不用**引用计数——它用**可达性分析**。
+
+### 1.2 可达性分析（Reachability Analysis）
+
+JVM 用**可达性分析**判断对象是否存活：
+
+1. 选一批**GC Roots（根对象）** 作为起点。
+2. 从 GC Roots 出发，遍历引用链（reference chain）。
+3. 遍历到的对象是"可达的"——存活。
+4. 遍历不到的对象是"不可达的"——垃圾，可回收。
+
+```
+GC Root A ──→ B ──→ C
+                     │
+                     └──→ D (可达)
+
+GC Root X (独立对象, 无引用)
+Y ──→ Z (互相引用, 但没有 GC Root 指向, 都不可达, 都回收)
+```
+
+循环引用不是问题——只要没有任何 GC Root 能到达，就回收。这就是 Java 不需要手动管理循环引用的原因。
+
+### 1.3 GC Roots 是什么
+
+哪些对象能当 GC Roots？JVM 规范没强制定义，但 HotSpot 实现里包括：
+
+1. **虚拟机栈中的局部变量**——方法参数、方法内局部变量引用的对象。
+2. **方法区中的静态变量**——`static` 字段引用的对象。
+3. **方法区中的常量**——`final static` 常量引用的对象。
+4. **本地方法栈中 JNI 引用**——native 方法引用的 Java 对象。
+5. **Java 虚拟机内部的引用**——基本类型异常对象、类加载器。
+6. **同步监视器锁持有的对象**——`synchronized` 锁住的对象。
+7. **JMXBean、JVMTI 等 JVM 内部结构**。
+
+简而言之——**正在被使用的、JVM 关键结构引用的对象，都是 GC Roots**。从它们能"追溯到"的对象都是活的。
+
+## 二、四种引用类型
+
+JDK 1.2 起把引用分四种，强度从强到弱：
+
+### 2.1 强引用（Strong Reference）
+
+最常见的引用——`Object obj = new Object()`。**只要强引用还在，GC 永不回收**——哪怕 OOM 也不回收强引用对象。
+
+```java
+Object obj = new Object();   // 强引用
+obj = null;                  // 强引用断开, 对象可被回收
+```
+
+### 2.2 软引用（SoftReference）
+
+**内存不足时才回收**。适合做内存敏感的缓存。
+
+```java
+SoftReference<byte[]> cache = new SoftReference<>(new byte[1024*1024]);
+byte[] data = cache.get();   // 可能返回 null (内存不足被回收)
+```
+
+JVM 保证在抛 OOM 之前，所有软引用对象都被回收。所以软引用对象不会导致 OOM——但可能频繁 GC。
+
+### 2.3 弱引用（WeakReference）
+
+**下一次 GC 就回收**（不论内存是否充足）。`ThreadLocal` 的 Entry、`WeakHashMap` 的 key 都是弱引用。
+
+```java
+WeakReference<Object> weak = new WeakReference<>(new Object());
+System.gc();
+weak.get();   // 很可能返回 null
+```
+
+### 2.4 虚引用（PhantomReference）
+
+**最弱的引用**——形同虚设，**`get()` 永远返回 null**。唯一作用是——对象被回收时收到通知（通过 ReferenceQueue），用于跟踪对象销毁。
+
+```java
+ReferenceQueue<Object> queue = new ReferenceQueue<>();
+PhantomReference<Object> phantom = new PhantomReference<>(new Object(), queue);
+phantom.get();   // 永远 null
+// 对象被回收后, phantom 会被放入 queue, 检查 queue 能感知回收
+```
+
+DirectByteBuffer 的释放就是靠虚引用 + Cleaner 机制——对象被 GC 时触发 Cleaner 清理堆外内存。
+
+| 引用 | 回收时机 | 用途 |
+| --- | --- | --- |
+| 强引用 | 永不（除非主动断开） | 普通对象 |
+| 软引用 | 内存不足时 | 缓存（如图片缓存） |
+| 弱引用 | 下次 GC | ThreadLocal、WeakHashMap |
+| 虚引用 | 任何时候 | 跟踪对象销毁（DirectByteBuffer） |
+
+## 三、GC 算法
+
+### 3.1 标记-清除（Mark-Sweep）
+
+最基础的 GC 算法：
+
+1. **标记**——从 GC Roots 遍历，标记所有可达对象。
+2. **清除**——遍历堆，回收未标记的对象。
+
+**问题**：
+
+- **内存碎片**——回收后的内存空间不连续，分配大对象时找不到连续空间会提前触发 GC。
+- **暂停时间长**——标记和清除都要遍历整个堆。
+
+### 3.2 复制（Copying）
+
+把内存分两块，每次只用一块。GC 时把存活对象**复制**到另一块，原块整体清空。
+
+```
+[活1][活2][垃圾][活3][垃圾]  →  [活1][活2][活3][          ]
+   块 A                              块 B (清空)
+```
+
+**优点**：
+
+- **无碎片**——复制后内存紧凑。
+- **快**——存活少时效率高（只复制活对象）。
+
+**缺点**：
+
+- **浪费一半内存**——可用内存减半。
+
+新生代用复制算法——因为新生代"朝生夕死"，存活少，复制开销小。Eden + S0 + S1 的设计就是优化版的复制算法（Eden : S : S = 8:1:1，只浪费 10%）。
+
+### 3.3 标记-整理（Mark-Compact）
+
+标记-清除 + 整理：标记后，把存活对象**向一端移动**，清掉边界外的内存。
+
+```
+[活1][活2][垃圾][活3][垃圾]  →  [活1][活2][活3][          ]
+                                  ← 紧凑到一端
+```
+
+**优点**：无碎片、不浪费内存。
+**缺点**：移动对象开销大（要更新所有引用），暂停时间长。
+
+老年代用标记-整理——老年代存活多，复制不划算，但容忍整理的暂停。
+
+### 3.4 分代收集（Generational）
+
+实际 JVM 不是用单一算法，而是**分代收集**——不同代用不同算法：
+
+- **新生代**：复制算法——存活少，复制快。
+- **老年代**：标记-清除或标记-整理——存活多，不能复制。
+
+分代的依据是**弱分代假说（Weak Generational Hypothesis）**：
+
+1. 绝大多数对象朝生夕死。
+2. 熬过越多次 GC 的对象越难死。
+
+这两条假说在绝大多数 Java 应用里成立，所以分代收集非常有效。
+
+## 四、垃圾收集器演进
+
+JVM 的垃圾收集器（Garbage Collector）经过 20 多年演进，从单线程到并行、从分代到 Region、从 STW 到并发：
+
+| 收集器 | 时代 | 特点 | 算法 | STW |
+| --- | --- | --- | --- | --- |
+| Serial / Serial Old | 1999 | 单线程 | 复制 / 整理 | 全程 STW |
+| ParNew / Parallel Scavenge | 2002 | 多线程 | 复制 / 整理 | STW，吞吐量优先 |
+| CMS（Concurrent Mark Sweep） | 2004 | 并发标记清除 | 标记-清除 | 部分 STW，低延迟 |
+| G1（Garbage First） | 2012 (JDK 9 默认) | Region 化分代 | 标记-整理 + 复制 | 部分 STW |
+| ZGC | 2017 (JDK 11 预览, 15 转) | 染色指针 | 染色指针 + 读屏障 | ＜10ms |
+| Shenandoah | 2018 (JDK 12, Red Hat) | 并发整理 | Brooks 转发指针 | ＜10ms |
+
+### 4.1 Serial / Serial Old
+
+单线程 GC——GC 时只有一个线程工作，**所有应用线程暂停（STW）**。客户端模式、小内存应用还在用。
+
+```bash
+-XX:+UseSerialGC   # 启用 Serial + Serial Old
+```
+
+### 4.2 Parallel Scavenge / Parallel Old
+
+多线程版 Serial——GC 时多个线程并行，吞吐量优先（GC 占总时间比例低）。JDK 8 默认。
+
+```bash
+-XX:+UseParallelGC   # JDK 8 默认
+-XX:MaxGCPauseMillis=200   # 目标最大 GC 暂停 200ms
+-XX:GCTimeRatio=99         # GC 时间不超过 1/(1+99)=1%
+```
+
+### 4.3 CMS（Concurrent Mark Sweep）
+
+**第一个并发 GC**——大多数阶段和应用线程并发执行，追求低延迟。
+
+四个阶段：
+
+1. **初始标记（Initial Mark）**——STW，标记 GC Roots 直接关联的对象，速度快。
+2. **并发标记（Concurrent Mark）**——和应用并发，从 GC Roots 遍历。
+3. **重新标记（Remark）**——STW，修正并发标记期间应用改变的对象。
+4. **并发清除（Concurrent Sweep）**——和应用并发，清除垃圾。
+
+**问题**：
+
+- **内存碎片**——标记-清除算法不整理，碎片严重。
+- **Concurrent Mode Failure**——并发收集中老年代满了，退化成 Serial Old 全量整理——长 STW。
+- **浮动垃圾**——并发清除期间产生的新垃圾这次回收不掉。
+
+JDK 9 标记废弃，JDK 14 移除——被 G1 取代。
+
+### 4.4 G1（Garbage First）
+
+**JDK 9 起默认 GC**。设计理念——把堆切成多个 **Region**，每次只回收一部分 Region（"垃圾最多"的优先），可控暂停时间。
+
+#### Region 化布局
+
+```
+堆被切成 2048 个左右的 Region (1-32MB 每个)
+┌────┬────┬────┬────┬────┬────┬────┬────┐
+│ E  │ E  │ S  │ O  │ O  │ H  │ O  │ E  │  E=Eden, S=Survivor, O=Old, H=Humongous
+└────┴────┴────┴────┴────┴────┴────┴────┘
+```
+
+- **Region**——堆不再物理分代，每个 Region 动态分配角色（Eden/Survivor/Old）。
+- **Humongous Region**——存放大对象（>Region 一半）。
+- **CSet（Collection Set）**——本次 GC 要回收的 Region 集合。
+- **Remembered Set（RSet）**——记录"谁引用了我"，避免全堆扫描。
+
+#### GC 流程
+
+1. **Young GC**——回收所有 Eden + Survivor Region，存活对象复制到新 Survivor / Old。STW，但只回收部分堆。
+2. **并发标记**——标记 Old Region 的存活对象，和应用并发。
+3. **混合回收（Mixed GC）**——回收全部 Young + 部分 Old（垃圾最多的优先，"Garbage First"由此得名）。
+
+#### 参数
+
+```bash
+-XX:+UseG1GC
+-XX:MaxGCPauseMillis=200   # 目标暂停 200ms
+-XX:G1HeapRegionSize=16m   # Region 大小
+-XX:InitiatingHeapOccupancyPercent=45   # 老年代占用 45% 触发并发标记
+```
+
+G1 的"目标暂停"是软目标——尽量达到但不保证。Region 化让 G1 能"挑着回收"，是低延迟 + 大堆的折中。
+
+### 4.5 ZGC（Z Garbage Collector）
+
+**Oracle 开发的超低延迟 GC**——目标暂停 ＜10ms（甚至 ＜1ms），不随堆大小增长。
+
+#### 核心技术：染色指针（Colored Pointer）
+
+ZGC 在 64 位指针的**高位**塞进 GC 信息（颜色位）：
+
+```
+64 位指针:
+[未使用 16 位][颜色 4 位][对象地址 44 位]
+              ^^^^^^^^^^
+              Finalizable/Marked1/Marked0/Remapped
+```
+
+不同 GC 阶段，对象指针的"颜色"不同。GC 通过改指针颜色标记对象状态，**不用改对象头**——大幅减少内存写入。
+
+#### 读屏障（Load Barrier）
+
+每次从堆读取引用，JVM 插入一段"读屏障"代码——检查指针颜色，如果过时，**当场修复**（移动对象后更新指针）。
+
+这让 ZGC 能在**应用运行时移动对象**——并发整理。代价是读屏障有性能开销，但 JIT 优化后开销 ＜5%。
+
+#### 特点
+
+- 暂停 ＜10ms（Java 16 起 ＜1ms，JDK 21 起分代 ZGC 进一步优化）。
+- 暂停时间不随堆大小增长——TB 级堆也 ＜10ms。
+- 支持 NUMA、染色指针、并发整理。
+
+```bash
+-XX:+UseZGC                  # JDK 15+ 正式启用
+-XX:+UseZGC -XX:+ZGenerational   # JDK 21 分代 ZGC
+```
+
+### 4.6 Shenandoah
+
+Red Hat 开发的低延迟 GC，目标和 ZGC 类似——暂停 ＜10ms。
+
+技术路线不同——用 **Brooks 转发指针（Brooks Forwarding Pointer）** 而非染色指针。每个对象多一个"转发指针"字段，指向"真正的位置"（移动后更新）。
+
+```bash
+-XX:+UseShenandoahGC   # JDK 12+ (OpenJDK)
+```
+
+ZGC 和 Shenandoah 是下一代 GC 的代表——以读屏障/转发指针为代价换取"几乎不 STW"。适合大堆 + 严格低延迟的场景。
+
+## 五、GC 日志与调优
+
+### 5.1 打开 GC 日志
+
+```bash
+# JDK 8
+-XX:+PrintGCDetails -XX:+PrintGCDateStamps -Xloggc:gc.log
+
+# JDK 9+ (统一日志)
+-Xlog:gc*:file=gc.log:time,uptime,level,tags
+```
+
+### 5.2 关键参数
+
+| 参数 | 作用 |
+| --- | --- |
+| `-Xms4g -Xmx4g` | 堆大小（建议相同，避免动态扩展） |
+| `-Xmn1g` | 新生代大小 |
+| `-XX:MetaspaceSize=256m` | 元空间初始 |
+| `-XX:MaxMetaspaceSize=512m` | 元空间最大 |
+| `-XX:SurvivorRatio=8` | Eden : Survivor = 8:1 |
+| `-XX:MaxTenuringThreshold=15` | 晋升老年代年龄 |
+| `-XX:+UseG1GC` | 用 G1 |
+| `-XX:MaxGCPauseMillis=200` | G1/ZGC 目标暂停 |
+| `-XX:+UseZGC` | 用 ZGC |
+| `-XX:+HeapDumpOnOutOfMemoryError` | OOM 时自动 dump 堆 |
+| `-XX:HeapDumpPath=/var/dumps` | dump 路径 |
+
+### 5.3 常见调优场景
+
+- **频繁 Minor GC**——新生代太小，加大 `-Xmn` 或调大 `-XX:NewRatio`。
+- **频繁 Full GC**——老年代太小，加大 `-Xmx`；或内存泄漏，看 heap dump。
+- **GC 暂停长**——换 G1/ZGC，调 `-XX:MaxGCPauseMillis`。
+- **元空间 OOM**——加大 `-XX:MaxMetaspaceSize`，或排查 CGLIB 动态类生成。
+- **直接内存 OOM**——检查 Netty/NIO 的 DirectByteBuffer 是否泄漏。
+
+## 六、实战：观察 GC 与引用
+
+下面的例子演示用代码触发 GC、观察软/弱/虚引用的行为、看 GC 统计。
+
+<CodeRunner code={`import java.lang.ref.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== GC 垃圾回收演示 ===\\n");
+
+        // 1. 查看当前 GC
+        System.out.println("--- 1. 当前垃圾收集器 ---");
+        for (java.lang.management.GarbageCollectorMXBean gc :
+             java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+            System.out.println("  GC: " + gc.getName()
+                + " (次数=" + gc.getCollectionCount()
+                + ", 耗时=" + gc.getCollectionTime() + "ms)");
+        }
+        // 通过 JVM 参数判断
+        String gcName = System.getProperty("java.vm.name");
+        System.out.println("  JVM: " + gcName + " "
+            + System.getProperty("java.version"));
+
+        // 2. 触发 GC 观察
+        System.out.println("\\n--- 2. 触发 GC ---");
+        Runtime rt = Runtime.getRuntime();
+        long MB = 1024 * 1024;
+        System.out.println("GC 前自由内存: " + rt.freeMemory() / MB + " MB");
+
+        // 创建大量对象然后丢弃
+        List<byte[]> junk = new ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            junk.add(new byte[1024 * 100]);   // 100KB each
+        }
+        System.out.println("创建 1000 个 100KB 对象后: " + rt.freeMemory() / MB + " MB");
+
+        junk.clear();   // 释放引用, 对象成为垃圾
+        junk = null;
+        System.gc();   // 建议 GC (不保证立即执行)
+        Thread.sleep(100);
+        System.out.println("System.gc() 后: " + rt.freeMemory() / MB + " MB");
+
+        // 3. 软引用 - 内存不足才回收
+        System.out.println("\\n--- 3. 软引用 (SoftReference) ---");
+        SoftReference<byte[]> softRef = new SoftReference<>(new byte[5 * 1024 * 1024]);   // 5MB
+        System.out.println("创建 5MB 软引用: get() = " + (softRef.get() != null ? "存在" : "null"));
+        System.gc();
+        Thread.sleep(100);
+        System.out.println("System.gc() 后 (内存还充足): get() = "
+            + (softRef.get() != null ? "存在 (软引用不会因 GC 就回收)" : "null"));
+
+        // 4. 弱引用 - 下次 GC 就回收
+        System.out.println("\\n--- 4. 弱引用 (WeakReference) ---");
+        WeakReference<byte[]> weakRef = new WeakReference<>(new byte[5 * 1024 * 1024]);
+        System.out.println("创建 5MB 弱引用: get() = " + (weakRef.get() != null ? "存在" : "null"));
+        System.gc();
+        Thread.sleep(100);
+        System.out.println("System.gc() 后: get() = "
+            + (weakRef.get() != null ? "存在" : "null (弱引用被回收)"));
+
+        // 5. 虚引用 - 跟踪对象销毁
+        System.out.println("\\n--- 5. 虚引用 (PhantomReference) ---");
+        ReferenceQueue<byte[]> queue = new ReferenceQueue<>();
+        PhantomReference<byte[]> phantomRef = new PhantomReference<>(new byte[1024], queue);
+        System.out.println("虚引用 get() = " + phantomRef.get() + " (永远 null)");
+        System.gc();
+        Thread.sleep(100);
+        Reference<?> ref = queue.poll();
+        System.out.println("对象回收后 ReferenceQueue 中: "
+            + (ref != null ? "有 Reference (对象已销毁)" : "无 (可能未触发)"));
+
+        // 6. WeakHashMap - 弱引用 key
+        System.out.println("\\n--- 6. WeakHashMap ---");
+        WeakHashMap<Object, String> weakMap = new WeakHashMap<>();
+        Object key = new Object();
+        weakMap.put(key, "value");
+        System.out.println("put 后 size: " + weakMap.size());
+        key = null;   // 释放强引用
+        System.gc();
+        Thread.sleep(100);
+        System.out.println("key=null + GC 后 size: " + weakMap.size() + " (key 被回收)");
+
+        // 7. 模拟 Minor GC - 新生代
+        System.out.println("\\n--- 7. 新生代分配压力 ---");
+        long start = System.currentTimeMillis();
+        long totalAllocated = 0;
+        for (int i = 0; i < 50000; i++) {
+            byte[] tmp = new byte[1024];   // 1KB
+            totalAllocated += 1024;
+            // tmp 在循环结束就被丢弃, 大部分在新生代被回收
+        }
+        long elapsed = System.currentTimeMillis() - start;
+        System.out.println("分配 " + (totalAllocated / MB) + " MB (各 1KB), 耗时 " + elapsed + " ms");
+        System.out.println("(短命对象在 Eden 中分配, Minor GC 频繁但快)");
+
+        // 8. GC 后的统计
+        System.out.println("\\n--- 8. GC 后统计 ---");
+        for (java.lang.management.GarbageCollectorMXBean gc :
+             java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+            System.out.println("  GC: " + gc.getName()
+                + " (次数=" + gc.getCollectionCount()
+                + ", 累计耗时=" + gc.getCollectionTime() + "ms)");
+        }
+
+        // 9. 内存池使用 - 看分代
+        System.out.println("\\n--- 9. 内存池使用 (分代) ---");
+        for (java.lang.management.MemoryPoolMXBean pool :
+             java.lang.management.ManagementFactory.getMemoryPoolMXBeans()) {
+            java.lang.management.MemoryUsage usage = pool.getUsage();
+            if (usage.getUsed() > 0) {
+                System.out.println("  " + pool.getName() + ": "
+                    + usage.getUsed() / MB + "/" + usage.getCommitted() / MB + " MB");
+            }
+        }
+
+        System.out.println("\\n=== 总结 ===");
+        System.out.println("1. GC Roots 是起点, 可达性分析判断存活");
+        System.out.println("2. 四种引用: 强/软/弱/虚, 回收强度递减");
+        System.out.println("3. 算法: 复制(新生代) / 标记-整理(老年代) / 标记-清除(CMS)");
+        System.out.println("4. 收集器: Serial→Parallel→CMS→G1→ZGC/Shenandoah");
+        System.out.println("5. G1: Region 化分代, 目标暂停可控");
+        System.out.println("6. ZGC: 染色指针 + 读屏障, <10ms 暂停, TB 级堆");
+    }
+}`} />
+
+> **观察重点**：
+> - **软引用**：内存充足时 `System.gc()` 不会回收它——只有内存不足才回收。
+> - **弱引用**：`System.gc()` 后立刻被回收——下次 GC 就回收。
+> - **虚引用 `get()` 永远是 null**——只能通过 ReferenceQueue 感知对象销毁。
+> - **WeakHashMap**：key 没强引用后，GC 后整个 entry 被清除。
+> - **大量短命对象**：在 Eden 分配，Minor GC 频繁但快——分代设计的优势。
+> - **`System.gc()` 只是建议**——JVM 不保证立即执行。可用 `-XX:+DisableExplicitGC` 禁用。
+
+## 七、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| 可达性分析 | 从 GC Roots 遍历，不可达即回收 |
+| GC Roots | 栈变量、静态变量、常量、JNI 引用、锁对象 |
+| 强引用 | 永不回收 |
+| 软引用 | 内存不足回收，做缓存 |
+| 弱引用 | 下次 GC 回收，ThreadLocal 用 |
+| 虚引用 | 跟踪销毁，DirectByteBuffer 用 |
+| 标记-清除 | 简单但有碎片 |
+| 复制 | 无碎片但费内存，新生代用 |
+| 标记-整理 | 无碎片无浪费，但慢，老年代用 |
+| 分代 | 新生代复制 + 老年代整理 |
+| G1 | Region 化分代，目标暂停可控 |
+| ZGC | 染色指针 + 读屏障，＜10ms |
+| Shenandoah | 转发指针，＜10ms |
+
+**记忆口诀**：
+
+- **可达性分析找垃圾**——从 GC Roots 走，走不到的是垃圾。
+- **GC Roots 是入口**——栈变量、静态变量、常量、JNI 引用、锁对象。
+- **强不回收，软不够才回收，弱下次就回收，虚只是通知**——四种引用强度递减。
+- **复制新生代，整理老年代**——分代算法的核心。
+- **G1 是 Region 化**——堆切 2048 块，挑垃圾多的回收。
+- **ZGC 是染色指针**——指针里塞 GC 信息，读屏障修复。
+- **CMS 已死，G1 当道，ZGC 是未来**——选 GC 的现代答案。
+
+## 结语：GC 是 Java 的"自动垃圾车"
+
+GC 让 Java 程序员不用像 C/C++ 程序员那样手动 `malloc/free`——这是 Java 最大的卖点之一。但"自动"不等于"透明"——理解 GC 才能避免 OOM、卡顿、CPU 飙高。
+
+这一章我们看了 GC 的原理和演进。下一章我们看 **类加载机制**——JVM 怎么把 `.class` 文件加载进内存，怎么用双亲委派模型组织类加载器，怎么"打破"双亲委派（Tomcat、SPI、热部署）。如果说 GC 是"垃圾回收"，类加载就是"对象出生"——一死一生，构成 JVM 的循环。我们下一章见。

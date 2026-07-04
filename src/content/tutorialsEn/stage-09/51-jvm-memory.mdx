@@ -1,0 +1,508 @@
+---
+title: "The JVM Memory Model"
+chapter: 51
+stage: "Stage 9"
+stageName: "JVM Deep Dive"
+order: 1
+description: "Dive into JVM runtime data areas, generational heap memory (Eden/Survivor/Old), method area and metaspace, VM stack and stack frames, native method stack, program counter, and direct memory for NIO"
+pubDate: 2026-07-03
+tags: ["Java", "JVM", "内存模型", "堆", "元空间", "栈帧", "直接内存"]
+---
+
+# The JVM Memory Model
+
+From this chapter, we enter **Stage 9: JVM Deep Dive**. The previous eight stages covered "writing Java programs" — syntax, APIs, concurrency, IO. This stage dives inside the JVM to see what happens in memory when a Java program "runs." This is the Java engineer's "internal strength" — many can write Java, few understand the JVM; understanding the JVM is what lets you truly tune performance, diagnose problems, and stand strong in interviews.
+
+We begin with the most fundamental **JVM Memory Model** — it defines how the JVM's memory is divided when running a Java program, and what each region stores. This is the foundation for all subsequent chapters (GC, class loading, tuning).
+
+## 1. Runtime Data Areas: The Spec's "Five Regions"
+
+The **Java Virtual Machine Specification (JVM Specification)** defines the JVM's runtime memory layout, called **Runtime Data Areas**. The spec defines five regions:
+
+| Region | Thread-private? | Stores | OOM risk |
+| --- | --- | --- | --- |
+| Program Counter Register (PC) | Yes | Bytecode line number the current thread is executing | No OOM |
+| VM Stack | Yes | Method call stack frames | Possible StackOverflowError/OOM |
+| Native Method Stack | Yes | Stack frames for native methods | Possible StackOverflowError/OOM |
+| Heap | No | Object instances, arrays | Main OOM source |
+| Method Area | No | Class metadata, constant pool, static variables | Possible OOM (metaspace overflow) |
+
+Plus one not "spec-defined" but practically present — **Direct Memory**, used by NIO.
+
+Let's look at each one.
+
+## 2. Program Counter (PC Register)
+
+### 2.1 What It Is
+
+The **Program Counter Register (PC)** is a **very small memory region** that records **the bytecode instruction address the current thread is executing**.
+
+Analogy: a person reading a book uses a bookmark to mark "which line they're on" — the PC is the thread's "bookmark."
+
+### 2.2 Characteristics
+
+- **Thread-private** — each thread has its own PC, no interference.
+- **No OOM** — too small; the spec explicitly says the PC never has OOM.
+- **If executing a native method, PC is undefined** — native methods aren't bytecode, no "line number" concept.
+
+### 2.3 Why It Must Be Thread-Private
+
+When threads switch, the CPU suspends the current thread, runs another, and later switches back — when switching back, how does it know where to continue? Through the PC. If the PC were shared, thread A switching back would run thread B's code — the logic would be totally scrambled. A thread-private PC is the foundation of multi-thread "round-robin."
+
+## 3. VM Stack and Stack Frames
+
+### 3.1 What the VM Stack Is
+
+The **VM Stack** is **thread-private** and models **Java method invocation**. When a method is called, a **stack frame** is created and pushed onto the stack; when the method returns, the frame is popped.
+
+```
+Thread A's VM Stack:
+┌─────────────────┐
+│ main's frame     │  ← stack bottom
+├─────────────────┤
+│ methodA's frame  │
+├─────────────────┤
+│ methodB's frame  │  ← stack top (currently executing)
+└─────────────────┘
+```
+
+### 3.2 Stack Frame Structure
+
+Each stack frame contains:
+
+- **Local Variable Table** — stores method parameters and local variables. Primitives store values directly; references store references (pointing to the heap).
+- **Operand Stack** — the "workspace" for bytecode instructions. For example, `a + b` requires pushing a, b onto the operand stack, then `iadd` pops them, sums, and pushes back.
+- **Dynamic Linking** — a reference to the method in the runtime constant pool, supporting dynamic dispatch.
+- **Method return address** — where to jump back in the caller's PC after the method ends.
+- **Additional info** — debug, annotations, etc.
+
+### 3.3 The Local Variable Table
+
+The local variable table is an **array** structure; each "slot" is 32 bits. `long`/`double` take two slots; other types take one.
+
+```java
+public int add(int a, int b) {
+    int c = a + b;
+    return c;
+}
+// Local variable table:
+// slot 0: this (instance methods implicitly have this)
+// slot 1: a
+// slot 2: b
+// slot 3: c
+```
+
+### 3.4 StackOverflowError and OOM
+
+The VM stack has two exceptions:
+
+- **StackOverflowError** — stack depth exceeded (too-deep recursion). Default stack size 512KB-1MB, tunable via `-Xss`.
+- **OutOfMemoryError** — not enough memory when expanding the stack.
+
+```java
+public static void recurse(int n) {
+    recurse(n + 1);   // infinite recursion, guaranteed StackOverflowError
+}
+```
+
+### 3.5 Tuning Stack Size
+
+```bash
+java -Xss512k MyProgram   # each thread's stack 512KB
+java -Xss2m MyProgram     # 2MB
+```
+
+A larger stack supports deeper recursion but fewer threads (total memory is fixed). A smaller stack allows shallower recursion but more threads — this is the stack-size trade-off.
+
+## 4. Native Method Stack
+
+The **Native Method Stack** is almost identical to the VM Stack; the only difference — the VM Stack serves Java methods, the Native Method Stack serves **native methods** (C/C++-implemented methods like `Object.hashCode`, `System.currentTimeMillis`).
+
+Some JVMs (like HotSpot) merge the VM Stack and Native Method Stack into one — the spec allows this. Exceptions are also `StackOverflowError` and `OutOfMemoryError`.
+
+## 5. The Heap: Where Objects Live
+
+### 5.1 What the Heap Is
+
+The **Heap** is the JVM's largest memory region, **shared by all threads**, and **almost all object instances and arrays are allocated on the heap** (escape analysis may enable stack allocation, but the vast majority are still on the heap).
+
+The heap is the **main battlefield of GC (Garbage Collection)** — the next chapter covers GC; here we look at the heap's structure.
+
+### 5.2 The Heap's Generational Structure
+
+Modern JVMs divide the heap into **Young Generation** and **Old Generation**, because "the vast majority of objects die young," and generational division makes GC more efficient.
+
+```
+Heap
+├── Young Gen - about 1/3 of heap
+│   ├── Eden (about 8/10 of young gen)
+│   ├── Survivor 0 (about 1/10)
+│   └── Survivor 1 (about 1/10)
+└── Old Gen - about 2/3 of heap
+```
+
+**Eden : Survivor0 : Survivor1 = 8 : 1 : 1**, the default ratio (`-XX:SurvivorRatio=8`).
+
+### 5.3 An Object's Lifecycle
+
+New objects are first allocated in **Eden**. When Eden fills, **Minor GC** triggers:
+
+1. Surviving objects in Eden are copied to S0 (Survivor 0).
+2. Eden is cleared.
+3. Next Minor GC: surviving objects in Eden + S0 are copied to S1.
+4. S0 is cleared.
+5. Next Minor GC: surviving objects in Eden + S1 are copied to S0.
+6. Repeat, with S0 and S1 copying back and forth.
+
+After each Minor GC, surviving objects have their **age +1**. When the age reaches the threshold (default 15, `-XX:MaxTenuringThreshold`), they're **promoted to the Old Generation**.
+
+Large objects (e.g., big arrays) go directly to the Old Generation — to avoid the overhead of copying back and forth between Survivors (controlled by `-XX:PretenureSizeThreshold`).
+
+### 5.4 The Old Generation
+
+The Old Generation holds **long-lived objects** — caches, singletons, long-held collections. Old Generation GC is infrequent, but each pass is time-consuming.
+
+When the Old Generation fills, **Major GC / Full GC** triggers — much slower than Minor GC, with STW (Stop The World, pausing all application threads).
+
+### 5.5 Heap Parameters
+
+```bash
+-Xms2g           # heap initial size 2GB
+-Xmx4g           # heap max size 4GB
+-Xmn1g           # young gen size 1GB
+-XX:NewRatio=2   # Old:Young = 2:1
+-XX:SurvivorRatio=8   # Eden:S = 8:1
+-XX:MaxTenuringThreshold=15   # promotion age
+```
+
+Setting `-Xms` and `-Xmx` to the same value avoids heap dynamic-expansion overhead — a common production config.
+
+## 6. The Method Area and Metaspace
+
+### 6.1 What the Method Area Is
+
+The **Method Area** is also thread-shared, storing:
+
+- **Class metadata** — class name, parent class, interfaces, fields, methods, bytecode.
+- **Runtime constant pool** — the runtime version of the class's compile-time constant pool after loading.
+- **Static variables** — `static` fields.
+- **JIT-compiled native code** (in some implementations).
+
+The Method Area is a logical region defined by the JVM spec; different JVMs implement it differently:
+
+| JDK version | Method Area implementation | Location |
+| --- | --- | --- |
+| JDK 7 and earlier | Permanent Generation (PermGen) | Inside heap |
+| JDK 8+ | Metaspace | Outside heap (native memory) |
+
+### 6.2 Why PermGen Was Abolished
+
+Before JDK 8, **Permanent Generation (PermGen)** implemented the Method Area, with problems:
+
+- **Fixed size** — `-XX:MaxPermSize` set too small easily OOMs; too large wastes.
+- **Inefficient GC** — PermGen's GC was coupled with the Old Generation, poor performance.
+- **Hard to estimate** — dynamically generated classes (CGLIB, Groovy) easily blew PermGen.
+
+JDK 8 removed PermGen and switched to **Metaspace**, stored in **Native Memory** — size bounded by machine memory, no longer limited by JVM heap size.
+
+```bash
+-XX:MetaspaceSize=256m      # metaspace initial size, threshold to trigger GC
+-XX:MaxMetaspaceSize=512m   # metaspace max size
+```
+
+### 6.3 String Constant Pool Location Changes
+
+The String Pool's location also changed:
+
+- **JDK 6**: in PermGen.
+- **JDK 7+**: moved into the heap — because PermGen was too small, heavy `String.intern()` usage would OOM.
+
+```java
+String s1 = "hello";              // string constant pool
+String s2 = new String("hello");  // new object on heap, but references "hello" in the pool
+System.out.println(s1 == s2);     // false
+System.out.println(s1 == s2.intern());   // true
+```
+
+## 7. The Runtime Constant Pool
+
+The **Runtime Constant Pool** is part of the Method Area. After each class is compiled, it generates a **constant pool table** (in the class file); after class loading, this table is loaded into the runtime constant pool.
+
+The constant pool stores:
+
+- **Literals** — strings, final constant values.
+- **Symbolic references** — symbols for class names, method names, field names (not yet resolved to direct references).
+- **Method handles, method types** — used by invokedynamic.
+
+The runtime constant pool is **dynamic** — `String.intern()` can add strings at runtime.
+
+## 8. Direct Memory
+
+### 8.1 Not Defined by the JVM Spec
+
+**Direct Memory** is not a runtime data area defined by the JVM spec, but it's widely used — mainly by NIO's `ByteBuffer.allocateDirect`.
+
+Direct memory is **off-heap memory** — not in the Java heap, allocated via `unsafe.allocateMemory` or NIO's DirectByteBuffer, managed by the OS.
+
+### 8.2 Why Use Direct Memory
+
+- **Zero copy** — NIO's Channel + DirectByteBuffer can exchange data directly with OS buffers, skipping the "kernel buffer → Java heap" copy.
+- **Large objects** — avoid GC overhead for large objects in the Java heap.
+- **JNI interaction** — native code can directly access this memory.
+
+```java
+ByteBuffer buf = ByteBuffer.allocateDirect(1024 * 1024);   // 1MB direct memory
+```
+
+### 8.3 Risks
+
+- **Not GC-managed** — DirectByteBuffer release relies on Cleaners (phantom reference mechanism); delayed release may leak memory.
+- **OOM risk** — `OutOfMemoryError: Direct buffer memory`.
+
+```bash
+-XX:MaxDirectMemorySize=1g   # max direct memory 1GB
+```
+
+Netty uses direct memory heavily for network buffers — standard for high-throughput network frameworks.
+
+## 9. Object Memory Layout
+
+Having covered memory regions, let's see what an object looks like in the heap. A Java object in the heap has three parts:
+
+```
+Object Header  ────  12 bytes (64-bit JVM, compressed pointers)
+├── Mark Word (8 bytes)        ── hashCode/generation age/lock state/bias
+└── Class pointer (4 bytes, compressed)   ── points to Class metadata
+Instance Data   ──  field values (aligned by type)
+Padding         ──  pads object size to a multiple of 8 bytes
+```
+
+- **Object header**: 12 bytes (with compressed pointers `-XX:+UseCompressedOops`, on by default), 16 bytes without compression.
+- **Instance data**: field values, sized by field type (long/double 8 bytes, int 4 bytes, reference 4 bytes compressed / 8 bytes uncompressed).
+- **Padding**: 8-byte alignment; padded if short.
+
+So a `new Object()` actually takes **16 bytes** — 12-byte header + 0 fields + 4-byte padding.
+
+```java
+class Point {
+    int x;   // 4 bytes
+    int y;   // 4 bytes
+}
+// Point object size = 12 (header) + 4 (x) + 4 (y) = 20 bytes, aligned to 24 bytes
+```
+
+The **Mark Word** in the object header is key to lock escalation (no lock → biased lock → lightweight lock → heavyweight lock) covered later — it records lock state, hashCode, generation age.
+
+## 10. Practice: Observing JVM Memory
+
+The following example demonstrates observing each memory region's usage with Java code.
+
+<CodeRunner code={`import java.util.*;
+import java.nio.ByteBuffer;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== JVM Memory Model Demo ===\\n");
+
+        // 1. Memory overview - use Runtime to see heap memory
+        System.out.println("--- 1. Heap Memory Overview (Runtime) ---");
+        Runtime rt = Runtime.getRuntime();
+        long MB = 1024 * 1024;
+        System.out.println("JVM max heap (-Xmx): " + rt.maxMemory() / MB + " MB");
+        System.out.println("JVM current heap total: " + rt.totalMemory() / MB + " MB");
+        System.out.println("JVM current heap free: " + rt.freeMemory() / MB + " MB");
+        System.out.println("Used heap: " + (rt.totalMemory() - rt.freeMemory()) / MB + " MB");
+        System.out.println("Available CPUs: " + rt.availableProcessors());
+
+        // 2. System/memory info
+        System.out.println("\\n--- 2. System Memory Info ---");
+        java.lang.management.OperatingSystemMXBean os =
+            java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+        System.out.println("OS: " + os.getName() + " " + os.getVersion());
+        System.out.println("Architecture: " + os.getArch());
+        System.out.println("CPU cores: " + os.getAvailableProcessors());
+
+        // 3. Memory pool info - show heap generations
+        System.out.println("\\n--- 3. Memory Pools (Heap Generations) ---");
+        for (java.lang.management.MemoryPoolMXBean pool :
+             java.lang.management.ManagementFactory.getMemoryPoolMXBeans()) {
+            java.lang.management.MemoryUsage usage = pool.getUsage();
+            System.out.println("Pool: " + pool.getName() + " [" + pool.getType() + "]");
+            System.out.println("  used: " + usage.getUsed() / MB + " MB"
+                + " / committed: " + usage.getCommitted() / MB + " MB"
+                + " / max: " + (usage.getMax() == -1 ? "unlimited" : usage.getMax() / MB + " MB"));
+        }
+
+        // 4. Metaspace - JDK 8+ Method Area
+        System.out.println("\\n--- 4. Metaspace ---");
+        for (java.lang.management.MemoryPoolMXBean pool :
+             java.lang.management.ManagementFactory.getMemoryPoolMXBeans()) {
+            if (pool.getName().toLowerCase().contains("metaspace")) {
+                java.lang.management.MemoryUsage usage = pool.getUsage();
+                System.out.println("Metaspace used: " + usage.getUsed() / MB + " MB");
+                System.out.println("Metaspace committed: " + usage.getCommitted() / MB + " MB");
+                System.out.println("Metaspace max: " + (usage.getMax() == -1 ? "unlimited" : usage.getMax() / MB + " MB"));
+            }
+        }
+
+        // 5. Loaded class count (class metadata in metaspace)
+        java.lang.management.ClassLoadingMXBean cl =
+            java.lang.management.ManagementFactory.getClassLoadingMXBean();
+        System.out.println("\\nLoaded classes: " + cl.getLoadedClassCount());
+        System.out.println("Total loaded: " + cl.getTotalLoadedClassCount());
+        System.out.println("Unloaded: " + cl.getUnloadedClassCount());
+
+        // 6. Demo heap allocation - create many objects and observe
+        System.out.println("\\n--- 6. Heap Allocation Demo ---");
+        long before = rt.freeMemory();
+        List<int[]> objects = new ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            objects.add(new int[1000]);   // ~4KB each
+        }
+        long after = rt.freeMemory();
+        System.out.println("After creating 1000 int[1000]:");
+        System.out.println("  Free memory change: " + (before - after) / MB + " MB");
+        System.out.println("  Theoretical size: " + (1000 * 1000 * 4L / MB) + " MB (4 bytes/int)");
+        System.out.println("  Actual extra (object header + alignment): " + ((before - after) - 1000 * 1000 * 4L) / 1024 + " KB");
+
+        // 7. Direct memory (NIO)
+        System.out.println("\\n--- 7. Direct Memory (NIO DirectByteBuffer) ---");
+        long directBefore = sumDirectMemory();
+        ByteBuffer directBuf = ByteBuffer.allocateDirect(10 * 1024 * 1024);   // 10MB direct memory
+        long directAfter = sumDirectMemory();
+        System.out.println("Before 10MB direct allocation: " + directBefore / MB + " MB");
+        System.out.println("After 10MB direct allocation: " + directAfter / MB + " MB");
+        System.out.println("Direct memory is off-heap, not counted in Runtime.heapMemory");
+        System.out.println("  Runtime.freeMemory change: "
+            + (rt.freeMemory() - after) / MB + " MB (may not change, direct memory isn't heap)");
+
+        // 8. Demo stack depth - recurse until StackOverflow
+        System.out.println("\\n--- 8. VM Stack Depth ---");
+        try {
+            deepRecurse(0);
+        } catch (StackOverflowError e) {
+            System.out.println("Recursed to " + currentDepth + " levels triggering StackOverflowError");
+            System.out.println("(default stack size ~512KB-1MB, use -Xss to adjust)");
+        }
+
+        // 9. Thread info - each thread has its own PC + stack
+        System.out.println("\\n--- 9. Thread Info ---");
+        java.lang.management.ThreadMXBean tb =
+            java.lang.management.ManagementFactory.getThreadMXBean();
+        System.out.println("Current live threads: " + tb.getThreadCount());
+        System.out.println("Total started threads: " + tb.getTotalStartedThreadCount());
+        System.out.println("Peak thread count: " + tb.getPeakThreadCount());
+        System.out.println("Each thread has: program counter + VM stack + native method stack (thread-private)");
+
+        // 10. GC info
+        System.out.println("\\n--- 10. GC Info ---");
+        for (java.lang.management.GarbageCollectorMXBean gc :
+             java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+            System.out.println("GC: " + gc.getName()
+                + ", collections: " + gc.getCollectionCount()
+                + ", total time: " + gc.getCollectionTime() + " ms");
+        }
+
+        System.out.println("\\n=== Summary ===");
+        System.out.println("Runtime data areas, five regions:");
+        System.out.println("  Program Counter (PC)         - thread-private, records bytecode address, no OOM");
+        System.out.println("  VM Stack                     - thread-private, method frames, SOF/OOM");
+        System.out.println("  Native Method Stack          - thread-private, native method frames");
+        System.out.println("  Heap                         - shared, objects/arrays, generational, main OOM source");
+        System.out.println("  Method Area (Metaspace)      - shared, class metadata/constant pool/static vars");
+        System.out.println("Direct Memory                 - NIO uses, off-heap, not GC-managed");
+    }
+
+    static int currentDepth = 0;
+    static void deepRecurse(int n) {
+        currentDepth = n;
+        deepRecurse(n + 1);
+    }
+
+    static long sumDirectMemory() {
+        // Get via NIO Bits class reflection (JDK 9+ not directly accessible)
+        // Simple approach here: directly read ByteBuffer's allocated counter
+        try {
+            Class<?> bitsClass = Class.forName("java.nio.Bits");
+            java.lang.reflect.Field f = bitsClass.getDeclaredField("RESERVED_MEMORY");
+            f.setAccessible(true);
+            // JDK 9+ is LongAdder
+            Object value = f.get(null);
+            if (value instanceof java.util.concurrent.atomic.LongAdder) {
+                return ((java.util.concurrent.atomic.LongAdder) value).sum();
+            }
+            return ((java.util.concurrent.atomic.AtomicLong) value).get();
+        } catch (Throwable e) {
+            return -1;   // reflection failed, not accessible
+        }
+    }
+}`} />
+
+> **Key observations**:
+> - **`MemoryPoolMXBean`** lists all memory pools — you can see Eden, Survivor, Old, Metaspace and other specific regions.
+> - **Metaspace isn't in the heap** — `Runtime.freeMemory()` can't see metaspace usage.
+> - **Direct memory isn't in the heap** — `ByteBuffer.allocateDirect(10MB)` doesn't affect `Runtime.freeMemory()`.
+> - **Recursion depth is bounded by stack size** — by default reaches several thousand levels (depending on frame size).
+> - **`-Xss` tunes stack, `-Xms`/`-Xmx` tune heap, `-XX:MaxMetaspaceSize` tunes metaspace** — three different parameter groups.
+
+## 11. Object Creation: From new to Usable
+
+Having covered the memory regions, let's see the full process from `new` to usable — connecting all regions:
+
+1. **Class loading check** — at the `new` instruction, the JVM checks whether the class is loaded, resolved, and initialized. If not, run class loading (detailed in Chapter 53 next stage).
+2. **Allocate memory** — carve out a piece in the heap's Eden. Two methods:
+   - **Bump the Pointer**: when the heap is neat (Serial/ParNew with Compact), just move the pointer.
+   - **Free List**: when the heap isn't neat (CMS), maintain a list of free blocks and find a suitable one.
+3. **Zero-initialize memory** — the allocated memory is zeroed (excluding the object header), so field defaults are 0/null.
+4. **Set the object header** — fill in the Mark Word (hash, generation age, lock state) and class pointer.
+5. **Execute `＜init＞`** — call the constructor, set field initial values.
+
+```java
+Person p = new Person("Alice", 30);
+// 1. JVM checks if Person is loaded
+// 2. Allocate memory in Eden (assume bump pointer)
+// 3. Zero memory (name=null, age=0)
+// 4. Set object header (class pointer → Person.class)
+// 5. Call <init>("Alice", 30) to set fields
+// 6. p references this memory
+```
+
+## 12. Chapter Summary
+
+| Region | Thread-private | Stores | Tuning params | Exception |
+| --- | --- | --- | --- | --- |
+| Program Counter | Yes | Bytecode address | None | No OOM |
+| VM Stack | Yes | Method frames | `-Xss` | SOF / OOM |
+| Native Method Stack | Yes | Native method frames | `-Xss` | SOF / OOM |
+| Heap | No | Objects/arrays | `-Xms`/`-Xmx`/`-Xmn` | OOM |
+| Method Area (Metaspace) | No | Class metadata/constant pool | `-XX:MetaspaceSize`/`-XX:MaxMetaspaceSize` | OOM |
+| Direct Memory | No | NIO off-heap memory | `-XX:MaxDirectMemorySize` | OOM |
+
+**Heap generations**:
+
+| Region | Ratio | Stores | GC |
+| --- | --- | --- | --- |
+| Eden | 8/10 of young gen | New objects | Minor GC |
+| Survivor 0/1 | 1/10 each | Copied surviving objects | Minor GC |
+| Old | 2/3 of heap | Long-lived objects | Major GC / Full GC |
+
+**Mnemonics**:
+
+- **PC is the bookmark** — thread-private "which line am I on."
+- **Stack is the method call stack** — one frame per method, last in first out.
+- **Heap is the object's home** — generational residence; the short-lived in young gen, the long-lived in old gen.
+- **Metaspace is the class filing cabinet** — JDK 8+ off-heap; too many CGLIB dynamic classes blow it up.
+- **Direct memory is the back garden** — used by NIO, not GC-managed; watch for leaks.
+- **Eden : S0 : S1 = 8:1:1** — the standard for young-gen "copying collection."
+- **Object header 12 bytes, Mark Word is the lock's lifeline** — later chapters on locks rely on it.
+
+## Conclusion: The Memory Model Is the JVM's "Map"
+
+This chapter is the "map" of JVM deep dive — all subsequent chapters unfold on this map:
+
+- **GC (Chapter 52)** reclaims objects on the heap; generations decide GC strategy.
+- **Class loading (Chapter 53)** stuffs class metadata into metaspace.
+- **Performance tuning (Chapter 54)** tunes heap size, stack size, metaspace size.
+- **Bytecode (Chapter 55)** runs instructions on the operand stack and local variable table.
+
+Understanding the memory model lets you read GC logs, read heap dumps, read jstack output — it's the JVM engineer's "map." The next chapter covers **Garbage Collection (GC)** — how objects on the heap are automatically reclaimed, why Java doesn't need manual `free` like C/C++. See you in the next chapter.

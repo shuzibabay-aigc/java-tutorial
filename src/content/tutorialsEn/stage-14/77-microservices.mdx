@@ -1,0 +1,565 @@
+---
+title: "Microservices"
+chapter: 77
+stage: "Stage 14"
+stageName: "Advanced Topics and Distributed Systems"
+order: 5
+description: "Master the evolution from monolith to microservices, service registration and discovery (Nacos), API gateway (Spring Cloud Gateway), declarative invocation (OpenFeign), circuit breaking and rate limiting (Sentinel), configuration center, and distributed tracing"
+pubDate: 2026-07-03
+tags: ["Java", "Microservices", "Spring Cloud", "Nacos", "Gateway", "Sentinel", "OpenFeign", "Service Registration"]
+---
+
+# Microservices
+
+Imagine an office tower. If the whole building is one giant open floor — everyone crammed together, the AC breaks and the whole building stops working, you renovate one desk and the whole building has to move out. That's a **monolith** — every feature packed into one program; change one thing, redeploy everything; one thing crashes, everything crashes.
+
+A smart architect splits the building into individual offices — each with its own renovation, its own AC, its own access control. That's **microservices** — splitting a big application into many small services, each deploying, evolving, and bearing load on its own.
+
+This chapter looks at how to split a microservice architecture and how the Spring Cloud family (Nacos/Gateway/Sentinel/OpenFeign) holds it all up.
+
+## I. From Monolith to Microservices
+
+### 1.1 The Pain of a Monolith
+
+A monolith — all the code packaged into a single JAR/WAR, running in one process. Simple at first, disastrous later:
+
+- **One change means a full release** — tweaking a button's color means redeploying the whole system.
+- **Locked-in tech stack** — a Java project wanting to bring in a Python ML module? Hard.
+- **Wasteful scaling** — only the order module is under load, yet you have to scale the whole thing.
+- **Failure spreads** — one memory leak drags down the entire system.
+
+### 1.2 The Microservice Answer
+
+Microservices split a system along business boundaries into multiple independent services — order service, user service, product service, payment service. Each service:
+- **Deploys independently** — its own process, its own servers.
+- **Has its own database** — services don't share databases; they communicate via APIs.
+- **Picks its own tech stack** — orders in Java, recommendations in Go, whatever fits.
+- **Scales independently** — if the order service is under pressure, scale only orders.
+
+```
+Client → API Gateway
+            ↓
+   ┌────────┼────────┐
+   ↓        ↓        ↓
+User Svc  Order Svc  Product Svc
+   ↓        ↓        ↓
+ User DB  Order DB  Product DB
+```
+
+### 1.3 The Cost of Microservices
+
+Microservices are no silver bullet — they buy flexibility at the price of complexity:
+- **Network overhead** — calls between services travel the network, slower than method calls.
+- **Distributed transactions** — transactions spanning services are hard (Saga / TCC / local message table).
+- **Operational cost** — dozens of services make deployment, monitoring, and logging complex.
+- **Service dependencies** — service A calls B; if B is down, what does A do? (circuit breaking, graceful degradation).
+
+## II. Service Registration and Discovery: Nacos
+
+Microservices need to call each other — how do they know where the other party is? The most naive approach — hardcode IPs in a config file. But services scale, migrate, and restart; IPs change constantly.
+
+**Service registration and discovery** — when a service starts, it registers itself with a "registry"; callers query the registry for the target service's address.
+
+### 2.1 Nacos Overview
+
+**Nacos** (Naming and Configuration Service) is Alibaba's open-source registry + configuration center. On startup, a service registers its IP and port with Nacos; callers pull the service list from Nacos, load-balance locally, and invoke.
+
+```
+Order service starts → registers with Nacos (order-service: 192.168.1.10:8080)
+User service wants to call order → queries Nacos for the order-service list → picks one and calls
+```
+
+### 2.2 Spring Boot Integration
+
+```yaml
+# application.yml
+spring:
+  application:
+    name: order-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: localhost:8848
+```
+
+```java
+@SpringBootApplication
+@EnableDiscoveryClient   // Enable service discovery
+public class OrderApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(OrderApplication.class, args);
+    }
+}
+```
+
+After registration, the Nacos console shows the `order-service` instance list. Nacos health-checks instances periodically; failed instances get evicted.
+
+## III. API Gateway: Spring Cloud Gateway
+
+With dozens of microservices, a client can't possibly remember every service's address. The **API gateway** is the single entry point — all requests hit the gateway first, and it routes them to backend services by rules.
+
+The gateway can also:
+- **Route forwarding** — forward by path to different services.
+- **Authenticate** — validate tokens centrally; reject invalid ones outright.
+- **Rate limit** — guard against malicious traffic.
+- **Log and monitor** — record requests centrally.
+
+### 3.1 Spring Cloud Gateway Routing
+
+```yaml
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: order-service
+          uri: lb://order-service          # lb means load-balanced
+          predicates:
+            - Path=/api/orders/**          # Path matching
+        - id: user-service
+          uri: lb://user-service
+          predicates:
+            - Path=/api/users/**
+          filters:
+            - name: RequestRateLimiter     # Rate limiting
+              args:
+                redis-rate-limiter.replenishRate: 10
+                redis-rate-limiter.burstCapacity: 20
+```
+
+A request to `/api/orders/123` gets routed to some instance of `order-service`, with the gateway using Ribbon/LoadBalancer to pick one. The rate-limiter config caps requests at 10 per second.
+
+### 3.2 Custom Filters
+
+```java
+@Component
+public class AuthFilter implements GlobalFilter {
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        String token = exchange.getRequest().getHeaders().getFirst("Authorization");
+        if (token == null || !validate(token)) {
+            exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+            return exchange.getResponse().setComplete();
+        }
+        return chain.filter(exchange);
+    }
+}
+```
+
+## IV. Declarative Invocation: OpenFeign
+
+Calling between services with `RestTemplate` is tedious —拼接 URLs, parsing responses, handling exceptions — a pile of boilerplate. **OpenFeign** uses an interface + annotations approach, so calling a remote service feels like calling a local method.
+
+```java
+// Declare a Feign client
+@FeignClient(name = "user-service")
+public interface UserClient {
+    @GetMapping("/users/{id}")
+    User getUser(@PathVariable Long id);
+
+    @PostMapping("/users")
+    User createUser(@RequestBody User user);
+}
+
+// Usage
+@Service
+public class OrderService {
+    @Autowired
+    private UserClient userClient;
+
+    public Order createOrder(Long userId) {
+        User user = userClient.getUser(userId);   // Like calling a local method
+        // ...
+    }
+}
+```
+
+OpenFeign uses dynamic proxies to generate HTTP calls under the hood, and combined with Nacos it load-balances — you only write the interface.
+
+## V. Circuit Breaking and Rate Limiting: Sentinel
+
+When a microservice call chain grows long, one service failing can trigger an **avalanche** — A calls B, B fails, A waits and times out, A fails too, C calls A and also fails... the whole chain collapses.
+
+**Circuit breaking** — when downstream failures exceed a threshold, the upstream "opens the circuit" and stops calling, giving the downstream time to recover. **Rate limiting** — control the request rate; reject what exceeds the limit.
+
+### 5.1 Sentinel Overview
+
+**Sentinel** is Alibaba's open-source traffic-governance component — circuit breaking, rate limiting, system-load protection, and hot-parameter rate limiting. It processes requests through a "slot chain," and rules can be pushed dynamically.
+
+### 5.2 Three Circuit-Breaking Strategies
+
+| Strategy | Trigger |
+| --- | --- |
+| Slow-call ratio | Proportion of slow calls exceeds threshold |
+| Exception ratio | Proportion of exceptions exceeds threshold |
+| Exception count | Number of exceptions exceeds threshold |
+
+Three states of a circuit breaker:
+- **CLOSED** — normal, requests pass through.
+- **OPEN** — tripped; requests fail fast.
+- **HALF_OPEN** — half-open; one probe request is allowed; on success it returns to CLOSED, on failure it stays OPEN.
+
+### 5.3 Code Example
+
+```java
+@SentinelResource(value = "createOrder",
+                  blockHandler = "createOrderBlock",
+                  fallback = "createOrderFallback")
+public Order createOrder(OrderRequest req) {
+    return orderClient.create(req);   // May throw an exception
+}
+
+// Called when rate-limited / circuit-broken
+public Order createOrderBlock(OrderRequest req, BlockException ex) {
+    return new Order("降级订单: 系统繁忙");
+}
+
+// Called on business exception
+public Order createOrderFallback(OrderRequest req, Throwable t) {
+    return new Order("兜底订单: " + t.getMessage());
+}
+```
+
+## VI. Configuration Center: Nacos Config
+
+Dozens of microservices, each with its own config (database, Redis, MQ addresses). Redeploy every time a config changes? Exhausting.
+
+**Configuration center** — all configs are stored centrally in Nacos; services pull them on startup, and when a config changes it's pushed dynamically — no restart needed.
+
+```yaml
+# bootstrap.yml
+spring:
+  application:
+    name: order-service
+  cloud:
+    nacos:
+      config:
+        server-addr: localhost:8848
+        file-extension: yaml
+```
+
+```java
+@RefreshScope   // Auto-refresh when config changes
+@RestController
+public class OrderController {
+    @Value("${order.timeout:3000}")
+    private int timeout;   // Changed in Nacos, updates here automatically
+}
+```
+
+## VII. Distributed Tracing
+
+A single microservice request may pass through 5 services — when something goes wrong, how do you pinpoint which service is slow? **Distributed tracing** gives each request a unique traceId that every service carries along; finally everything is aggregated into a visual dashboard.
+
+The mainstream solution — **Spring Cloud Sleuth + Zipkin** (or SkyWalking). Each request generates a traceId, each service segment generates a spanId, all reported to Zipkin, where the UI shows the call chain and latency.
+
+```
+traceId: abc123
+  span1: gateway (10ms)
+    span2: order-service (50ms)
+      span3: user-service (30ms)
+      span4: product-service (15ms)
+```
+
+## VIII. Microservices vs Monolith: How to Choose
+
+| Dimension | Monolith | Microservices |
+| --- | --- | --- |
+| Team size | Small team (＜ 10) | Large team (multi-team collaboration) |
+| Deploy frequency | Low | High (each service ships independently) |
+| Scaling needs | Scale the whole thing | Scale per service |
+| Tech stack | Uniform | Can be diverse |
+| Complexity | Low | High (operations, governance) |
+
+**Rule of thumb** — stay monolith if you can; only split when you truly must. Premature microservices turn simple problems into complex ones. Martin Fowler advocates "**monolith-first**" — get the business working as a monolith first; split when you hit real bottlenecks.
+
+## IX. Hands-on: Simulating Microservices with Java SE
+
+The Piston online environment can't run Nacos/Gateway/Sentinel. We'll use Java SE to simulate the core microservice mechanics — service registration and discovery, gateway routing, load balancing, the three-state circuit breaker, and rate limiting.
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// 模拟微服务架构: 注册中心 + 网关 + 熔断器 + 限流
+class ServiceRegistry {
+    // 服务名 -> 实例列表
+    private final Map<String, List<ServiceInstance>> registry = new ConcurrentHashMap<>();
+
+    static class ServiceInstance {
+        final String name;
+        final String host;
+        final int port;
+        volatile boolean healthy = true;
+        ServiceInstance(String name, String host, int port) {
+            this.name = name; this.host = host; this.port = port;
+        }
+        public String toString() { return name + "@" + host + ":" + port; }
+    }
+
+    public void register(String service, String host, int port) {
+        registry.computeIfAbsent(service, k -> new CopyOnWriteArrayList<>())
+                .add(new ServiceInstance(service, host, port));
+        System.out.println("  [注册] " + service + " -> " + host + ":" + port);
+    }
+
+    public List<ServiceInstance> getInstances(String service) {
+        return registry.getOrDefault(service, Collections.emptyList());
+    }
+
+    // 负载均衡: 轮询
+    private final Map<String, AtomicInteger> roundRobin = new ConcurrentHashMap<>();
+    public ServiceInstance choose(String service) {
+        List<ServiceInstance> list = registry.get(service);
+        if (list == null || list.isEmpty()) return null;
+        // 只选健康的
+        List<ServiceInstance> healthy = new ArrayList<>();
+        for (ServiceInstance i : list) if (i.healthy) healthy.add(i);
+        if (healthy.isEmpty()) return null;
+        AtomicInteger idx = roundRobin.computeIfAbsent(service, k -> new AtomicInteger(0));
+        return healthy.get(Math.abs(idx.getAndIncrement()) % healthy.size());
+    }
+
+    public void markUnhealthy(String service, String host, int port) {
+        for (ServiceInstance i : registry.getOrDefault(service, Collections.emptyList())) {
+            if (i.host.equals(host) && i.port == port) {
+                i.healthy = false;
+                System.out.println("  [下线] " + i + " 标记为不健康");
+            }
+        }
+    }
+}
+
+// 熔断器: 三态切换
+class CircuitBreaker {
+    enum State { CLOSED, OPEN, HALF_OPEN }
+    private volatile State state = State.CLOSED;
+    private final AtomicInteger failures = new AtomicInteger(0);
+    private final int failureThreshold;
+    private final long openTimeoutMs;
+    private volatile long openTime = 0;
+    private final AtomicInteger halfOpenSuccess = new AtomicInteger(0);
+
+    public CircuitBreaker(int failureThreshold, long openTimeoutMs) {
+        this.failureThreshold = failureThreshold;
+        this.openTimeoutMs = openTimeoutMs;
+    }
+
+    public boolean allowRequest() {
+        switch (state) {
+            case CLOSED: return true;
+            case OPEN:
+                if (System.currentTimeMillis() - openTime > openTimeoutMs) {
+                    state = State.HALF_OPEN;
+                    halfOpenSuccess.set(0);
+                    System.out.println("    [熔断器] OPEN -> HALF_OPEN (试探)");
+                    return true;
+                }
+                return false;
+            case HALF_OPEN: return true;
+        }
+        return false;
+    }
+
+    public void recordSuccess() {
+        if (state == State.HALF_OPEN) {
+            if (halfOpenSuccess.incrementAndGet() >= 2) {
+                state = State.CLOSED;
+                failures.set(0);
+                System.out.println("    [熔断器] HALF_OPEN -> CLOSED (恢复)");
+            }
+        } else {
+            failures.set(0);
+        }
+    }
+
+    public void recordFailure() {
+        if (state == State.HALF_OPEN) {
+            state = State.OPEN;
+            openTime = System.currentTimeMillis();
+            System.out.println("    [熔断器] HALF_OPEN -> OPEN (试探失败)");
+        } else if (state == State.CLOSED) {
+            if (failures.incrementAndGet() >= failureThreshold) {
+                state = State.OPEN;
+                openTime = System.currentTimeMillis();
+                System.out.println("    [熔断器] CLOSED -> OPEN (失败 " + failures.get() + " 次)");
+            }
+        }
+    }
+
+    public State getState() { return state; }
+}
+
+// 限流器: 令牌桶
+class RateLimiter {
+    private final int capacity;
+    private final int refillPerSec;
+    private final AtomicInteger tokens;
+    private volatile long lastRefillTime;
+
+    public RateLimiter(int capacity, int refillPerSec) {
+        this.capacity = capacity;
+        this.refillPerSec = refillPerSec;
+        this.tokens = new AtomicInteger(capacity);
+        this.lastRefillTime = System.currentTimeMillis();
+    }
+
+    public boolean tryAcquire() {
+        refill();
+        return tokens.getAndUpdate(t -> t > 0 ? t - 1 : 0) > 0;
+    }
+
+    private void refill() {
+        long now = System.currentTimeMillis();
+        long elapsed = now - lastRefillTime;
+        int add = (int) (elapsed * refillPerSec / 1000);
+        if (add > 0) {
+            tokens.updateAndGet(t -> Math.min(capacity, t + add));
+            lastRefillTime = now;
+        }
+    }
+}
+
+// 模拟后端服务
+class BackendService {
+    final String name;
+    final double failureRate;   // 故障率 0~1
+    final long latencyMs;
+    private final Random rnd = new Random();
+
+    BackendService(String name, double failureRate, long latencyMs) {
+        this.name = name; this.failureRate = failureRate; this.latencyMs = latencyMs;
+    }
+
+    public String call() throws Exception {
+        Thread.sleep(latencyMs);
+        if (rnd.nextDouble() < failureRate) {
+            throw new RuntimeException(name + " 服务异常");
+        }
+        return name + " 响应 OK";
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 微服务架构模拟 ===\\n");
+
+        // 1. 服务注册发现
+        System.out.println("--- 1. 服务注册与发现 ---");
+        ServiceRegistry registry = new ServiceRegistry();
+        registry.register("order-service", "192.168.1.10", 8080);
+        registry.register("order-service", "192.168.1.11", 8080);
+        registry.register("order-service", "192.168.1.12", 8080);
+        registry.register("user-service", "192.168.1.20", 8080);
+        System.out.println("  order-service 实例: " + registry.getInstances("order-service").size() + " 个");
+
+        System.out.println("\\n--- 2. 负载均衡 (轮询) ---");
+        for (int i = 0; i < 5; i++) {
+            System.out.println("  第 " + (i+1) + " 次调用 -> " + registry.choose("order-service"));
+        }
+
+        System.out.println("\\n--- 3. 熔断器 (失败率 80% 触发熔断) ---");
+        BackendService flakyService = new BackendService("flaky", 0.8, 10);
+        CircuitBreaker breaker = new CircuitBreaker(3, 1000);   // 失败 3 次熔断, 1 秒后半开
+        for (int i = 0; i < 8; i++) {
+            if (breaker.allowRequest()) {
+                try {
+                    String r = flakyService.call();
+                    breaker.recordSuccess();
+                    System.out.println("  调用 #" + (i+1) + ": " + r);
+                } catch (Exception e) {
+                    breaker.recordFailure();
+                    System.out.println("  调用 #" + (i+1) + " 失败: " + e.getMessage());
+                }
+            } else {
+                System.out.println("  调用 #" + (i+1) + ": 熔断中, 快速失败 (fallback)");
+            }
+            Thread.sleep(50);
+        }
+
+        System.out.println("\\n--- 4. 熔断器恢复 (等待 1.2 秒后半开) ---");
+        Thread.sleep(1200);
+        BackendService healthyService = new BackendService("recovered", 0.0, 10);
+        for (int i = 0; i < 4; i++) {
+            if (breaker.allowRequest()) {
+                try {
+                    String r = healthyService.call();
+                    breaker.recordSuccess();
+                    System.out.println("  调用 #" + (i+1) + ": " + r + " (状态: " + breaker.getState() + ")");
+                } catch (Exception e) {
+                    breaker.recordFailure();
+                    System.out.println("  调用 #" + (i+1) + " 失败: " + e.getMessage());
+                }
+            }
+            Thread.sleep(50);
+        }
+
+        System.out.println("\\n--- 5. 限流 (令牌桶: 容量 5, 每秒 2) ---");
+        RateLimiter limiter = new RateLimiter(5, 2);
+        int allowed = 0, rejected = 0;
+        for (int i = 0; i < 10; i++) {
+            if (limiter.tryAcquire()) {
+                allowed++;
+                System.out.println("  请求 #" + (i+1) + ": 放行");
+            } else {
+                rejected++;
+                System.out.println("  请求 #" + (i+1) + ": 拒绝 (限流)");
+            }
+        }
+        System.out.println("  结果: 放行 " + allowed + " 条, 拒绝 " + rejected + " 条");
+
+        System.out.println("\\n--- 6. 网关路由模拟 ---");
+        Map<String, String> routes = new LinkedHashMap<>();
+        routes.put("/api/orders/**", "order-service");
+        routes.put("/api/users/**", "user-service");
+        routes.put("/api/products/**", "product-service");
+        String[] paths = {"/api/orders/123", "/api/users/456", "/api/products/789"};
+        for (String path : paths) {
+            for (Map.Entry<String, String> e : routes.entrySet()) {
+                if (path.matches(e.getKey().replace("**", ".*"))) {
+                    ServiceRegistry.ServiceInstance inst = registry.choose(e.getValue());
+                    System.out.println("  " + path + " -> " + e.getValue()
+                        + (inst != null ? " (" + inst + ")" : " (无可用实例)"));
+                    break;
+                }
+            }
+        }
+
+        System.out.println("\\n--- 7. 服务下线 ---");
+        registry.markUnhealthy("order-service", "192.168.1.11", 8080);
+        System.out.println("  剩余健康实例:");
+        for (ServiceRegistry.ServiceInstance i : registry.getInstances("order-service")) {
+            System.out.println("    " + i + (i.healthy ? " (健康)" : " (不健康)"));
+        }
+        System.out.println("  调用 order-service:");
+        for (int i = 0; i < 3; i++) {
+            System.out.println("    -> " + registry.choose("order-service"));
+        }
+    }
+}`} />
+
+> **What to watch for**: the registry tracks all instances, and the load balancer picks them round-robin; the circuit breaker accumulates failures into the OPEN state and fails fast, then probes in HALF_OPEN after a timeout, and returns to CLOSED on success; the token-bucket limiter rejects anything beyond capacity; the gateway routes by path rules to the matching service; unhealthy instances are removed from the load-balancing pool.
+
+## X. Chapter Summary
+
+| Component | Role | Representative |
+| --- | --- | --- |
+| Service registration & discovery | Sense services going up/down automatically | Nacos / Eureka / Consul |
+| API gateway | Unified entry, routing, auth, rate limiting | Spring Cloud Gateway / Zuul |
+| Declarative invocation | Call remote like a local method | OpenFeign / Dubbo |
+| Circuit breaking & rate limiting | Prevent avalanches, control traffic | Sentinel / Hystrix / Resilience4j |
+| Configuration center | Centralized config, dynamic push | Nacos Config / Apollo |
+| Distributed tracing | Visualize cross-service call chains | Sleuth + Zipkin / SkyWalking |
+
+## Memory Hooks
+
+- **Microservice four independencies** — deploy, database, tech stack, scale.
+- **Registry** — register on startup, evict on shutdown, look up to call.
+- **Gateway four duties** — route, authenticate, rate limit, monitor.
+- **Circuit breaker three states** — CLOSED, OPEN, HALF_OPEN.
+- **Splitting principle** — stay monolith if you can; split only when you must; split along business boundaries.
+
+## Conclusion
+
+Microservices split a big, rigid monolith into small, agile independent services — buying flexibility and scalability at the cost of distributed complexity. Nacos manages registration and config, Gateway guards the door, OpenFeign connects services, and Sentinel prevents avalanches — the "four-piece set" of Spring Cloud.
+
+The next chapter is the last in Stage 14 — **Docker and Deployment**. With dozens of microservices, how do you package, deploy, and manage them? Docker containerization is the answer. It turns "works on my machine" into history.

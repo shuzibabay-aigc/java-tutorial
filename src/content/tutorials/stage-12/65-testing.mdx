@@ -1,0 +1,654 @@
+---
+title: "测试"
+chapter: 65
+stage: "第十二阶段"
+stageName: "工程化与生态"
+order: 3
+description: "理解测试金字塔、JUnit 5（@Test/@BeforeEach/@ParameterizedTest/@DisplayName）、断言（assertEquals/assertThrows/assertAll）、Mockito（mock/when/verify）、JaCoCo 覆盖率与 TDD 简介"
+pubDate: 2026-07-03
+tags: ["Java", "JUnit", "Mockito", "测试", "TDD", "覆盖率"]
+---
+
+# 测试
+
+"我改了点代码，应该没事吧？"——这句话是程序员最常被打脸的瞬间。改了 A，B 突然挂了；修了 bug，引入两个新 bug。靠"手动点一遍"测，慢、累、漏。**自动化测试**就是解药——把测试写成代码，每次改动都自动跑一遍，几分钟告诉你哪里坏了。
+
+这一章我们看 Java 测试生态的核心——**JUnit 5**（测试框架）+ **Mockito**（模拟框架）+ **JaCoCo**（覆盖率），以及 TDD（测试驱动开发）思想。
+
+## 一、为什么需要测试
+
+不写测试的项目长这样：
+
+- **改代码像拆炸弹** —— 不敢动，怕踩雷。
+- **bug 反复出现** —— 同一个 bug 修了又犯，没回归保护。
+- **不敢重构** —— 代码烂了也不敢动，因为没人知道动了哪里会坏。
+- **手动回归到吐** —— 上线前点一遍功能，一晚上搞不完。
+
+写测试的好处：
+
+1. **回归保护** —— 改代码立刻知道有没有破坏旧功能。
+2. **设计反馈** —— 难测的代码往往设计差（耦合重），测试逼你解耦。
+3. **活的文档** —— 测试用例就是"这段代码该怎么用"的实例。
+4. **敢于重构** —— 有测试兜底，敢动烂代码。
+5. **减少手动测试** —— 一键跑几千个测试，省人力。
+
+## 二、测试金字塔
+
+测试金字塔（Test Pyramid）——层次从底到顶：
+
+```
+        /\
+       /E2E\          少而慢 (端到端, 启动整个应用)
+      /------\
+     /集成测试\        中等 (多模块协作, 真实数据库)
+    /----------\
+   /  单元测试   \     多而快 (单方法, mock 依赖)
+  /--------------\
+```
+
+| 层次 | 范围 | 速度 | 数量 |
+| --- | --- | --- | --- |
+| **单元测试** | 单个类/方法 | 毫秒级 | 70%+ |
+| **集成测试** | 多模块协作 | 秒级 | 20% |
+| **端到端测试（E2E）** | 整个系统 | 分钟级 | 10% |
+
+塔基要厚——单元测试最多最快，每次提交都跑。塔尖要薄——E2E 慢且脆，跑关键路径即可。倒金字塔（E2E 多，单元少）是反模式——慢、难维护。
+
+## 三、JUnit 5
+
+**JUnit** 是 Java 的事实标准测试框架。JUnit 5（2017 年）由三个子模块组成：
+
+- **JUnit Platform** —— 测试运行的基础平台。
+- **JUnit Jupiter** —— 新的编程/扩展模型（`@Test` 等注解在这）。
+- **JUnit Vintage** —— 兼容 JUnit 3/4 老测试。
+
+### 3.1 Maven 集成
+
+```xml
+<dependency>
+    <groupId>org.junit.jupiter</groupId>
+    <artifactId>junit-jupiter</artifactId>
+    <version>5.10.0</version>
+    <scope>test</scope>
+</dependency>
+
+<build>
+    <plugins>
+        <plugin>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <version>3.1.2</version>
+        </plugin>
+    </plugins>
+</build>
+```
+
+### 3.2 第一个测试
+
+```java
+import org.junit.jupiter.api.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+class CalculatorTest {
+    private Calculator calc;
+
+    @BeforeEach
+    void setUp() {
+        calc = new Calculator();   // 每个测试前都跑
+    }
+
+    @Test
+    @DisplayName("加法应该正确返回两数之和")
+    void shouldAddTwoNumbers() {
+        assertEquals(5, calc.add(2, 3));
+        assertEquals(0, calc.add(-1, 1));
+        assertEquals(-5, calc.add(-2, -3));
+    }
+
+    @Test
+    void shouldThrowOnDivideByZero() {
+        assertThrows(ArithmeticException.class, () -> calc.divide(1, 0));
+    }
+}
+
+class Calculator {
+    int add(int a, int b) { return a + b; }
+    int divide(int a, int b) {
+        if (b == 0) throw new ArithmeticException("/ by zero");
+        return a / b;
+    }
+}
+```
+
+### 3.3 常用注解
+
+| 注解 | 作用 |
+| --- | --- |
+| `@Test` | 标记测试方法 |
+| `@BeforeEach` | 每个测试方法前执行（初始化） |
+| `@AfterEach` | 每个测试方法后执行（清理） |
+| `@BeforeAll` | 所有测试前执行一次（static，初始化重资源） |
+| `@AfterAll` | 所有测试后执行一次（static，清理重资源） |
+| `@DisplayName` | 自定义测试显示名 |
+| `@Disabled` | 跳过此测试 |
+| `@Tag` | 给测试打标签，可选择性跑 |
+| `@Nested` | 嵌套测试类（按场景分组） |
+| `@ParameterizedTest` | 参数化测试（同逻辑多组数据） |
+| `@ValueSource` | 参数化测试的数据源 |
+
+### 3.4 参数化测试
+
+同一逻辑测多组数据，避免重复代码：
+
+```java
+@ParameterizedTest
+@DisplayName("加法参数化测试")
+@ValueSource(ints = {1, 5, 10, 100, -1})
+void shouldAddCorrectly(int n) {
+    assertEquals(n + n, calc.add(n, n));
+}
+
+@ParameterizedTest(name = "{0} + {1} = {2}")
+@CsvSource({
+    "1, 2, 3",
+    "0, 0, 0",
+    "-1, 1, 0",
+    "100, 200, 300"
+})
+void shouldAddCsv(int a, int b, int expected) {
+    assertEquals(expected, calc.add(a, b));
+}
+```
+
+`@ParameterizedTest` 配合数据源（`@ValueSource`/`@CsvSource`/`@MethodSource`）能跑多组数据，名字用 `{0}`/`{1}` 占位符显示参数值。
+
+### 3.5 断言
+
+| 断言 | 用途 |
+| --- | --- |
+| `assertEquals(expected, actual)` | 相等 |
+| `assertNotEquals` | 不等 |
+| `assertTrue(cond)` / `assertFalse` | 真/假 |
+| `assertNull` / `assertNotNull` | null/非null |
+| `assertSame` | 同一对象（==） |
+| `assertArrayEquals` | 数组相等 |
+| `assertIterableEquals` | Iterable 相等 |
+| `assertThrows(Exception.class, () -＞ ...)` | 抛异常 |
+| `assertDoesNotThrow` | 不抛异常 |
+| `assertAll(...)` | 批量断言，全部跑完才报错 |
+| `assertTimeout` | 超时 |
+
+`assertAll` 是个亮点——普通断言遇到第一个失败就停，`assertAll` 把所有断言都跑完一起报告：
+
+```java
+@Test
+void shouldValidateUser() {
+    User u = new User("张三", 20);
+    assertAll("用户属性",
+        () -> assertEquals("张三", u.getName()),
+        () -> assertEquals(20, u.getAge()),
+        () -> assertNotNull(u.getId())
+    );
+    // 即使第一个失败, 后面也会跑, 一次看到所有问题
+}
+```
+
+## 四、Mockito：模拟依赖
+
+被测类往往依赖其他类（数据库、网络、时间）。单元测试不该真连数据库——慢、不稳定。**Mockito** 提供模拟对象——告诉它"调用 X 时返回 Y"，验证"调用 X 了没"。
+
+### 4.1 mock 与 when
+
+```java
+import static org.mockito.Mockito.*;
+
+// 1. 创建 mock
+UserRepository mockRepo = mock(UserRepository.class);
+
+// 2. 桩: when X then Y
+when(mockRepo.findById(1)).thenReturn(new User(1, "张三"));
+when(mockRepo.findById(99)).thenThrow(new RuntimeException("不存在"));
+
+// 3. 用
+User u = mockRepo.findById(1);   // 返回 张三
+User u2 = mockRepo.findById(2);  // 返回 null (没设置)
+
+// 4. 验证: 确实调用了
+verify(mockRepo).findById(1);          // 至少一次
+verify(mockRepo, times(2)).findById(anyInt());  // 调了 2 次
+verify(mockRepo, never()).deleteById(anyInt()); // 从没调过
+```
+
+### 4.2 测试 Service（依赖 Repository）
+
+```java
+class UserService {
+    private final UserRepository repo;
+    public UserService(UserRepository repo) { this.repo = repo; }
+    public String getUserName(int id) {
+        User u = repo.findById(id);
+        if (u == null) throw new IllegalArgumentException("用户不存在");
+        return u.getName();
+    }
+}
+
+class UserServiceTest {
+    @Test
+    void shouldReturnName() {
+        UserRepository mockRepo = mock(UserRepository.class);
+        when(mockRepo.findById(1)).thenReturn(new User(1, "张三"));
+
+        UserService service = new UserService(mockRepo);
+        assertEquals("张三", service.getUserName(1));
+        verify(mockRepo).findById(1);   // 验证确实调了
+    }
+
+    @Test
+    void shouldThrowWhenUserNotFound() {
+        UserRepository mockRepo = mock(UserRepository.class);
+        when(mockRepo.findById(99)).thenReturn(null);
+
+        UserService service = new UserService(mockRepo);
+        assertThrows(IllegalArgumentException.class, () -> service.getUserName(99));
+    }
+}
+```
+
+Mock 让你聚焦被测类——`UserService` 依赖 `UserRepository`，mock 掉 Repo，专心测 Service 的逻辑。这就是"单元测试"——只测一个单元。
+
+## 五、测试覆盖率：JaCoCo
+
+**覆盖率（Coverage）**——测试跑过多少行代码。`JaCoCo`（Java Code Coverage）是主流工具。
+
+```xml
+<plugin>
+    <groupId>org.jacoco</groupId>
+    <artifactId>jacoco-maven-plugin</artifactId>
+    <version>0.8.11</version>
+    <executions>
+        <execution>
+            <goals><goal>prepare-agent</goal></goals>
+        </execution>
+        <execution>
+            <id>report</id>
+            <phase>test</phase>
+            <goals><goal>report</goal></goals>
+        </execution>
+    </executions>
+</plugin>
+```
+
+`mvn test` 后生成 `target/site/jacoco/index.html`，看每个类的覆盖率：
+
+- **行覆盖率** —— 跑过的代码行比例。
+- **分支覆盖率** —— if/else 各分支跑过的比例。
+- **方法覆盖率** —— 调用的方法比例。
+
+**重要认知**：高覆盖率 ≠ 高质量。100% 覆盖率也可能漏掉关键边界——比如只测了 `add(2, 3)` 而没测 `add(Integer.MAX_VALUE, 1)` 溢出。覆盖率是"下限"，不是"目标"。盲目追 100% 会让团队写无意义测试应付指标。
+
+## 六、TDD：测试驱动开发
+
+**TDD（Test-Driven Development）**——Kent Beck 提出的开发节奏：**先写测试，再写实现**。三步循环（红-绿-重构）：
+
+```
+红: 写测试 -> 跑 -> 失败 (功能还没实现)
+绿: 写最少代码让测试通过
+重构: 改善代码结构, 测试仍要通过
+```
+
+例子——开发计算斐波那契数的方法：
+
+```java
+// 1. 红: 先写测试
+@Test
+void shouldReturn1ForFib1() {
+    assertEquals(1, fib(1));
+}
+```
+
+```java
+// 2. 绿: 最简实现 (硬编码)
+static int fib(int n) { return 1; }
+```
+
+```java
+// 3. 加新测试
+@Test
+void shouldReturn2ForFib3() {
+    assertEquals(2, fib(3));
+}
+```
+
+```java
+// 4. 修改实现
+static int fib(int n) {
+    if (n <= 2) return 1;
+    return fib(n - 1) + fib(n - 2);
+}
+```
+
+TDD 的好处：
+
+- **小步前进** —— 每次只加一个测试，永远在"绿"的状态。
+- **设计驱动** —— 先写测试逼你想"这方法该怎么用"，倒逼好 API 设计。
+- **回归保护** —— 实现一开始就有测试。
+
+但 TDD 不适合所有场景——UI、探索性原型、纯算法研究。它是个工具，不是教条。
+
+## 七、实战：JUnit + Mockito 风格测试
+
+由于 Piston 在线环境**没有 JUnit 和 Mockito 依赖**，下面用一个**迷你测试框架**模拟它们的 API——演示 `@Test`、断言、mock、verify 的核心思想。本地项目用真 JUnit + Mockito 时，代码风格完全一致。
+
+<CodeRunner code={`import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+import java.util.function.*;
+
+// === 迷你测试框架 (模拟 JUnit + Mockito 核心 API) ===
+
+// 注解
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface Test {}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface BeforeEach {}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface DisplayName {
+    String value();
+}
+
+// 断言工具 (模拟 org.junit.jupiter.api.Assertions)
+class Assert {
+    static void assertEquals(Object expected, Object actual) {
+        if (!Objects.equals(expected, actual)) {
+            throw new AssertionError("期望 " + expected + ", 实际 " + actual);
+        }
+    }
+    static void assertTrue(boolean cond) {
+        if (!cond) throw new AssertionError("期望 true, 实际 false");
+    }
+    static void assertNotNull(Object o) {
+        if (o == null) throw new AssertionError("期望非 null");
+    }
+    static void assertThrows(Class<? extends Throwable> ex, Runnable code) {
+        try {
+            code.run();
+        } catch (Throwable t) {
+            if (ex.isInstance(t)) return;
+            throw new AssertionError("期望抛 " + ex.getSimpleName()
+                + ", 实际抛 " + t.getClass().getSimpleName());
+        }
+        throw new AssertionError("期望抛 " + ex.getSimpleName() + ", 但没抛");
+    }
+    static void assertAll(String name, Runnable... checks) {
+        List<String> fails = new ArrayList<>();
+        for (int i = 0; i < checks.length; i++) {
+            try { checks[i].run(); }
+            catch (AssertionError e) { fails.add("  [" + i + "] " + e.getMessage()); }
+        }
+        if (!fails.isEmpty()) {
+            throw new AssertionError("assertAll(" + name + ") 失败:\n"
+                + String.join("\n", fails));
+        }
+    }
+}
+
+// 迷你测试运行器
+class TestRunner {
+    public static void run(Class<?> testClass) {
+        System.out.println("=== 运行测试: " + testClass.getSimpleName() + " ===");
+        Object instance;
+        try {
+            instance = testClass.getDeclaredConstructor().newInstance();
+        } catch (Exception e) { throw new RuntimeException(e); }
+
+        // 找所有 @BeforeEach
+        List<Method> befores = Arrays.stream(testClass.getDeclaredMethods())
+            .filter(m -> m.isAnnotationPresent(BeforeEach.class))
+            .toList();
+
+        int passed = 0, failed = 0;
+        for (Method m : testClass.getDeclaredMethods()) {
+            if (!m.isAnnotationPresent(Test.class)) continue;
+            DisplayName dn = m.getAnnotation(DisplayName.class);
+            String label = dn != null ? dn.value() : m.getName();
+            try {
+                for (Method b : befores) { b.setAccessible(true); b.invoke(instance); }
+                m.setAccessible(true);
+                m.invoke(instance);
+                System.out.println("  [PASS] " + label);
+                passed++;
+            } catch (InvocationTargetException e) {
+                System.out.println("  [FAIL] " + label + " -> " + e.getCause().getMessage());
+                failed++;
+            } catch (Exception e) {
+                System.out.println("  [ERROR] " + label + " -> " + e);
+                failed++;
+            }
+        }
+        System.out.println("结果: " + passed + " 通过, " + failed + " 失败\\n");
+    }
+}
+
+// === 迷你 Mockito (mock/when/verify 的核心思想) ===
+class MiniMock {
+    interface InvocationHandler {
+        Object handle(String method, Object[] args);
+    }
+
+    // 极简 mock: 用 Map 记录每次调用的"桩"和"次数"
+    static <T> T mock(Class<T> iface) {
+        Map<String, Object> stubs = new HashMap<>();   // method#argstring -> return
+        Map<String, Integer> calls = new HashMap<>();  // method -> count
+        InvocationHandler handler = (method, args) -> {
+            calls.merge(method, 1, Integer::sum);
+            String key = method + "#" + Arrays.toString(args);
+            Object stub = stubs.get(key);
+            if (stub instanceof Supplier) return ((Supplier<?>) stub).get();
+            if (stubs.containsKey(key)) return stub;
+            // 通用匹配: method + any
+            String anyKey = method + "#ANY";
+            if (stubs.containsKey(anyKey)) {
+                Object v = stubs.get(anyKey);
+                if (v instanceof Supplier) return ((Supplier<?>) v).get();
+                return v;
+            }
+            return null;
+        };
+        // 用动态代理生成 mock 实例
+        return (T) java.lang.reflect.Proxy.newProxyInstance(
+            iface.getClassLoader(), new Class[]{iface},
+            (proxy, m, args) -> {
+                if ("toString".equals(m.getName())) return "Mock[" + iface.getSimpleName() + "]";
+                return handler.handle(m.getName(), args);
+            });
+    }
+
+    // 把 mock 的"调用计数器"暴露出来给 verify 用
+    // 简化: 我们用一个全局 Map (生产框架里 mock 对象自己持有)
+    static Map<Object, Map<String, Integer>> callTracker = new java.util.IdentityHashMap<>();
+}
+
+// === 被测代码 ===
+interface UserRepository {
+    String findById(int id);
+    void save(String name);
+}
+
+class UserService {
+    private final UserRepository repo;
+    public UserService(UserRepository repo) { this.repo = repo; }
+    public String getUserName(int id) {
+        String name = repo.findById(id);
+        if (name == null) throw new IllegalArgumentException("用户不存在: " + id);
+        return name.toUpperCase();
+    }
+}
+
+// === 测试类 ===
+class CalculatorTest {
+    private Calculator calc;
+
+    @BeforeEach
+    void setUp() { calc = new Calculator(); }
+
+    @Test
+    @DisplayName("加法: 2 + 3 = 5")
+    void shouldAdd() {
+        Assert.assertEquals(5, calc.add(2, 3));
+    }
+
+    @Test
+    @DisplayName("加法: 负数加正数")
+    void shouldAddNegative() {
+        Assert.assertEquals(0, calc.add(-1, 1));
+    }
+
+    @Test
+    @DisplayName("除以零应抛异常")
+    void shouldThrowOnDivByZero() {
+        Assert.assertThrows(ArithmeticException.class, () -> calc.divide(1, 0));
+    }
+
+    @Test
+    @DisplayName("assertAll 一次检查多个属性")
+    void shouldHaveMultipleProperties() {
+        Calculator c = new Calculator();
+        Assert.assertAll("Calculator 属性",
+            () -> Assert.assertEquals(0, c.add(0, 0)),
+            () -> Assert.assertEquals(2, c.add(1, 1)),
+            () -> Assert.assertEquals(-2, c.add(-1, -1))
+        );
+    }
+}
+
+class Calculator {
+    int add(int a, int b) { return a + b; }
+    int divide(int a, int b) {
+        if (b == 0) throw new ArithmeticException("/ by zero");
+        return a / b;
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== 测试框架演示 (模拟 JUnit + Mockito) ===\\n");
+
+        // 1. 运行 Calculator 测试
+        TestRunner.run(CalculatorTest.class);
+
+        // 2. Mockito 风格: mock Repository 测 Service
+        System.out.println("=== Mockito 风格测试 ===");
+        UserRepository mockRepo = MiniMock.mock(UserRepository.class);
+        // when(mockRepo.findById(1)).thenReturn("alice") 简化版:
+        // 这里直接演示 Service 用 mock 的行为
+
+        UserService service = new UserService(mockRepo);
+        try {
+            service.getUserName(99);   // mock 默认返回 null -> 抛异常
+            System.out.println("[FAIL] 应该抛异常");
+        } catch (IllegalArgumentException e) {
+            System.out.println("[PASS] 用户不存在抛异常: " + e.getMessage());
+        }
+
+        System.out.println("\\n=== 测试最佳实践 ===");
+        System.out.println("1. 测试金字塔: 单元 70% / 集成 20% / E2E 10%");
+        System.out.println("2. 单个测试只测一件事 (单一职责)");
+        System.out.println("3. 测试名表达意图: shouldXxxWhenYyy");
+        System.out.println("4. AAA 模式: Arrange 准备 / Act 执行 / Assert 断言");
+        System.out.println("5. mock 外部依赖, 不 mock 被测对象本身");
+        System.out.println("6. 覆盖率是下限不是目标");
+        System.out.println("7. TDD: 红 (失败) -> 绿 (通过) -> 重构");
+    }
+}`} />
+
+> **观察重点**：
+> - **`@Test` 标记测试方法，`@BeforeEach` 每个测试前跑**——JUnit 的核心机制。
+> - **`assertEquals`/`assertThrows`/`assertAll`**——分别测相等、抛异常、批量断言。
+> - **`assertAll` 一次报告所有失败**——比普通断言更友好。
+> - **mock 把 `UserRepository` 替换成可控对象**——Service 测试不依赖真实数据库。
+> - **测试名表达意图**——`shouldThrowOnDivByZero` 比 `test1` 可读得多。
+
+## 八、测试最佳实践
+
+### 8.1 命名
+
+测试名要表达意图：
+
+```java
+// 坏
+@Test void test1() { ... }
+@Test void testAdd() { ... }
+
+// 好
+@Test void shouldReturn5WhenAdd2And3() { ... }
+@Test void shouldThrowWhenDivideByZero() { ... }
+```
+
+### 8.2 AAA 模式
+
+每个测试三段式：
+
+```java
+@Test
+void shouldReturnSum() {
+    // Arrange (准备)
+    Calculator calc = new Calculator();
+
+    // Act (执行)
+    int result = calc.add(2, 3);
+
+    // Assert (断言)
+    assertEquals(5, result);
+}
+```
+
+### 8.3 一个测试一件事
+
+一个测试只断言一个行为——失败时一眼知道哪里坏了。多个相关断言用 `assertAll`。
+
+### 8.4 测试要独立
+
+测试之间不能依赖执行顺序——JUnit 不保证顺序。每个测试自己准备数据（`@BeforeEach`），不共享状态。
+
+### 8.5 别 mock 被测对象
+
+```java
+// 错: mock 了被测对象, 测了个寂寞
+UserService mock = mock(UserService.class);
+when(mock.getName(1)).thenReturn("张三");
+assertEquals("张三", mock.getName(1));   // 没意义!
+
+// 对: mock 被测对象的依赖
+UserRepository mockRepo = mock(UserRepository.class);
+when(mockRepo.findById(1)).thenReturn(new User("张三"));
+UserService service = new UserService(mockRepo);   // 被测对象用真的
+```
+
+## 九、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| 测试金字塔 | 单元多快、E2E 少慢 |
+| JUnit 5 | `@Test`/`@BeforeEach`/`@ParameterizedTest` |
+| 断言 | `assertEquals`/`assertThrows`/`assertAll` |
+| Mockito | `mock`/`when().thenReturn()`/`verify` |
+| 覆盖率 | 下限不是目标，JaCoCo 是主流工具 |
+| TDD | 红-绿-重构，先写测试再写实现 |
+| AAA | Arrange-Act-Assert 三段式 |
+
+**记忆口诀**：
+
+- **金字塔**——单元多、集成中、E2E 少。
+- **JUnit 注解**——`@Test` 测、`@BeforeEach` 前、`@ParameterizedTest` 参数化。
+- **断言三剑客**——`assertEquals` 相等、`assertThrows` 异常、`assertAll` 批量。
+- **Mockito 三步**——`mock` 创建、`when().thenReturn()` 桩、`verify` 验证。
+- **不 mock 被测对象**——mock 它的依赖，测它本身。
+- **覆盖率是底线**——100% 不等于没 bug。
+
+## 结语：从能跑到可测
+
+这一章我们看了测试——从 JUnit 到 Mockito，从覆盖率到 TDD。会写代码不等于会写好代码，会测试才是工程师的分水岭。下一章看另一个工程化利器——**日志框架**，让你在生产环境能看清楚程序在干什么。

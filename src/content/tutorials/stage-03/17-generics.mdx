@@ -1,0 +1,517 @@
+---
+title: "泛型"
+chapter: 17
+stage: "第三阶段"
+stageName: "Java 核心类库"
+order: 5
+description: "掌握泛型类与方法、通配符与 PECS 原则、类型擦除与桥接方法、泛型的限制，以及泛型缓存的实战实现"
+pubDate: 2026-07-03
+tags: ["Java", "泛型", "Generics", "类型擦除", "PECS"]
+---
+
+# 泛型
+
+假设你写了一个"盒子"类，用来装东西。装苹果时它叫 `AppleBox`，装书时叫 `BookBox`，装手机时叫 `PhoneBox`……每换一种东西就要复制粘贴改个名。你也许会想：能不能写一个"万能盒子"？
+
+你当然可以用 `Object`——`class Box { Object item; }`。但代价是：取东西时要**强制转换**（`(Apple) box.get()`），而且编译器不会帮你检查类型——你往苹果盒子里塞了一本书，编译期不报错，运行时才炸。
+
+**泛型**（Generics）就是解决这个困境的优雅方案。它让你写一份代码，却能适配多种类型，同时**编译期就保证类型安全**——既通用又不失严谨。Java 5 引入泛型后，集合框架脱胎换骨。本章，我们深入泛型的方方面面，包括它最微妙的特性——**类型擦除**。
+
+## 一、泛型的动机
+
+### 1.1 没有泛型的世界
+
+Java 5 之前，集合里存的是 `Object`：
+
+```java
+List list = new ArrayList();
+list.add("hello");
+list.add(42);           // 居然能加进去！
+String s = (String) list.get(1);   // 运行时 ClassCastException！
+```
+
+两个痛点：
+
+1. **类型不安全**：什么都能塞，编译器不管。
+2. **强制转换**：取出来要手动转，容易出错。
+
+### 1.2 泛型登场
+
+泛型让你"参数化类型"——把类型当作参数传给类或方法：
+
+```java
+List<String> list = new ArrayList<>();
+list.add("hello");
+list.add(42);           // 编译错误！List<String> 只能放 String
+String s = list.get(0); // 无需强转
+```
+
+两痛点一扫而空：编译期就阻止非法类型，取出时也不用转。这就是泛型的核心价值——**类型安全 + 消除强制转换**。
+
+## 二、泛型类
+
+### 2.1 定义泛型类
+
+在类名后加 `＜T＞` 声明类型参数：
+
+```java
+public class Box<T> {
+    private T item;
+
+    public void put(T item) { this.item = item; }
+    public T get() { return item; }
+}
+```
+
+`T` 是**类型参数**（Type Parameter），像个占位符。使用时传入**类型实参**：
+
+```java
+Box<String> stringBox = new Box<>();
+stringBox.put("hello");
+String s = stringBox.get();     // 无需强转
+
+Box<Integer> intBox = new Box<>();
+intBox.put(42);
+int n = intBox.get();           // 自动拆箱
+```
+
+`＜＞`（钻石操作符，Diamond Operator，Java 7+）让编译器从左侧推断右侧的类型参数，省去重复书写。
+
+### 2.2 多个类型参数
+
+泛型类可以有多个类型参数，比如一个键值对：
+
+```java
+public class Pair<K, V> {
+    private final K key;
+    private final V value;
+
+    public Pair(K key, V value) {
+        this.key = key;
+        this.value = value;
+    }
+
+    public K getKey() { return key; }
+    public V getValue() { return value; }
+}
+
+Pair<String, Integer> p = new Pair<>("age", 25);
+System.out.println(p.getKey() + " = " + p.getValue());
+```
+
+## 三、泛型方法
+
+### 3.1 定义泛型方法
+
+泛型方法不局限于泛型类——任何普通类都能有泛型方法。类型参数声明在**返回类型前**：
+
+```java
+public class Util {
+    // <T> 声明类型参数，T 是返回类型
+    public static <T> T identity(T arg) {
+        return arg;
+    }
+}
+```
+
+调用时可以显式指定类型，也可省略让编译器推断：
+
+```java
+String s = Util.identity("hello");         // 推断 T=String
+Integer n = Util.<Integer>identity(42);    // 显式指定
+```
+
+### 3.2 一个实用的泛型方法
+
+```java
+public static <T> T getFirst(List<T> list) {
+    if (list == null || list.isEmpty()) return null;
+    return list.get(0);
+}
+```
+
+这个方法对 `List＜String＞`、`List＜Integer＞` 都适用——一份代码，多种类型。
+
+## 四、泛型接口
+
+接口也能泛型化。最经典的例子是 `Comparable＜T＞`：
+
+```java
+public interface Comparable<T> {
+    int compareTo(T o);
+}
+
+public class Product implements Comparable<Product> {
+    private double price;
+
+    @Override
+    public int compareTo(Product other) {
+        return Double.compare(this.price, other.price);
+    }
+}
+```
+
+`Comparable＜Product＞` 表示"Product 只跟 Product 比"——类型安全，不会拿 Product 跟 Apple 比。
+
+`Iterable＜T＞`、`Comparator＜T＞`、`List＜T＞`、`Map＜K,V＞` 都是泛型接口的典范。
+
+## 五、类型参数命名约定
+
+Java 社区有一套约定俗成的命名规范，用单个大写字母表示类型参数：
+
+| 字母 | 含义 | 典型场景 |
+| --- | --- | --- |
+| `T` | Type（类型） | 通用类型，如 `Box＜T＞` |
+| `E` | Element（元素） | 集合元素，如 `List＜E＞` |
+| `K` | Key（键） | Map 的键，如 `Map＜K, V＞` |
+| `V` | Value（值） | Map 的值 |
+| `N` | Number（数字） | 数值类型 |
+| `R` | Result（结果） | 返回值类型 |
+| `S, U, V` | 第二、三、四个类型 | 多类型参数 |
+
+这些命名不是强制的，但遵循它们能让代码更易读——看到 `K` 就知道是键，看到 `E` 就知道是集合元素。
+
+## 六、通配符：泛型的多态难题
+
+### 6.1 一个反直觉的现象
+
+泛型不是协变的（invariant）——即使 `Integer` 是 `Number` 的子类，`List＜Integer＞` **不是** `List＜Number＞` 的子类：
+
+```java
+List<Integer> ints = new ArrayList<>();
+List<Number> nums = ints;   // 编译错误！
+```
+
+为什么？假设允许，下一步就能 `nums.add(3.14)`——往一个本质是 `List＜Integer＞` 的列表里塞 `Double`，类型安全就崩塌了。泛型的设计宁可"严"不可"松"。
+
+但你确实有需求：写一个方法，能接受 `List＜Integer＞`、`List＜Double＞`、`List＜Number＞`……这时就需要**通配符**（Wildcard）。
+
+### 6.2 无界通配符 `?`
+
+`List＜?＞` 表示"未知类型的 List"——能接受任何类型的 List：
+
+```java
+public static void printSize(List<?> list) {
+    System.out.println("大小: " + list.size());
+    // list.add("x");   // 编译错误！不能往 List<?> 里加元素（除 null）
+}
+
+printSize(new ArrayList<String>());   // OK
+printSize(new ArrayList<Integer>());  // OK
+```
+
+`List＜?＞` 是**只读**的——你只能读出 `Object`，不能添加元素（因为不知道里面是什么类型，加了就可能破坏类型安全）。
+
+### 6.3 上界通配符 `? extends T`
+
+`? extends T` 表示"T 或 T 的子类"：
+
+```java
+public static double sum(List<? extends Number> list) {
+    double total = 0;
+    for (Number n : list) {     // 能读出 Number
+        total += n.doubleValue();
+    }
+    return total;
+}
+
+sum(new ArrayList<Integer>());   // OK
+sum(new ArrayList<Double>());    // OK
+```
+
+`? extends Number` 让方法能接受 `List＜Integer＞`、`List＜Double＞` 等。但它是**生产者**——你能从中**读** Number，却不能**写**（因为编译器不知道具体子类，无法安全添加）。
+
+### 6.4 下界通配符 `? super T`
+
+`? super T` 表示"T 或 T 的父类"：
+
+```java
+public static void addNumbers(List<? super Integer> list) {
+    list.add(1);    // 能写 Integer
+    list.add(2);
+}
+
+List<Number> nums = new ArrayList<>();
+addNumbers(nums);   // OK，Number 是 Integer 的父类
+
+List<Object> objs = new ArrayList<>();
+addNumbers(objs);   // OK，Object 是 Integer 的父类
+```
+
+`? super Integer` 让方法能往里**写** Integer（因为无论实际是 `List＜Integer＞`、`List＜Number＞` 还是 `List＜Object＞`，都能装 Integer）。但读出时只能拿到 `Object`——因为编译器只知道"是 Integer 的某个父类"，不知道具体哪个。
+
+### 6.5 PECS 原则
+
+何时用 extends，何时用 super？记住 **PECS** 口诀：
+
+> **P**roducer **E**xtends, **C**onsumer **S**uper
+>
+ - 如果集合是**生产者**（你从中**读取**数据），用 `? extends T`。
+ - 如果集合是**消费者**（你往它**写入**数据），用 `? super T`。
+
+以 `Collections.copy` 为例：
+
+```java
+public static <T> void copy(List<? super T> dest, List<? extends T> src) {
+    // src 是生产者（读），用 extends
+    // dest 是消费者（写），用 super
+}
+```
+
+这个签名完美诠释了 PECS——读用 extends，写用 super。
+
+## 七、类型擦除
+
+### 7.1 泛型只存在于编译期
+
+Java 的泛型是通过**类型擦除**（Type Erasure）实现的——泛型信息只在编译期用于类型检查，编译后**全部被擦除**。
+
+```java
+Box<String> a = new Box<>();
+Box<Integer> b = new Box<>();
+
+// 运行时，a 和 b 的 class 是同一个！
+System.out.println(a.getClass() == b.getClass());   // true
+System.out.println(a.getClass().getName());          // Box（没有 <String>）
+```
+
+编译器做的事：
+
+1. **擦除类型参数**：`Box＜T＞` 的 `T` 被擦除为它的上界（默认 `Object`，若有 `T extends Number` 则擦除为 `Number`）。
+2. **插入强制转换**：在使用泛型方法返回值的地方，编译器自动插入 `(String)`、`(Integer)` 这样的强转。
+3. **生成桥接方法**（见下文）：保证多态正确性。
+
+`Box＜String＞` 和 `Box＜Integer＞` 在运行时都是同一个 `Box` 类——这就是"类型擦除"。
+
+### 7.2 擦除的影响
+
+因为运行时没有泛型信息，以下操作都**不行**：
+
+```java
+// ❌ 运行时无法获取泛型类型
+if (list instanceof List<String>) { ... }   // 编译错误
+
+// ❌ 不能 new 类型参数
+T item = new T();                // 编译错误
+
+// ❌ 不能 new 泛型数组
+T[] arr = new T[10];             // 编译错误
+
+// ❌ 基本类型不能做类型参数
+List<int> list;                  // 编译错误，必须用 List<Integer>
+
+// ❌ 不能 catch 泛型异常类
+class MyException<T> extends Exception { }
+try { } catch (MyException<String> e) { }   // 编译错误
+```
+
+能做的：
+
+```java
+// ✅ 可以用原始类型 instanceof
+if (list instanceof List) { ... }              // OK
+// Java 16+ 可以用 instanceof 模式匹配
+if (list instanceof List<?> ls) { ... }        // OK
+
+// ✅ 可以通过反射获取泛型类的类型实参（有限场景）
+// 如通过 getGenericSuperclass 获取父类的泛型参数
+```
+
+### 7.3 为什么 Java 选择类型擦除
+
+Java 5 引入泛型时，要保证与 Java 4 的"原始类型"代码**二进制兼容**——旧的 `List` 和新的 `List＜T＞` 必须能在同一个 JVM 共存。类型擦除是这种兼容性的代价：泛型只在编译期"虚拟存在"，运行时回归原始类型。
+
+C# 的泛型是"真泛型"（reified generics），运行时保留类型信息——但没有 Java 这种历史包袱。这是两种语言的设计权衡。
+
+## 八、桥接方法
+
+### 8.1 一个微妙的继承场景
+
+类型擦除会带来一个多态问题。看这段代码：
+
+```java
+class Node<T> {
+    T value;
+    void setValue(T value) { this.value = value; }
+}
+
+class StringNode extends Node<String> {
+    @Override
+    void setValue(String value) {   // 重写父类的 setValue
+        System.out.println("设置: " + value);
+        super.setValue(value);
+    }
+}
+```
+
+擦除后，`Node` 的 `setValue(T)` 变成 `setValue(Object)`。但 `StringNode` 的 `setValue(String)` 签名不同——这怎么"重写"？
+
+编译器为 `StringNode` 自动生成了一个**桥接方法**（Bridge Method）：
+
+```java
+// 编译器生成的合成方法
+void setValue(Object value) {
+    setValue((String) value);   // 转发到真正的 setValue(String)
+}
+```
+
+这个桥接方法的签名 `setValue(Object)` 与父类擦除后的签名一致，从而正确实现了多态。当你调用 `node.setValue("x")`（`node` 声明为 `Node` 但实际是 `StringNode`），JVM 调用的是桥接方法，它再转发到 `setValue(String)`。
+
+桥接方法是编译器默默生成的，你通常不需要关心——但了解它的存在，能帮你理解一些反射场景下的"奇怪"方法签名。
+
+## 九、泛型的限制
+
+汇总类型擦除带来的限制：
+
+| 限制 | 原因 |
+| --- | --- |
+| 不能 `new T()` | 运行时 T 被擦除，不知道具体类型 |
+| 不能 `new T[]` | 数组有运行时类型检查，与擦除冲突 |
+| 不能 `instanceof List＜String＞` | 运行时无泛型信息 |
+| 基本类型不能做类型参数 | 擦除后变 Object，无法存基本类型 |
+| 静态字段不能使用类的类型参数 | 类型参数属于实例，静态成员不依赖实例 |
+| 不能 catch 泛型异常类 | 异常匹配在运行时，但泛型在编译期擦除 |
+
+绕过这些限制的常见技巧是传 `Class＜T＞` 对象，通过反射创建实例：
+
+```java
+public static <T> T newInstance(Class<T> clazz) throws Exception {
+    return clazz.getDeclaredConstructor().newInstance();
+}
+
+String s = newInstance(String.class);
+```
+
+## 十、实战：泛型缓存 Cache＜K, V＞
+
+下面实现一个带 TTL（过期时间）的泛型缓存，把本章知识融会贯通。
+
+<CodeRunner code={`import java.util.HashMap;
+import java.util.Map;
+
+public class Main {
+    public static void main(String[] args) throws InterruptedException {
+        Cache<String, String> cache = new Cache<>(2000);   // TTL 2 秒
+
+        // 存入缓存
+        cache.put("greeting", "Hello, World!");
+        cache.put("name", "Java");
+
+        // 立即读取
+        System.out.println("greeting: " + cache.get("greeting"));
+        System.out.println("name: " + cache.get("name"));
+
+        // 等待 1.2 秒，还没过期
+        Thread.sleep(1200);
+        System.out.println("\\n--- 等待 1.2 秒后 ---");
+        System.out.println("greeting: " + cache.get("greeting"));
+
+        // 再等 1.2 秒，已过期
+        Thread.sleep(1200);
+        System.out.println("\\n--- 等待 2.4 秒后 ---");
+        System.out.println("greeting: " + cache.get("greeting"));   // null（过期）
+
+        System.out.println("\\n缓存大小: " + cache.size());
+
+        // 演示泛型方法
+        System.out.println("\\n--- 泛型方法演示 ---");
+        Integer num = Util.identity(100);
+        String str = Util.identity("泛型方法");
+        System.out.println("identity(100): " + num);
+        System.out.println("identity(str): " + str);
+
+        // 演示 PECS
+        System.out.println("\\n--- PECS 演示 ---");
+        java.util.List<Integer> ints = java.util.Arrays.asList(1, 2, 3);
+        java.util.List<Double> doubles = java.util.Arrays.asList(1.5, 2.5);
+        System.out.println("Integer 求和: " + sum(ints));
+        System.out.println("Double 求和: " + sum(doubles));
+    }
+
+    // ? extends Number：生产者用 extends（读取）
+    static double sum(java.util.List<? extends Number> list) {
+        double total = 0;
+        for (Number n : list) total += n.doubleValue();
+        return total;
+    }
+}
+
+// 泛型缓存类
+class Cache<K, V> {
+    private final Map<K, CacheEntry<V>> store = new HashMap<>();
+    private final long ttlMillis;
+
+    Cache(long ttlMillis) { this.ttlMillis = ttlMillis; }
+
+    void put(K key, V value) {
+        store.put(key, new CacheEntry<>(value, System.currentTimeMillis()));
+    }
+
+    V get(K key) {
+        CacheEntry<V> entry = store.get(key);
+        if (entry == null) return null;
+        if (System.currentTimeMillis() - entry.timestamp > ttlMillis) {
+            store.remove(key);   // 惰性删除
+            System.out.println("  (键 " + key + " 已过期，自动清除)");
+            return null;
+        }
+        return entry.value;
+    }
+
+    int size() { return store.size(); }
+
+    // 缓存条目
+    private static class CacheEntry<V> {
+        final V value;
+        final long timestamp;
+        CacheEntry(V value, long timestamp) {
+            this.value = value;
+            this.timestamp = timestamp;
+        }
+    }
+}
+
+// 泛型方法工具类
+class Util {
+    static <T> T identity(T arg) { return arg; }
+}`} />
+
+这个 `Cache＜K, V＞` 体现了泛型的精髓：
+
+- `K`、`V` 两个类型参数让缓存可以存任意键值对——`Cache＜String, String＞`、`Cache＜Integer, User＞` 都行。
+- `CacheEntry＜V＞` 是静态内部类，自己也有类型参数 `V`，与外部的 `V` 一致。
+- `sum` 方法用 `? extends Number` 接受 `List＜Integer＞` 和 `List＜Double＞`——这就是 PECS 的 extends 用法。
+- `identity` 是泛型方法，独立于泛型类存在。
+
+## 十一、本章小结
+
+| 主题 | 要点 |
+| --- | --- |
+| 泛型动机 | 类型安全 + 消除强制转换 |
+| 泛型类 | `class Box＜T＞`，T 是类型参数 |
+| 泛型方法 | `＜T＞ T method(T t)`，类型参数在返回类型前 |
+| 泛型接口 | `interface Comparable＜T＞` |
+| 命名约定 | T=Type, E=Element, K=Key, V=Value, R=Result |
+| 无界通配符 `?` | 接受任何类型，只读 |
+| 上界 `? extends T` | T 及子类，只读（生产者） |
+| 下界 `? super T` | T 及父类，只写（消费者） |
+| PECS | Producer Extends, Consumer Super |
+| 类型擦除 | 泛型只在编译期，运行时擦除为上界/Object |
+| 桥接方法 | 编译器生成，保证擦除后的多态正确 |
+| 限制 | 不能 new T()、new T[]、基本类型做参数、instanceof 泛型 |
+
+## 结语：第三阶段的尾声
+
+泛型是 Java 核心类库的"压轴戏"——它用类型参数化让代码既通用又安全，用类型擦除在兼容性和功能性之间取得平衡。掌握泛型，你才能读懂集合框架的源码，才能写出真正可复用的工具类。
+
+至此，第三阶段"Java 核心类库"的五篇内容全部完成：
+
+- **字符串**——理解了不可变性与常量池，善用 StringBuilder 与文本块。
+- **包装类与数学工具**——打开了基本类型的保险箱，用 BigDecimal 拯救精度。
+- **日期时间 API**——告别旧 API 的混乱，拥抱 java.time 的优雅。
+- **异常处理**——学会了用 try/catch/finally 守护健壮性，用 try-with-resources 优雅管理资源。
+- **泛型**——掌握了类型参数、通配符与 PECS，理解了类型擦除的代价。
+
+这些核心类库是 Java 程序员的"日常工具箱"——你几乎每天都会用到它们。把它们学扎实，你的 Java 功底就站到了一个坚实的台阶上。
+
+接下来的阶段，我们将进入更广阔的天地——**集合框架**、**IO 与 NIO**、**Lambda 与 Stream**、**并发编程**。Java 的世界，才刚刚展开它最精彩的部分。

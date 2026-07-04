@@ -1,0 +1,180 @@
+---
+title: "Welcome to the World of Java"
+chapter: 1
+stage: "Stage 1"
+stageName: "Java Fundamentals"
+order: 1
+description: "Learn about Java's history, its core features, the relationship between JVM/JRE/JDK, install the JDK, and run your first HelloWorld program"
+pubDate: 2026-07-03
+tags: ["Java", "JVM", "JDK", "入门", "HelloWorld"]
+---
+
+# Welcome to the World of Java
+
+Picture a steaming cup of Indonesian Java coffee, its rich aroma filling the air. In 1995, when a group of engineers at Sun Microsystems sat down to name a new programming language, they were holding just such a cup. And so a name destined to reshape the entire software world was born—**Java**.
+
+This is no fabricated anecdote. Java's logo—a steaming coffee cup—bears witness to this history. And this is where our story begins.
+
+## I. The Past and Present of Java
+
+### 1.1 The Origin of a Cup of Coffee
+
+Wind the clock back to 1991. Inside Sun Microsystems, a secret initiative known as "Green Project" was underway. Led by James Gosling, the team's original goal was to build a small distributed system for consumer electronics such as home appliances and set-top boxes. The language they created was initially named **Oak**, inspired by an oak tree standing outside Gosling's office window.
+
+But fate had other plans. When the team went to register the trademark, they discovered "Oak" was already taken by another company. So in 1995, they decided on a new name. Legend has it that during a discussion at a café, "Java" emerged from a list of candidates—short, memorable, and carrying a hint of exotic flair. On May 23 of that year, Java was officially unveiled at the SunWorld conference, embarking on its legendary journey.
+
+### 1.2 Oracle Takes the Helm
+
+The story took a turn in 2009. That year, the database giant Oracle acquired Sun Microsystems for $7.4 billion, and ownership of Java changed hands. The acquisition sparked considerable concern within the developer community, yet Oracle continued to drive Java forward, maintaining a steady cadence of a new release every six months. Today, after thirty years, Java still ranks among the top programming languages worldwide.
+
+## II. Core Features of Java
+
+Why has Java endured for so long? The answer lies in its design philosophy. Let us savor its core features one by one, much like tasting a fine cup of coffee.
+
+### 2.1 Cross-Platform: "Write Once, Run Anywhere"
+
+This is Java's most famous slogan (Write Once, Run Anywhere, or WORA). Imagine writing a letter home in a kind of "universal language"—whether the recipient is in Beijing, New York, or Tokyo, they can read it. That is the essence of Java's cross-platform nature.
+
+When Java source code is compiled, it does not produce platform-specific machine code. Instead, it generates an intermediate format called **bytecode**. As long as the target platform has a Java Virtual Machine (JVM) installed, the bytecode can run on it. Windows, macOS, Linux—the same bytecode runs everywhere.
+
+### 2.2 Object-Oriented
+
+Java is a purely object-oriented language (Object-Oriented Programming, or OOP). In the world of Java, everything is an object—just as every cup of coffee in a café has its size, temperature, and sweetness, along with behaviors like "being ordered" and "being drunk." Objects encapsulate data together with the methods that operate on it, making program structure clear and easy to maintain.
+
+### 2.3 Automatic Memory Management
+
+In the world of C and C++, programmers must manually allocate and release memory; the slightest misstep can lead to memory leaks or crashes. Java introduced a **garbage collection** mechanism (Garbage Collection, or GC). The JVM automatically tracks object references and reclaims an object's memory when it is no longer in use. This frees programmers to focus their energy on business logic.
+
+### 2.4 Multithreading
+
+From the very beginning, Java has had built-in support for multithreading. Just as multiple baristas in a café can prepare different coffees at the same time, a Java program can execute multiple tasks concurrently, taking full advantage of modern multi-core processors.
+
+## III. The Relationship Between JVM, JRE, and JDK
+
+When you first learn Java, these three abbreviations can be confusing. Let us clarify them with a coffee shop analogy.
+
+- **JVM (Java Virtual Machine)**: This is like the coffee machine itself. It is responsible for executing bytecode and is the key to Java's cross-platform capability. Different operating systems have different JVM implementations, but they all run the same bytecode.
+
+- **JRE (Java Runtime Environment)**: This is like the coffee machine plus the coffee beans, filters, and other consumables—it is the minimal environment needed to run Java programs, containing the JVM and Java's core class libraries. If all you want to do is "drink coffee" (run Java programs), the JRE is enough.
+
+- **JDK (Java Development Kit)**: This is like the entire coffee shop—it contains the JRE, plus development tools such as the compiler (javac), the debugger (jdb), and the documentation generator (javadoc). If you want to "make coffee" (develop Java programs), you need to install the JDK.
+
+In short: **JDK ⊃ JRE ⊃ JVM**. Modern Java (from Java 11 onward) has gradually de-emphasized the JRE concept; developers typically install the JDK directly.
+
+## IV. The Evolution of Java Versions
+
+Java's version evolution is like a coffee's roasting curve—each stage has its own flavor. Here we focus on several **Long Term Support (LTS)** releases, which are the preferred choices for production environments.
+
+| Version | Release Year | Key Features |
+| --- | --- | --- |
+| Java 8 | 2014 | Lambda expressions, Stream API, new Date-Time API |
+| Java 11 | 2018 | Local variable type inference (var), HTTP Client API |
+| Java 17 | 2021 | Sealed Classes, initial Pattern Matching |
+| Java 21 | 2023 | Virtual Threads, Record Patterns |
+
+Java 8 was a milestone release still widely used today; Java 11 brought the `var` keyword into everyday use; Java 17 is the baseline for many new projects; and the virtual threads introduced in Java 21 bring a revolutionary simplification to high-concurrency programming. This tutorial is based on **JDK 21**.
+
+## V. Installing JDK 21
+
+### 5.1 Downloading the JDK
+
+There are several mainstream JDK distributions to choose from:
+- **Oracle JDK**: Oracle's official version; commercial use requires a paid license.
+- **OpenJDK**: The open-source version, which serves as the foundation for other distributions.
+- **Eclipse Temurin** (formerly AdoptOpenJDK): Community-maintained, free to use, and recommended for beginners.
+
+You can download the JDK 21 installer appropriate for your operating system from the [Adoptium website](https://adoptium.net/).
+
+### 5.2 Configuring Environment Variables
+
+After installation, you need to configure environment variables so the system knows where the `javac` and `java` commands are located.
+
+**macOS / Linux**: Edit `~/.zshrc` or `~/.bashrc` and add:
+
+```bash
+export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home
+export PATH=$JAVA_HOME/bin:$PATH
+```
+
+**Windows**: In "System Properties → Environment Variables":
+1. Create a new system variable `JAVA_HOME` with the value set to your JDK installation path (e.g., `C:\Program Files\Java\jdk-21`).
+2. Edit the `Path` variable and add `%JAVA_HOME%\bin`.
+
+Once configured, open a terminal and enter:
+
+```bash
+java -version
+```
+
+If you see output like `openjdk version "21.0.x"`, congratulations—the JDK is installed successfully!
+
+## VI. Your First HelloWorld Program
+
+Following programming tradition, we begin our Java journey with a "Hello, World!"
+
+Create a new file named `HelloWorld.java` (the file name must match the public class name exactly):
+
+```java
+public class HelloWorld {
+    public static void main(String[] args) {
+        System.out.println("Hello, World!");
+    }
+}
+```
+
+Compile and run it from the command line:
+
+```bash
+javac HelloWorld.java   # Compile, producing HelloWorld.class
+java HelloWorld         # Run
+```
+
+Let us walk through this code line by line:
+
+- `public class HelloWorld`: Declares a public class named HelloWorld. Java is an object-oriented language, so all code must reside inside a class.
+- `public static void main(String[] args)`: This is the entry point of the program (the main method). `public` means it is publicly visible, `static` means it can be called without creating an object, `void` means it returns no value, and `String[] args` holds the command-line arguments.
+- `System.out.println("Hello, World!")`: Prints a line of text to standard output. `System.out` is the standard output stream, and `println` prints the content followed by a newline.
+
+Now, let us run this code directly in the browser and experience the charm of Java firsthand:
+
+<CodeRunner code={`public class Main {
+    public static void main(String[] args) {
+        System.out.println("Hello, World!");
+        System.out.println("你好，Java！");
+        System.out.println("让我们一起开启这段咖啡飘香的旅程。");
+    }
+}`} />
+
+Try modifying the content inside `println`, click run, and see how the output changes. This is your first conversation with Java.
+
+## VII. Choosing the Right IDE
+
+A craftsman must sharpen his tools to do good work. In the Java world, there are several excellent integrated development environments (IDEs) to choose from.
+
+### 7.1 IntelliJ IDEA
+
+Developed by the Czech company JetBrains, it is hailed as "the smartest Java IDE." It boasts powerful code completion, refactoring, and debugging features, and is very friendly to newcomers. The Community Edition is free and more than sufficient for learning Java. **Highly recommended for beginners.**
+
+### 7.2 Visual Studio Code
+
+A lightweight editor from Microsoft. By installing the "Extension Pack for Java," it transforms into a capable Java development environment. If you prefer lightweight tools, VS Code is a fine choice.
+
+### 7.3 Eclipse
+
+A veteran open-source IDE that long dominated Java development. Although IntelliJ IDEA has overshadowed it in recent years, Eclipse remains powerful, completely free, and is still used by many enterprises.
+
+## VIII. Conventions of This Tutorial Series
+
+In the chapters ahead, we will journey together along this Java adventure:
+
+- Each article first explains "why," then "what," and finally "how to use it."
+- All code examples can be run online—we encourage you to modify and experiment with them.
+- We will carry the "coffee" metaphor throughout, making abstract concepts tangible and vivid.
+
+## Conclusion
+
+That cup of coffee from 1995 still wafts its aroma today. Over thirty years, countless programmers have used Java to build everything from mobile games to enterprise systems, from big data platforms to financial trading systems. And you are standing at the gateway to this vast ecosystem.
+
+In the next article, we will step formally into Java's world of syntax, learning about variables, data types, comments, and other fundamental building blocks. Just as a barista must first understand coffee beans, water, and temperature before brewing a great cup of coffee, mastering syntax is the first step toward writing elegant Java programs.
+
+Let us raise this cup of Java and drink it all in.

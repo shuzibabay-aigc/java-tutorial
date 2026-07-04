@@ -1,0 +1,544 @@
+---
+title: "A First Look at Enums and Annotations"
+chapter: 12
+stage: "Stage 2"
+stageName: "Object-Oriented Programming"
+order: 7
+description: "Master enum definition and essence, enum methods and interface implementation, EnumSet/EnumMap, and the use of annotations and meta-annotations"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "枚举", "enum", "注解", "Annotation"]
+---
+
+# A First Look at Enums and Annotations
+
+This is the final chapter of the object-oriented stage. Before this, we covered classes, objects, encapsulation, inheritance, polymorphism, interfaces, and inner classes — these are the "main courses". This chapter covers two refined "desserts": **enums** (Enum) and **annotations** (Annotation). They are small in size, but they significantly boost the elegance and safety of your code.
+
+Imagine a coffee shop menu. Cup sizes come in only three kinds — small, medium, and large — you can't order an "extra-extra-large". If you use an `int` to represent cup size, where `1` is small and `2` is medium, what is `99`? The compiler won't stop you from passing `99`, but at runtime it will crash. **Enums** were created to handle exactly this "finite set of values" scenario — they make "cup size" a real type, and the compiler can then block every illegal value.
+
+**Annotations**, on the other hand, are like "sticky notes" you attach to code. `@Override` tells the compiler "this is an overriding method", and `@Deprecated` reminds developers "stop using this method". Annotations themselves don't change program logic, but they provide "metadata" for compilers, frameworks, and tools — the magic of frameworks like Spring and JUnit is built almost entirely on annotations.
+
+## 1. Defining and Using Enums (enum)
+
+### 1.1 Why We Need Enums
+
+First, a pain point from the "pre-enum era". To represent coffee cup sizes, the traditional approach:
+
+```java
+public class Coffee {
+    public static final int SMALL = 1;
+    public static final int MEDIUM = 2;
+    public static final int LARGE = 3;
+
+    public void setSize(int size) { ... }
+}
+
+// 调用：
+coffee.setSize(99);   // 编译通过！但 99 不是合法杯型
+```
+
+`int` constants have several fatal problems:
+
+1. **No type safety**: any `int` can be passed; the compiler won't stop `99`.
+2. **No namespace**: to avoid name collisions, you must add prefixes like `SIZE_SMALL`.
+3. **No descriptive power**: when printed, they show `1`, `2` — meaningless.
+4. **Not iterable**: you can't "list all cup sizes".
+
+Enums solve all of these in one stroke.
+
+### 1.2 Defining an Enum
+
+Use the `enum` keyword:
+
+```java
+public enum CoffeeSize {
+    SMALL, MEDIUM, LARGE
+}
+```
+
+Enum constants are all uppercase, separated by commas. Usage:
+
+```java
+CoffeeSize size = CoffeeSize.MEDIUM;
+System.out.println(size);          // MEDIUM（自带 toString）
+
+// 枚举是类型安全的
+// CoffeeSize s = 99;              // 编译错误！类型不匹配
+```
+
+### 1.3 Common Methods of Enums
+
+Every enum implicitly extends `java.lang.Enum` and comes with a batch of useful methods:
+
+| Method | Purpose |
+| --- | --- |
+| `name()` | Returns the constant name (a string) |
+| `ordinal()` | Returns the declaration order (starting from 0) |
+| `values()` | Returns an array of all constants |
+| `valueOf(String)` | Returns the constant by name |
+| `compareTo(E)` | Compares declaration order |
+
+```java
+CoffeeSize[] all = CoffeeSize.values();
+for (CoffeeSize s : all) {
+    System.out.println(s.name() + " 序号 " + s.ordinal());
+}
+
+CoffeeSize m = CoffeeSize.valueOf("MEDIUM");   // MEDIUM
+```
+
+> ⚠️ **Use ordinal() sparingly**: `ordinal()` returns the declaration order, but that order changes as constants are added or removed. Don't store it in a database or rely on it for business logic. When you need a numeric identifier, define your own field (see below).
+
+### 1.4 Using Enums in switch
+
+Enums and `switch` are a match made in heaven:
+
+```java
+CoffeeSize size = CoffeeSize.LARGE;
+switch (size) {
+    case SMALL:
+        System.out.println("小杯 240ml");
+        break;
+    case MEDIUM:
+        System.out.println("中杯 350ml");
+        break;
+    case LARGE:
+        System.out.println("大杯 470ml");
+        break;
+}
+```
+
+In `case` you write the constant name directly, without `CoffeeSize.SMALL` — the compiler infers the type.
+
+## 2. The Essence of Enums: Extending java.lang.Enum
+
+### 2.1 An Enum Is a Special Class
+
+An enum is essentially a **final class** that implicitly extends `java.lang.Enum`. All enum constants are **static instances** of this class. The `CoffeeSize` above is equivalent to (pseudocode):
+
+```java
+public final class CoffeeSize extends Enum<CoffeeSize> {
+    public static final CoffeeSize SMALL = new CoffeeSize("SMALL", 0);
+    public static final CoffeeSize MEDIUM = new CoffeeSize("MEDIUM", 1);
+    public static final CoffeeSize LARGE = new CoffeeSize("LARGE", 2);
+
+    private CoffeeSize(String name, int ordinal) { super(name, ordinal); }
+    // ...
+}
+```
+
+This means:
+
+- An enum **cannot be inherited** (final).
+- An enum **cannot explicitly extend** another class (it already extends Enum), but **can implement interfaces**.
+- An enum has constructors, but they can only be `private` (private by default; writing `public` is an error).
+- Each constant is a singleton — `CoffeeSize.SMALL == CoffeeSize.SMALL` is always `true`.
+
+### 2.2 The "Singleton" Property of Enums
+
+Because each enum constant has only one instance in the JVM, **enums are the best way to implement the Singleton pattern** (Effective Java, Item 3):
+
+```java
+public enum Singleton {
+    INSTANCE;
+
+    public void doSomething() { ... }
+}
+
+// 使用：
+Singleton.INSTANCE.doSomething();
+```
+
+This form is naturally thread-safe, immune to serialization attacks, and immune to reflection attacks — safer than hand-written eager/lazy versions.
+
+## 3. Enum Constructors, Fields, and Methods
+
+### 3.1 Adding Fields to Enums
+
+Enum constants can carry data. For example, give each cup size a milliliter count and a price:
+
+```java
+public enum CoffeeSize {
+    SMALL(240, 18),
+    MEDIUM(350, 25),
+    LARGE(470, 32);
+
+    private final int ml;        // 毫升数
+    private final double price;  // 价格
+
+    // 构造方法（默认 private，不能写 public）
+    CoffeeSize(int ml, double price) {
+        this.ml = ml;
+        this.price = price;
+    }
+
+    public int getMl() { return ml; }
+    public double getPrice() { return price; }
+}
+```
+
+Usage:
+
+```java
+CoffeeSize size = CoffeeSize.LARGE;
+System.out.println(size + ": " + size.getMl() + "ml, ￥" + size.getPrice());
+// LARGE: 470ml, ￥32.0
+```
+
+Note the syntax: the constant list `SMALL(240, 18)` uses parentheses to pass constructor arguments; the constant list ends with a semicolon `;`, and only then come the fields and methods.
+
+### 3.2 Adding Methods to Enums
+
+Enums can have ordinary methods and abstract methods. **Abstract methods** are interesting — each constant must implement them separately:
+
+```java
+public enum Operation {
+    PLUS("+") {
+        @Override public double apply(double a, double b) { return a + b; }
+    },
+    MINUS("-") {
+        @Override public double apply(double a, double b) { return a - b; }
+    },
+    TIMES("*") {
+        @Override public double apply(double a, double b) { return a * b; }
+    },
+    DIVIDE("/") {
+        @Override public double apply(double a, double b) { return a / b; }
+    };
+
+    private final String symbol;
+
+    Operation(String symbol) { this.symbol = symbol; }
+
+    public abstract double apply(double a, double b);
+
+    @Override
+    public String toString() { return symbol; }
+}
+```
+
+Here `Operation` has an abstract method `apply`, and each constant is an **anonymous subclass** providing its own implementation. This is a "constant-specific method" style.
+
+## 4. Enums Implementing Interfaces
+
+Although an enum cannot extend a class, it can implement interfaces. This gives enums polymorphic power:
+
+```java
+public interface Describable {
+    String describe();
+}
+
+public enum CoffeeSize implements Describable {
+    SMALL, MEDIUM, LARGE;
+
+    @Override
+    public String describe() {
+        return "杯型：" + name();
+    }
+}
+
+Describable d = CoffeeSize.MEDIUM;
+System.out.println(d.describe());   // 杯型：MEDIUM
+```
+
+## 5. EnumSet and EnumMap
+
+Because enum constants are fixed in number and ordered, Java provides two specialized high-performance collections: `EnumSet` and `EnumMap`.
+
+### 5.1 EnumSet
+
+`EnumSet` is a `Set` designed specifically for enums, implemented internally with a bit vector — extremely efficient:
+
+```java
+import java.util.EnumSet;
+
+EnumSet<CoffeeSize> set = EnumSet.of(CoffeeSize.SMALL, CoffeeSize.LARGE);
+System.out.println(set.contains(CoffeeSize.MEDIUM));  // false
+
+EnumSet<CoffeeSize> all = EnumSet.allOf(CoffeeSize.class);     // 全部
+EnumSet<CoffeeSize> none = EnumSet.noneOf(CoffeeSize.class);   // 空
+EnumSet<CoffeeSize> range = EnumSet.range(CoffeeSize.SMALL, CoffeeSize.MEDIUM);  // 范围
+```
+
+### 5.2 EnumMap
+
+`EnumMap` is a `Map` keyed by enum, implemented internally with an array, with O(1) access:
+
+```java
+import java.util.EnumMap;
+
+EnumMap<CoffeeSize, Integer> stock = new EnumMap<>(CoffeeSize.class);
+stock.put(CoffeeSize.SMALL, 50);
+stock.put(CoffeeSize.MEDIUM, 30);
+stock.put(CoffeeSize.LARGE, 20);
+
+System.out.println(stock.get(CoffeeSize.MEDIUM));   // 30
+```
+
+`EnumSet` and `EnumMap` are faster and more memory-efficient than `HashSet`/`HashMap`. When the key is an enum, prefer them.
+
+## 6. A First Look at Annotations (Annotation)
+
+### 6.1 What Is an Annotation
+
+An **annotation** (Annotation) is a "label" attached to program elements (classes, methods, fields, parameters, etc.) that provides metadata. Annotations **do not affect program logic themselves**, but they can be read and exploited by compilers, tools, and frameworks.
+
+```java
+@Override           // 注解：告诉编译器这是重写方法
+public String toString() {
+    return "...";
+}
+```
+
+`@Override` doesn't change the behavior of `toString`, but it lets the compiler check "are you really overriding a parent method" — if you misspell the method name, the compiler errors.
+
+### 6.2 Built-in Java Annotations
+
+The Java language has three commonly used built-in annotations:
+
+| Annotation | Purpose |
+| --- | --- |
+| `@Override` | Marks a method as overriding a parent method; the compiler verifies |
+| `@Deprecated` | Marks something as obsolete; using it triggers a warning |
+| `@SuppressWarnings` | Suppresses compiler warnings |
+
+**`@Deprecated`**:
+
+```java
+@Deprecated
+public void oldMethod() { ... }   // 标记为过时
+
+// 调用时编译器会画删除线 + 警告
+```
+
+**`@SuppressWarnings`**:
+
+```java
+@SuppressWarnings("unchecked")
+List list = new ArrayList();   // 抑制"未检查转换"警告
+
+@SuppressWarnings("unused")
+int x = 10;   // 抑制"未使用变量"警告
+
+@SuppressWarnings({"unused", "rawtypes"})
+public void messy() { ... }   // 抑制多种警告
+```
+
+Common warning types: `"unchecked"` (unchecked generics), `"deprecation"` (using deprecated methods), `"unused"` (unused), `"rawtypes"` (using raw types), `"all"` (all).
+
+### 6.3 Defining an Annotation
+
+Define an annotation with the `@interface` keyword:
+
+```java
+public @interface MyAnnotation {
+    String value();                    // 无默认值的属性
+    int priority() default 0;          // 有默认值
+    String[] tags() default {};        // 数组属性
+}
+```
+
+Usage:
+
+```java
+@MyAnnotation(value = "test", priority = 5, tags = {"a", "b"})
+public void method() { ... }
+
+// 当只有 value 属性时，可省略名字
+@MyAnnotation("hello")
+public void another() { ... }
+```
+
+> 💡 An annotation's "attributes" look like method calls, but they're actually declarations. Attribute types can only be: primitive types, String, enum, Class, annotation, and arrays of these.
+
+## 7. A Brief Introduction to Meta-Annotations
+
+A **meta-annotation** is an annotation on an annotation — used to define "how the annotation itself is used". The `java.lang.annotation` package provides several key meta-annotations.
+
+### 7.1 @Target: Where an Annotation Can Be Used
+
+`@Target` specifies the element types an annotation can mark:
+
+```java
+@Target(ElementType.METHOD)        // 只能用于方法
+public @interface MyMethod { ... }
+
+@Target({ElementType.TYPE, ElementType.METHOD})   // 可用于类或方法
+public @interface MyAnno { ... }
+```
+
+Common values of `ElementType`:
+
+| Value | Markable location |
+| --- | --- |
+| `TYPE` | Class, interface, enum, annotation |
+| `FIELD` | Field (including enum constants) |
+| `METHOD` | Method |
+| `PARAMETER` | Method parameter |
+| `CONSTRUCTOR` | Constructor |
+| `LOCAL_VARIABLE` | Local variable |
+| `ANNOTATION_TYPE` | Annotation type (meta-annotation) |
+| `PACKAGE` | Package |
+
+### 7.2 @Retention: How Long an Annotation Lasts
+
+`@Retention` determines at which phases an annotation exists:
+
+```java
+@Retention(RetentionPolicy.RUNTIME)   // 运行时保留（可被反射读取）
+public @interface MyAnno { ... }
+```
+
+`RetentionPolicy` has three values:
+
+| Policy | Retention phase | Typical use |
+| --- | --- | --- |
+| `SOURCE` | Source only, discarded after compilation | `@Override`, `@SuppressWarnings` |
+| `CLASS` | Kept in class files, not visible at runtime (default) | Bytecode tooling |
+| `RUNTIME` | Kept until runtime, readable via reflection | Spring/JUnit frameworks |
+
+> ⚠️ The default is `CLASS`, but most framework annotations need `RUNTIME`. When defining a custom annotation, if you want a framework to read it at runtime, **you must explicitly write `@Retention(RetentionPolicy.RUNTIME)`**.
+
+### 7.3 A Custom Annotation Example
+
+<CodeRunner code={`import java.lang.annotation.*;
+
+// 自定义注解：标记需要测试的方法
+@Target(ElementType.METHOD)
+@Retention(RetentionPolicy.RUNTIME)
+@interface Test {
+    String description() default "";
+}
+
+// 一个简单的"测试运行器"
+class MyTestRunner {
+    public static void run(Class<?> testClass) throws Exception {
+        Object instance = testClass.getDeclaredConstructor().newInstance();
+        int passed = 0, failed = 0;
+
+        for (var method : testClass.getDeclaredMethods()) {
+            if (method.isAnnotationPresent(Test.class)) {   // 检查是否有 @Test
+                Test t = method.getAnnotation(Test.class);
+                System.out.println("\\n运行测试: " + method.getName()
+                    + " (" + t.description() + ")");
+                try {
+                    method.invoke(instance);
+                    passed++;
+                    System.out.println("  ✓ 通过");
+                } catch (Exception e) {
+                    failed++;
+                    System.out.println("  ✗ 失败: " + e.getCause());
+                }
+            }
+        }
+        System.out.println("\\n=== 测试结果 ===");
+        System.out.println("通过: " + passed + ", 失败: " + failed);
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        MyTestRunner.run(SampleTest.class);
+
+        System.out.println("\\n--- 枚举示例 ---");
+        demoEnum();
+    }
+
+    static void demoEnum() {
+        // 枚举遍历
+        for (CoffeeSize s : CoffeeSize.values()) {
+            System.out.println(s + ": " + s.getMl() + "ml, ￥" + s.getPrice());
+        }
+
+        // EnumMap
+        var stock = new java.util.EnumMap<CoffeeSize, Integer>(CoffeeSize.class);
+        stock.put(CoffeeSize.SMALL, 50);
+        stock.put(CoffeeSize.LARGE, 20);
+        System.out.println("\\n库存:");
+        stock.forEach((k, v) -> System.out.println("  " + k + " = " + v));
+    }
+}
+
+// 测试用例类
+class SampleTest {
+    @Test(description = "加法测试")
+    public void testAdd() {
+        if (1 + 1 != 2) throw new AssertionError("加法错了！");
+    }
+
+    @Test(description = "字符串测试")
+    public void testString() {
+        if ("hello".length() != 5) throw new AssertionError("长度不对");
+    }
+
+    @Test(description = "故意失败的测试")
+    public void testFail() {
+        throw new AssertionError("这个测试故意失败");
+    }
+
+    public void notATest() {
+        System.out.println("我没有 @Test，不会被运行");
+    }
+}
+
+// 带字段的枚举
+enum CoffeeSize {
+    SMALL(240, 18),
+    MEDIUM(350, 25),
+    LARGE(470, 32);
+
+    private final int ml;
+    private final double price;
+
+    CoffeeSize(int ml, double price) {
+        this.ml = ml;
+        this.price = price;
+    }
+
+    public int getMl() { return ml; }
+    public double getPrice() { return price; }
+}`} />
+
+This example shows the real power of annotations — we mark test methods with `@Test`, then use **reflection** at runtime to scan the class's methods, find the ones marked with `@Test`, and run them. This is exactly the core principle of the JUnit testing framework (though JUnit's implementation is much more complex).
+
+## 8. Chapter Summary
+
+### Enum Highlights
+
+| Concept | Key Point |
+| --- | --- |
+| `enum` keyword | Defines a type with a finite set of values |
+| Extends `Enum` | An enum is implicitly final and cannot be inherited |
+| Singleton property | Each constant is a unique instance; can be used for the Singleton pattern |
+| Fields and methods | Can add fields, constructors (private), ordinary/abstract methods |
+| Implementing interfaces | Can implement interfaces, giving it polymorphic power |
+| `EnumSet`/`EnumMap` | High-performance collections specialized for enums |
+
+### Annotation Highlights
+
+| Concept | Key Point |
+| --- | --- |
+| Essence of annotations | Metadata for the program; doesn't change logic |
+| `@Override` | Marks an override; compiler verifies |
+| `@Deprecated` | Marks something as obsolete |
+| `@SuppressWarnings` | Suppresses warnings |
+| `@interface` | Defines an annotation |
+| `@Target` | Meta-annotation: restricts where it can be applied |
+| `@Retention` | Meta-annotation: retention policy (SOURCE/CLASS/RUNTIME) |
+
+## Conclusion: The End of the Object-Oriented Stage
+
+With this, the seven articles of Stage 2 "Object-Oriented Programming" are complete. We've been on a wonderful journey:
+
+- **Classes and Objects** — learned to build "houses" from "blueprints".
+- **Encapsulation** — built protective shells around objects, making data safe and controllable.
+- **Inheritance** — gave code reuse a lineage.
+- **Polymorphism** — same instruction, countless responses; wrote a flexible, extensible payment system.
+- **Abstract Classes and Interfaces** — mastered the abstraction tools of "what it is" and "what it can do".
+- **Inner Classes** — peeked into the delicate nesting of classes; understood the Builder pattern and closures.
+- **Enums and Annotations** — gave constants type safety and code smart labels.
+
+Object-oriented programming is not just a programming paradigm — it's a **way of thinking**. It lets us understand software through the lens of "object collaboration" and manage complexity through "abstract layering". This mindset will run through all your subsequent Java learning.
+
+In the upcoming Stage 3, we'll enter a broader world — **the Collections Framework**, **exception handling**, **generics**, **Lambda and Stream**. If OOP is Java's "skeleton", these are Java's "flesh and blood", letting programs elegantly handle data, cope with errors, and embrace functional programming.
+
+The coffee story continues — the next cup will be even richer.

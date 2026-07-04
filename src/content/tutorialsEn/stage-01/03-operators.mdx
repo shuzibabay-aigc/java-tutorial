@@ -1,0 +1,353 @@
+---
+title: "Operators"
+chapter: 3
+stage: "Stage 1"
+stageName: "Java Fundamentals"
+order: 3
+description: "Master arithmetic, relational, logical, bitwise, assignment, and ternary operators, along with operator precedence, short-circuit evaluation, and the integer overflow pitfall"
+pubDate: 2026-07-03
+tags: ["Java", "运算符", "位运算", "三元运算符", "基础入门"]
+---
+
+# Operators
+
+In the previous chapter, we got to know Java's "coffee beans"—variables and data types. But coffee beans do not turn themselves into coffee; they must pass through a sequence of steps—grinding, extraction, flavoring. Likewise, data on its own is static. It takes **operators** to process, compute, and compare data, ultimately forming meaningful logic.
+
+Operators are the tools in a programmer's hand, much like a barista's grinder, milk pitcher, and thermometer. Mastering the characteristics and quirks of each operator is what lets you write code that is both efficient and elegant.
+
+## I. Arithmetic Operators
+
+Arithmetic operators are the most common kind, used to perform mathematical operations.
+
+| Operator | Description | Example | Result |
+| --- | --- | --- | --- |
+| `+` | Addition | `5 + 3` | `8` |
+| `-` | Subtraction | `5 - 3` | `2` |
+| `*` | Multiplication | `5 * 3` | `15` |
+| `/` | Division | `5 / 3` | `1` (integer division) |
+| `%` | Modulus (remainder) | `5 % 3` | `2` |
+| `++` | Increment | `a++` or `++a` | `a` increased by 1 |
+| `--` | Decrement | `a--` or `--a` | `a` decreased by 1 |
+
+### 1.1 The Integer Division Trap
+
+Note: **when two integers are divided, the result is still an integer**—the decimal part is truncated (not rounded):
+
+```java
+int a = 5 / 3;    // Result is 1, not 1.666...
+double b = 5 / 3; // Result is 1.0! Because 5/3 is computed as the integer 1, then converted to double
+double c = 5.0 / 3; // Now the result is 1.666..., because 5.0 is a floating-point number
+```
+
+To get an accurate floating-point result, at least one operand must be a floating-point number.
+
+### 1.2 Prefix vs. Postfix Increment and Decrement
+
+`++` and `--` come in two forms: prefix (`++a`) and postfix (`a++`). The difference lies in the **return value**:
+
+- `++a` (prefix): First increments by 1, then returns the new value.
+- `a++` (postfix): First returns the old value, then increments by 1.
+
+```java
+int a = 5;
+int b = a++;  // b = 5, a = 6 (assign first, then increment)
+int c = ++a;  // c = 7, a = 7 (increment first, then assign)
+```
+
+> 💡 Mixing increment and decrement into complex expressions makes code hard to read. It is best to use them on their own line.
+
+### 1.3 The Integer Overflow Trap
+
+This is one of the most common pitfalls for Java beginners. The maximum value of `int` is `2,147,483,647` (about 2.1 billion). If you exceed this range, an **overflow** occurs, and the result "wraps around" to a negative number:
+
+```java
+int max = 2147483647;
+int overflow = max + 1;
+System.out.println(overflow);  // Prints -2147483648!
+```
+
+It is like a coffee cup with limited capacity—once it is full, pouring more causes it to overflow. But in a computer, an overflow "wraps around" to a negative number instead of raising an error. This is a property of two's complement representation.
+
+**Countermeasure**: If you expect values to be very large, use the `long` type; or use `Math.addExact(a, b)`, which throws an `ArithmeticException` on overflow, preventing silent errors.
+
+## II. Relational Operators
+
+Relational operators compare two values and produce a `boolean` result (`true` or `false`).
+
+| Operator | Description | Example | Result |
+| --- | --- | --- | --- |
+| `==` | Equal to | `5 == 5` | `true` |
+| `!=` | Not equal to | `5 != 3` | `true` |
+| `＞` | Greater than | `5 ＞ 3` | `true` |
+| `＜` | Less than | `5 ＜ 3` | `false` |
+| `＞=` | Greater than or equal to | `5 ＞= 5` | `true` |
+| `＜=` | Less than or equal to | `5 ＜= 3` | `false` |
+
+> ⚠️ **Important pitfall**: When `==` is used to compare primitive types, it compares "values." But when used on reference types (such as `String`), it compares "reference addresses"—that is, whether two variables point to the same object, not whether their contents are the same. To compare string contents, use the `equals()` method:
+> ```java
+> String s1 = new String("Java");
+> String s2 = new String("Java");
+> System.out.println(s1 == s2);       // false (different objects)
+> System.out.println(s1.equals(s2));  // true (same content)
+> ```
+
+## III. Logical Operators
+
+Logical operators combine multiple boolean expressions and are central to conditional logic.
+
+| Operator | Description | Example | Result |
+| --- | --- | --- | --- |
+| `&&` | Logical AND (short-circuit) | `true && false` | `false` |
+| `\|\|` | Logical OR (short-circuit) | `true \|\| false` | `true` |
+| `!` | Logical NOT | `!true` | `false` |
+| `&` | Logical AND (non-short-circuit) | `true & false` | `false` |
+| `\|` | Logical OR (non-short-circuit) | `true \| false` | `true` |
+
+### 3.1 Short-Circuit Logic: The Wisdom of `&&` and `||`
+
+`&&` and `||` are **short-circuit operators**: once they can determine the result, they stop evaluating the right-hand expression. This is both a performance optimization and a common technique for avoiding null pointer exceptions.
+
+**`&&` (short-circuit AND)**: If the left side is `false`, the entire expression must be `false`, so the right side is not evaluated.
+
+```java
+String name = null;
+// If name is null, the right side (name.length()) is never executed, avoiding a NullPointerException
+if (name != null && name.length() > 5) {
+    System.out.println("Name is valid");
+}
+```
+
+**`||` (short-circuit OR)**: If the left side is `true`, the entire expression must be `true`, so the right side is not evaluated.
+
+```java
+int count = 10;
+// If count > 0 is true, the right side is not evaluated
+if (count > 0 || expensiveCheck()) {
+    System.out.println("Condition holds");
+}
+```
+
+### 3.2 The Difference Between `&` and `&&`
+
+`&` is the non-short-circuit AND: regardless of the left side's result, the right side is always executed. The same goes for `|`. These are typically used for bitwise operations (see the next section) and are less common in boolean logic, though they can occasionally be useful when you need to ensure that a side effect runs.
+
+## IV. Bitwise Operators
+
+Bitwise operators manipulate the individual binary bits of integers directly. It is like a barista manipulating coffee at the molecular level—though rarely needed in day-to-day work, it is incredibly powerful in low-level programming, performance optimization, and permission control.
+
+| Operator | Description | Example (assume a=60, b=13) |
+| --- | --- | --- |
+| `&` | Bitwise AND | `a & b` = 12 |
+| `\|` | Bitwise OR | `a \| b` = 61 |
+| `^` | Bitwise XOR | `a ^ b` = 49 |
+| `~` | Bitwise NOT | `~a` = -61 |
+| `＜＜` | Left shift | `a ＜＜ 2` = 240 |
+| `＞＞` | Right shift (signed) | `a ＞＞ 2` = 15 |
+| `＞＞＞` | Unsigned right shift | `a ＞＞＞ 2` = 15 |
+
+### 4.1 Bitwise Operations Explained
+
+Using `a = 60` (binary `0011 1100`) and `b = 13` (binary `0000 1101`) as examples:
+
+- **Bitwise AND `&`**: Each bit is 1 only if both corresponding bits are 1. `0011 1100 & 0000 1101 = 0000 1100` (12). Commonly used as a "mask" to extract certain bits.
+- **Bitwise OR `|`**: Each bit is 1 if at least one corresponding bit is 1. `0011 1100 | 0000 1101 = 0011 1101` (61). Commonly used to "set" certain bits.
+- **Bitwise XOR `^`**: Each bit is 1 if the corresponding bits differ, 0 if they are the same. `0011 1100 ^ 0000 1101 = 0011 0001` (49). Properties: `a ^ a = 0`, `a ^ 0 = a`.
+- **Bitwise NOT `~`**: Flips every bit—0 becomes 1, 1 becomes 0. `~0011 1100 = 1100 0011` (-61, due to two's complement representation).
+
+### 4.2 Shift Operations
+
+- **Left shift `＜＜`**: Shifts all bits left, filling the right with 0s. Each position shifted left is equivalent to multiplying by 2. `60 ＜＜ 2 = 240` (60 × 4).
+- **Right shift `＞＞`**: Shifts all bits right, filling the left with the **sign bit** (0 for positive numbers, 1 for negative numbers). Each position shifted right is equivalent to dividing by 2 (rounding down). `60 ＞＞ 2 = 15` (60 / 4).
+- **Unsigned right shift `＞＞＞`**: Shifts all bits right, **always filling the left with 0s**, ignoring the sign bit. It treats negative numbers as large positive numbers.
+
+### 4.3 Practical Applications of Bitwise Operations
+
+**Checking odd/even**: `n & 1`—a result of 0 means even, 1 means odd. This is faster than `n % 2`.
+
+**Swapping two variables** (without a temporary variable):
+```java
+a = a ^ b;
+b = a ^ b;
+a = a ^ b;
+// Now the values of a and b have been swapped
+```
+
+**Permission control**: Use bits to represent different permissions, `|` to combine, `&` to check:
+```java
+int READ = 1;    // 0001
+int WRITE = 2;   // 0010
+int EXEC = 4;    // 0100
+int permission = READ | WRITE;  // 0011, has read and write permissions
+boolean canRead = (permission & READ) != 0;  // true
+```
+
+## V. Assignment Operators and Compound Assignment
+
+The assignment operator `=` assigns the value on the right to the variable on the left. Java also provides a series of **compound assignment operators** that combine an operation with an assignment:
+
+| Operator | Equivalent to | Example |
+| --- | --- | --- |
+| `+=` | `a = a + b` | `a += 5` |
+| `-=` | `a = a - b` | `a -= 5` |
+| `*=` | `a = a * b` | `a *= 5` |
+| `/=` | `a = a / b` | `a /= 5` |
+| `%=` | `a = a % b` | `a %= 5` |
+| `&=`, `\|=`, `^=`, `＜＜=`, `＞＞=`, `＞＞＞=` | Corresponding bitwise operations | `a &= 5` |
+
+> 💡 **Hidden feature**: Compound assignment operators include an **implicit cast**!
+> ```java
+> byte b = 10;
+> b = b + 5;    // Compile error: b+5 is int, cannot be assigned directly to byte
+> b += 5;       // Correct! Equivalent to b = (byte)(b + 5), with an automatic cast
+> ```
+> This means compound assignments can cause **implicit truncation**, so be mindful of the value range when using them.
+
+## VI. The Ternary Operator
+
+The ternary operator `? :` is Java's only three-operand operator. It is a concise conditional expression:
+
+```
+condition ? expression1 : expression2
+```
+
+If the condition is `true`, the value of expression1 is returned; otherwise, the value of expression2 is returned.
+
+```java
+int score = 85;
+String result = score >= 60 ? "Pass" : "Fail";
+// Equivalent to:
+// String result;
+// if (score >= 60) result = "Pass";
+// else result = "Fail";
+```
+
+The ternary operator makes simple conditional assignments concise, but **do not nest it too deeply**—the following code is legal but extremely hard to read:
+
+```java
+String level = score >= 90 ? "Excellent" : score >= 80 ? "Good" : score >= 60 ? "Pass" : "Fail";
+```
+
+For complex conditions, `if-else` is clearer.
+
+## VII. Operator Precedence
+
+When an expression contains multiple operators, who goes first? That is the question of precedence. The table below lists operators from highest to lowest (operators on the same row have equal precedence and associate from left to right):
+
+| Precedence | Operators | Notes |
+| --- | --- | --- |
+| 1 | `()`, `[]`, `.` | Parentheses, array index, member access |
+| 2 | `!`, `~`, `++`, `--`, `+` (positive), `-` (negative) | Unary operators |
+| 3 | `*`, `/`, `%` | Multiplication, division, modulus |
+| 4 | `+`, `-` | Addition, subtraction |
+| 5 | `＜＜`, `＞＞`, `＞＞＞` | Shift |
+| 6 | `＜`, `＜=`, `＞`, `＞=`, `instanceof` | Relational |
+| 7 | `==`, `!=` | Equality |
+| 8 | `&` | Bitwise AND |
+| 9 | `^` | Bitwise XOR |
+| 10 | `\|` | Bitwise OR |
+| 11 | `&&` | Logical AND |
+| 12 | `\|\|` | Logical OR |
+| 13 | `?:` | Ternary |
+| 14 | `=`, `+=`, `-=`, `*=`, ... | Assignment |
+
+A handy mnemonic: **unary > arithmetic > shift > relational > logical > ternary > assignment**.
+
+> 💡 In practice, there is no need to memorize this rigidly. **Use parentheses** to make your intent clear—it both prevents precedence errors and improves readability. Which is clearer: `a + b * c` or `(a + b) * c`? Clearly the latter.
+
+## VIII. The instanceof Operator
+
+`instanceof` determines whether an object is an instance of a particular class (or its subclass, or an interface implementation):
+
+```java
+String s = "Java";
+boolean isString = s instanceof String;  // true
+
+Object obj = "Hello";
+if (obj instanceof String) {
+    String str = (String) obj;  // Safe cast
+    System.out.println(str.length());
+}
+```
+
+Starting from Java 16, `instanceof` supports **pattern matching**, which can test and bind a variable in one step, eliminating the need for an explicit cast:
+
+```java
+// Java 16+
+Object obj = "Hello";
+if (obj instanceof String str) {
+    System.out.println(str.length());  // str is automatically bound
+}
+```
+
+## IX. Comprehensive Demo: Bitwise and Ternary Operations
+
+Let us use a program to demonstrate the practical effects of bitwise and ternary operators:
+
+<CodeRunner code={`public class Main {
+    public static void main(String[] args) {
+        int a = 60;   // 二进制 0011 1100
+        int b = 13;   // 二进制 0000 1101
+
+        System.out.println("=== 位运算演示 ===");
+        System.out.printf("a = %d (二进制: %s)%n", a, toBinary(a));
+        System.out.printf("b = %d (二进制: %s)%n", b, toBinary(b));
+        System.out.printf("a & b = %d%n", a & b);    // 12
+        System.out.printf("a | b = %d%n", a | b);    // 61
+        System.out.printf("a ^ b = %d%n", a ^ b);    // 49
+        System.out.printf("~a = %d%n", ~a);          // -61
+        System.out.printf("a << 2 = %d%n", a << 2);  // 240
+        System.out.printf("a >> 2 = %d%n", a >> 2);  // 15
+        System.out.printf("a >>> 2 = %d%n", a >>> 2);// 15
+
+        // 实用：判断奇偶
+        System.out.println("\\n=== 奇偶判断 ===");
+        for (int i = 0; i <= 5; i++) {
+            String parity = (i & 1) == 0 ? "偶数" : "奇数";
+            System.out.printf("%d 是 %s%n", i, parity);
+        }
+
+        // 实用：用三元运算符求最大值
+        System.out.println("\\n=== 三元运算求最大值 ===");
+        int x = 10, y = 20, z = 15;
+        int max = (x > y) ? x : y;
+        max = (max > z) ? max : z;
+        System.out.printf("三个数 %d, %d, %d 中最大的是 %d%n", x, y, z, max);
+
+        // 实用：位运算交换变量
+        System.out.println("\\n=== 位运算交换变量 ===");
+        int p = 100, q = 200;
+        System.out.printf("交换前: p=%d, q=%d%n", p, q);
+        p = p ^ q;
+        q = p ^ q;
+        p = p ^ q;
+        System.out.printf("交换后: p=%d, q=%d%n", p, q);
+    }
+
+    // 辅助方法：将 int 转为 8 位二进制字符串
+    static String toBinary(int n) {
+        String s = Integer.toBinaryString(n);
+        // 补齐到 8 位
+        while (s.length() < 8) {
+            s = "0" + s;
+        }
+        return s;
+    }
+}`} />
+
+## X. Chapter Recap
+
+| Category | Operators | Notes |
+| --- | --- | --- |
+| Arithmetic | `+ - * / % ++ --` | Integer division truncates; watch for overflow |
+| Relational | `== != ＞ ＜ ＞= ＜=` | `==` compares addresses for reference types |
+| Logical | `&& \|\| ! & \|` | `&&` `||` short-circuit; `&` `\|` do not |
+| Bitwise | `& \| ^ ~ ＜＜ ＞＞ ＞＞＞` | `＞＞＞` is unsigned right shift; bitwise ops are fast |
+| Assignment | `= += -= *= ...` | Compound assignments include an implicit cast |
+| Ternary | `?:` | Do not nest too deeply |
+| Type | `instanceof` | Java 16+ supports pattern matching |
+
+## Conclusion
+
+Operators are the programmer's Swiss Army knife—each one has its place. Arithmetic operators handle numbers, relational operators compare magnitudes, logical operators combine conditions, and bitwise operators go down to the metal. Understanding their characteristics and precedence lets you build complex program logic with ease, just as a barista commands an array of tools.
+
+But operators are merely tools for "processing" data. Programs also need the ability to "make decisions"—choosing different execution paths based on conditions. In the next chapter, we will learn Java's **control flow**: `if-else`, `switch`, `for`, `while`... teaching your program to "think" and "repeat." We will also use these tools to build a fun "guess the number" game.

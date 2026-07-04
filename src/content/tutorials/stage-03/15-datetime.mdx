@@ -1,0 +1,451 @@
+---
+title: "日期时间 API"
+chapter: 15
+stage: "第三阶段"
+stageName: "Java 核心类库"
+order: 3
+description: "理解旧日期 API 的缺陷，掌握 java.time 新 API（LocalDate、Instant、Duration、ZonedDateTime、DateTimeFormatter）及实战应用"
+pubDate: 2026-07-03
+tags: ["Java", "日期时间", "java.time", "LocalDate", "DateTimeFormatter"]
+---
+
+# 日期时间 API
+
+时间，是程序员永远的对手。它无声流逝，却牵动着程序的每一根神经——订单要在 30 分钟内支付，日志要精确到毫秒，生日要每年提醒，时区要把全球团队对齐到同一刻。
+
+Java 处理时间的 API 经历过一次"史诗级换代"。早期的 `java.util.Date` 和 `Calendar` 设计糟糕，被戏称为"Java 最失败的 API 之一"；直到 Java 8 引入 `java.time`（JSR 310），Java 程序员才终于有了体面的日期时间工具。本章，我们先看旧 API 的"罪状"，再领略新 API 的优雅。
+
+## 一、旧 API 的问题
+
+### 1.1 Date 的"原罪"
+
+`java.util.Date` 从 JDK 1.0 就存在，它的设计问题堪称"教科书级的反面教材"：
+
+```java
+import java.util.Date;
+
+// 月份从 0 开始！1月=0，12月=11
+Date d = new Date(2026 - 1900, 6 - 1, 3);   // 表示 2026年6月3日
+System.out.println(d);   // Wed Jun 03 00:00:00 CST 2026
+
+// 年份要减 1900！
+Date d2 = new Date(122, 0, 1);   // 这是 2022年1月1日
+```
+
+两个令人窒息的设计：
+
+1. **年份从 1900 起算**——`new Date(122, ...)` 表示 2022 年。
+2. **月份从 0 开始**——0 是一月，11 是十二月。
+
+无数 bug 诞生于此。更要命的是，`Date` 是**可变**的——它的 `setTime`、`setYear` 方法能修改内部状态，导致它在多线程下不安全。几乎所有 get/set 方法都被标记为 `@Deprecated`，却没法真正移除。
+
+### 1.2 Calendar 的复杂性
+
+`Calendar`（Java 1.1）本意是修补 `Date`，却引入了新的复杂：
+
+```java
+import java.util.Calendar;
+
+Calendar c = Calendar.getInstance();
+c.set(2026, Calendar.JUNE, 3);   // 月份终于可以用常量了
+int year = c.get(Calendar.YEAR);
+int month = c.get(Calendar.MONTH) + 1;   // 但 get 仍然是 0-based！
+```
+
+`Calendar` 依然可变、依然 0-based 月份，而且 API 臃肿——一个类同时管日期、时间、时区、星期、毫秒，方法名都是 `get(Calendar.FIELD)` 这种"字段查询"风格，可读性极差。
+
+### 1.3 SimpleDateFormat 线程不安全
+
+`SimpleDateFormat` 是旧 API 中格式化的工具，但它**不是线程安全**的：
+
+```java
+// 多线程共享同一个 SimpleDateFormat 会出 bug
+SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+// 线程 A 和线程 B 同时调用 sdf.parse(...) 可能得到错误结果或抛异常
+```
+
+`SimpleDateFormat` 内部有个 `Calendar` 字段，`parse` 和 `format` 会修改它——并发使用会互相覆盖。生产环境中这曾导致大量"幽灵 bug"。
+
+这三个问题——设计混乱、可变不安全、格式化器线程不安全——让旧 API 臭名昭著。Java 8 终于用 `java.time` 一揽子解决了它们。
+
+## 二、java.time 核心类（Java 8+）
+
+`java.time`（JSR 310）由 Joda-Time 的作者 Stephen Colebourne 主导设计，吸收了 Joda-Time 的精华。它的核心设计理念：
+
+- **不可变**（Immutable）：所有类不可变，方法返回新对象，天生线程安全。
+- **清晰分离**：日期、时间、时刻各有专属类，不混用。
+- **API 直观**：`getYear()`、`plusDays(5)`，一目了然。
+
+### 2.1 三兄弟：LocalDate、LocalTime、LocalDateTime
+
+| 类 | 含义 | 示例 |
+| --- | --- | --- |
+| `LocalDate` | 日期（年月日） | 2026-07-03 |
+| `LocalTime` | 时间（时分秒纳秒） | 14:30:00 |
+| `LocalDateTime` | 日期+时间 | 2026-07-03T14:30:00 |
+
+它们不带时区信息——"Local"意味着"本地"，适合表示"日期"本身，而非"全球某刻"。
+
+```java
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.LocalDateTime;
+
+// 创建
+LocalDate today = LocalDate.now();          // 今天
+LocalDate birthday = LocalDate.of(2000, 1, 1);   // 月份终于从 1 开始了！
+
+LocalTime now = LocalTime.now();
+LocalTime lunch = LocalTime.of(12, 30, 0);
+
+LocalDateTime dt = LocalDateTime.now();
+LocalDateTime specific = LocalDateTime.of(2026, 7, 3, 14, 30);
+
+System.out.println(today);       // 2026-07-03
+System.out.println(birthday);    // 2000-01-01
+System.out.println(lunch);       // 12:30
+```
+
+注意一个重大改进：**月份从 1 开始**了！`LocalDate.of(2026, 7, 3)` 就是 7 月 3 日，不用再减 1。
+
+### 2.2 获取字段
+
+```java
+LocalDate d = LocalDate.of(2026, 7, 3);
+System.out.println(d.getYear());        // 2026
+System.out.println(d.getMonthValue());  // 7
+System.out.println(d.getDayOfMonth());  // 3
+System.out.println(d.getDayOfWeek());   // FRIDAY
+System.out.println(d.getDayOfYear());   // 184（一年中第几天）
+System.out.println(d.lengthOfMonth());  // 31（7月有31天）
+System.out.println(d.isLeapYear());     // false（2026不是闰年）
+```
+
+### 2.3 日期运算
+
+`java.time` 的运算方法返回**新对象**，原对象不变：
+
+```java
+LocalDate today = LocalDate.now();
+
+LocalDate nextWeek = today.plusDays(7);        // 加7天
+LocalDate lastMonth = today.minusMonths(1);    // 减1月
+LocalDate nextYear = today.plusYears(1);       // 加1年
+LocalDate changed = today.withYear(2030);      // 把年份改成2030
+LocalDate firstDay = today.withDayOfMonth(1);  // 把日改成1号
+
+System.out.println(today);       // 原对象不变
+System.out.println(nextWeek);    // 7天后
+```
+
+`with` 系列方法是"修改某个字段"——`withYear`、`withMonth`、`withDayOfMonth`，同样返回新对象。
+
+### 2.4 比较
+
+```java
+LocalDate d1 = LocalDate.of(2026, 1, 1);
+LocalDate d2 = LocalDate.of(2026, 12, 31);
+
+System.out.println(d1.isBefore(d2));    // true
+System.out.println(d1.isAfter(d2));     // false
+System.out.println(d1.isEqual(d2));     // false
+```
+
+## 三、Instant：时间线上的瞬间
+
+`Instant` 表示**时间线上一个精确瞬间**（UTC 时间戳），内部是"从 1970-01-01T00:00:00Z 起的秒数 + 纳秒"。
+
+```java
+import java.time.Instant;
+
+Instant now = Instant.now();          // 当前 UTC 时刻
+Instant epoch = Instant.ofEpochSecond(0);   // 1970-01-01T00:00:00Z
+
+System.out.println(now);              // 2026-07-03T06:00:00.123Z（Z=UTC）
+System.out.println(now.getEpochSecond());   // 秒数
+System.out.println(now.toEpochMilli());     // 毫秒（等价于 System.currentTimeMillis()）
+```
+
+`Instant` 是**机器友好**的时间表示——它不管人类用什么时区、什么日历，只认"从纪元起的秒数"。`LocalDateTime` 是**人类友好**的——它关心"几点几分"，但不锚定到全球时间线。
+
+两者的桥梁是时区：`localDateTime.atZone(zoneId)` 加上时区就能转成 `Instant`，反之亦然。
+
+## 四、Duration 与 Period
+
+### 4.1 Duration：时间间隔（时分秒级）
+
+`Duration` 表示**精确到纳秒**的时间量，适合"小时、分钟、秒"级别的间隔：
+
+```java
+import java.time.Duration;
+import java.time.LocalTime;
+
+LocalTime t1 = LocalTime.of(9, 0);
+LocalTime t2 = LocalTime.of(17, 30);
+
+Duration gap = Duration.between(t1, t2);
+System.out.println(gap.toHours());      // 8
+System.out.println(gap.toMinutes());    // 510
+System.out.println(gap.getSeconds());   // 30600
+```
+
+`Duration` 也能用于 `Instant` 之间：
+
+```java
+Instant start = Instant.now();
+// ... 做一些耗时操作 ...
+Instant end = Instant.now();
+Duration elapsed = Duration.between(start, end);
+System.out.println("耗时 " + elapsed.toMillis() + " 毫秒");
+```
+
+### 4.2 Period：日期间隔（年月日级）
+
+`Period` 表示**年、月、日**级别的日期量，适合"人话"描述间隔：
+
+```java
+import java.time.Period;
+import java.time.LocalDate;
+
+LocalDate birth = LocalDate.of(2000, 5, 15);
+LocalDate today = LocalDate.now();
+
+Period age = Period.between(birth, today);
+System.out.println(age.getYears() + " 岁 " 
+    + age.getMonths() + " 月 " + age.getDays() + " 日");
+```
+
+> ⚠️ `Period` 和 `Duration` 不要混用。`Duration.between(date1, date2)` 会报错——它只处理"时间"类（Time/Instant）。`Period.between(date1, date2)` 只处理"日期"类（LocalDate）。
+
+### 4.3 until 与 ChronoUnit
+
+如果只关心"两个日期差了多少天/月/年"，用 `until` 配合 `ChronoUnit` 更直接：
+
+```java
+import java.time.temporal.ChronoUnit;
+
+LocalDate d1 = LocalDate.of(2026, 1, 1);
+LocalDate d2 = LocalDate.of(2026, 12, 31);
+
+long days = d1.until(d2, ChronoUnit.DAYS);       // 364
+long months = d1.until(d2, ChronoUnit.MONTHS);   // 11
+long years = ChronoUnit.YEARS.between(d1, d2);   // 0
+```
+
+## 五、时区：ZonedDateTime 与 ZoneId
+
+`ZonedDateTime` = `LocalDateTime` + 时区，表示"全球某地的某刻"。
+
+```java
+import java.time.ZonedDateTime;
+import java.time.ZoneId;
+
+ZonedDateTime shanghai = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"));
+ZonedDateTime london = ZonedDateTime.now(ZoneId.of("Europe/London"));
+ZonedDateTime newYork = ZonedDateTime.now(ZoneId.of("America/New_York"));
+
+System.out.println("上海: " + shanghai);
+System.out.println("伦敦: " + london);
+System.out.println("纽约: " + newYork);
+```
+
+`ZoneId` 是时区标识，用"区域/城市"格式（IANA 时区数据库），如 `Asia/Shanghai`、`America/New_York`、`UTC`。
+
+时区转换：
+
+```java
+ZonedDateTime meeting = ZonedDateTime.of(
+    2026, 7, 3, 14, 0, 0, 0, ZoneId.of("Asia/Shanghai"));
+ZonedDateTime londonTime = meeting.withZoneSameInstant(ZoneId.of("Europe/London"));
+System.out.println("上海 14:00 = 伦敦 " + londonTime.getHour() + ":00");
+// 上海 14:00 = 伦敦 07:00（夏令时）
+```
+
+## 六、格式化与解析：DateTimeFormatter
+
+`DateTimeFormatter` 是 `SimpleDateFormat` 的替代品——**它是不可变的、线程安全的**。
+
+### 6.1 预定义格式
+
+```java
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+
+LocalDate d = LocalDate.now();
+
+System.out.println(d.format(DateTimeFormatter.ISO_LOCAL_DATE));   // 2026-07-03
+System.out.println(d.format(DateTimeFormatter.BASIC_ISO_DATE));   // 20260703
+```
+
+### 6.2 自定义格式
+
+用模式字符串创建格式化器：
+
+```java
+DateTimeFormatter fmt1 = DateTimeFormatter.ofPattern("yyyy年MM月dd日");
+DateTimeFormatter fmt2 = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss");
+
+LocalDateTime now = LocalDateTime.now();
+System.out.println(now.format(fmt1));   // 2026年07月03日
+System.out.println(now.format(fmt2));   // 2026/07/03 14:30:00
+```
+
+常用模式字母：
+
+| 字母 | 含义 | 示例 |
+| --- | --- | --- |
+| `yyyy` | 四位年 | 2026 |
+| `MM` | 两位月 | 07 |
+| `dd` | 两位日 | 03 |
+| `HH` | 两位时（24小时制） | 14 |
+| `mm` | 两位分 | 30 |
+| `ss` | 两位秒 | 00 |
+| `SSS` | 毫秒 | 123 |
+| `E` | 星期几 | 周五 / Fri |
+| `a` | 上下午 | 下午 / PM |
+
+### 6.3 解析字符串
+
+```java
+DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+LocalDate parsed = LocalDate.parse("2026-07-03", fmt);
+System.out.println(parsed);   // 2026-07-03
+
+// ISO 标准格式可以直接 parse（无需 formatter）
+LocalDate iso = LocalDate.parse("2026-07-03");
+```
+
+> 💡 `DateTimeFormatter` 是线程安全的——一个实例可以被多线程共享，这是它对 `SimpleDateFormat` 最大的改进。
+
+## 七、实用方法速查
+
+| 操作 | 方法 | 示例 |
+| --- | --- | --- |
+| 加减天 | `plusDays(n)` / `minusDays(n)` | `today.plusDays(7)` |
+| 加减月 | `plusMonths(n)` / `minusMonths(n)` | `today.minusMonths(1)` |
+| 修改字段 | `withYear(y)` / `withMonth(m)` | `today.withYear(2030)` |
+| 比较 | `isBefore` / `isAfter` / `isEqual` | `d1.isBefore(d2)` |
+| 间隔 | `until(other, unit)` | `d1.until(d2, DAYS)` |
+| 获取字段 | `getYear` / `getMonthValue` / `getDayOfWeek` | `today.getYear()` |
+| 判断闰年 | `isLeapYear()` | `today.isLeapYear()` |
+| 月天数 | `lengthOfMonth()` | `today.lengthOfMonth()` |
+| 格式化 | `format(formatter)` | `d.format(fmt)` |
+| 解析 | `parse(str, formatter)` | `LocalDate.parse(s, fmt)` |
+
+## 八、实战演练
+
+### 8.1 生日倒计时
+
+<CodeRunner code={`import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
+
+public class Main {
+    public static void main(String[] args) {
+        LocalDate today = LocalDate.now();
+        int year = today.getYear();
+
+        // 假设生日是 6 月 15 日
+        int birthMonth = 6;
+        int birthDay = 15;
+
+        LocalDate birthdayThisYear = LocalDate.of(year, birthMonth, birthDay);
+        LocalDate birthdayNext = birthdayThisYear;
+
+        // 如果今年的生日已经过了，就看明年
+        if (birthdayThisYear.isBefore(today) || birthdayThisYear.isEqual(today)) {
+            birthdayNext = birthdayThisYear.plusYears(1);
+        }
+
+        long daysUntil = today.until(birthdayNext, ChronoUnit.DAYS);
+
+        System.out.println("今天是: " + today);
+        System.out.println("下一次生日: " + birthdayNext);
+        if (daysUntil == 0) {
+            System.out.println("今天就是生日！生日快乐！");
+        } else {
+            System.out.println("距离生日还有 " + daysUntil + " 天");
+        }
+
+        // 计算年龄
+        LocalDate realBirth = LocalDate.of(2000, birthMonth, birthDay);
+        long age = realBirth.until(today, ChronoUnit.YEARS);
+        System.out.println("当前年龄: " + age + " 岁");
+
+        // 计算出生至今多少天
+        long totalDays = realBirth.until(today, ChronoUnit.DAYS);
+        System.out.println("出生至今已 " + totalDays + " 天");
+    }
+}`} />
+
+### 8.2 计算两个日期之间的工作日
+
+<CodeRunner code={`import java.time.DayOfWeek;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+
+public class Main {
+    public static void main(String[] args) {
+        DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+
+        LocalDate start = LocalDate.of(2026, 7, 1);
+        LocalDate end = LocalDate.of(2026, 7, 31);
+
+        // 找出区间内所有工作日（周一到周五）
+        List<LocalDate> workdays = new ArrayList<>();
+        LocalDate cursor = start;
+        while (!cursor.isAfter(end)) {
+            DayOfWeek dow = cursor.getDayOfWeek();
+            if (dow != DayOfWeek.SATURDAY && dow != DayOfWeek.SUNDAY) {
+                workdays.add(cursor);
+            }
+            cursor = cursor.plusDays(1);
+        }
+
+        System.out.println(start.format(fmt) + " 至 " + end.format(fmt));
+        System.out.println("工作日总数: " + workdays.size() + " 天");
+
+        // 打印每个工作日及星期
+        for (LocalDate d : workdays) {
+            System.out.println("  " + d.format(fmt)
+                + " " + d.getDayOfWeek()
+                + " (第 " + d.getDayOfYear() + " 天)");
+        }
+
+        System.out.println();
+
+        // 计算 30 天后的日期，及是星期几
+        LocalDate future = start.plusDays(30);
+        System.out.println(start + " + 30 天 = " + future
+            + " " + future.getDayOfWeek());
+
+        // 计算本月最后一天
+        LocalDate lastDayOfMonth = start.withDayOfMonth(start.lengthOfMonth());
+        System.out.println(start.getMonthValue() + " 月最后一天: "
+            + lastDayOfMonth + " " + lastDayOfMonth.getDayOfWeek());
+    }
+}`} />
+
+## 九、本章小结
+
+| 主题 | 要点 |
+| --- | --- |
+| 旧 API 缺陷 | Date 年份减 1900、月份 0-based、可变不安全；SimpleDateFormat 线程不安全 |
+| LocalDate | 日期（年月日），不可变，月份 1-12 |
+| LocalTime | 时间（时分秒纳秒） |
+| LocalDateTime | 日期+时间 |
+| Instant | UTC 时间戳，机器友好 |
+| Duration | 时分秒级间隔，精确到纳秒 |
+| Period | 年月日级间隔 |
+| ZonedDateTime | 带时区的日期时间 |
+| DateTimeFormatter | 线程安全的格式化器 |
+| 运算 | plus/minus/with 系列方法，返回新对象 |
+| 比较 | isBefore/isAfter/isEqual |
+| 间隔计算 | until(other, ChronoUnit) / ChronoUnit.X.between(a, b) |
+
+## 结语
+
+`java.time` 是 Java 8 最受欢迎的改进之一——它用**不可变**保证线程安全，用**清晰分离**的类让"日期""时间""时刻""时区"各司其职，用**直观的 API**（`plusDays`、`withYear`）替代了 `Calendar` 的字段查询噩梦。如果你还在用 `Date` 和 `SimpleDateFormat`，是时候迁移了——新 API 会让你的时间代码焕然一新。
+
+下一章，我们将直面程序运行中不可避免的"意外"——**异常处理**。你会学会如何用 try/catch/finally 守护程序的健壮性，如何用 try-with-resources 优雅地管理资源，以及如何设计自己的异常体系。

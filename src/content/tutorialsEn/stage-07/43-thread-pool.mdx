@@ -1,0 +1,472 @@
+---
+title: "Thread Pools"
+chapter: 43
+stage: "Stage 7"
+stageName: "Concurrent Programming"
+order: 10
+description: "Master the seven parameters and workflow of ThreadPoolExecutor, the four rejection policies, the traps of Executors factory methods, sizing thread pools reasonably, and ForkJoinPool work-stealing"
+pubDate: 2026-07-03
+tags: ["Java", "Thread Pool", "ThreadPoolExecutor", "Rejection Policy", "ForkJoinPool", "Executors"]
+---
+
+# Thread Pools
+
+Directly `new Thread().start()` is an anti-pattern in production — thread creation/destruction is costly, you cannot control concurrency, there is no task queue, no exception handling, and no reuse. **Thread pools** solve these problems: reuse threads, control concurrency, buffer tasks, and manage uniformly.
+
+If the previous chapter's concurrent collections are "data-structure-level concurrency tools," then thread pools are "execution-level concurrency tools" — they turn "starting threads" into "submitting tasks," freeing you from "thread scheduling" so you can focus on business logic. Thread pools are the core of Java concurrency engineering and a must-ask in interviews.
+
+## 1. The Executor Framework
+
+JUC's `Executor` framework is a layered API:
+
+```
+Executor (top interface, execute(Runnable))
+  └── ExecutorService (extends, submit/shutdown/awaitTermination)
+        └── ThreadPoolExecutor (core implementation)
+        └── ScheduledThreadPoolExecutor (scheduled tasks)
+        └── ForkJoinPool (divide and conquer)
+```
+
+The most commonly used interface is `ExecutorService`:
+
+```java
+ExecutorService pool = Executors.newFixedThreadPool(4);
+Future<Integer> f = pool.submit(() -> 1 + 1);   // submit a Callable
+pool.execute(() -> System.out.println("hi"));   // submit a Runnable
+pool.shutdown();   // no new tasks; wait for submitted ones to finish
+pool.shutdownNow(); // try to interrupt all tasks
+```
+
+But **do not use `Executors` factory methods in production** — we will explain why. Production code should use `new ThreadPoolExecutor(...)` directly.
+
+## 2. ThreadPoolExecutor's Seven Parameters
+
+The full constructor of `ThreadPoolExecutor`:
+
+```java
+public ThreadPoolExecutor(
+    int corePoolSize,                      // 1. core pool size
+    int maximumPoolSize,                   // 2. maximum pool size
+    long keepAliveTime,                    // 3. idle keep-alive time
+    TimeUnit unit,                         // 4. time unit
+    BlockingQueue<Runnable> workQueue,     // 5. task queue
+    ThreadFactory threadFactory,           // 6. thread factory
+    RejectedExecutionHandler handler       // 7. rejection policy
+) { ... }
+```
+
+### 2.1 The Seven Parameters in Detail
+
+**1. corePoolSize (core thread count)**:
+- The number of threads that will not be reclaimed even when idle (unless `allowCoreThreadTimeOut(true)` is set).
+- The "baseline" of the pool.
+
+**2. maximumPoolSize (maximum thread count)**:
+- The maximum number of threads the pool can create.
+- Threads beyond corePoolSize are created only when the queue is full (up to max).
+
+**3. keepAliveTime + 4. unit (idle keep-alive time)**:
+- How long threads beyond core stay idle before being reclaimed.
+- By default applies only to non-core threads; with `allowCoreThreadTimeOut(true)` core threads are also reclaimable.
+
+**5. workQueue (task queue)**:
+- Holds tasks waiting to execute.
+- Common: `ArrayBlockingQueue` (bounded), `LinkedBlockingQueue` (unbounded by default, use with care), `SynchronousQueue` (direct handoff), `PriorityBlockingQueue` (priority).
+
+**6. threadFactory (thread factory)**:
+- The factory that creates new threads; you can customize name, daemon-ness, priority, etc.
+- Strongly recommended to customize — the default `pool-1-thread-1` naming is a nightmare for production troubleshooting.
+
+**7. handler (rejection policy)**:
+- What to do with new tasks when the queue is full and max threads are reached.
+
+### 2.2 Thread Pool Workflow (Key!)
+
+The execution order when submitting a task:
+
+```
+1. Current thread count < corePoolSize? → create a core thread to run the task
+2. Otherwise, queue not full? → enqueue and wait
+3. Otherwise, thread count < maximumPoolSize? → create a non-core thread to run
+4. Otherwise, execute the rejection policy
+```
+
+**Note the order**: core threads first, then queue, then non-core threads — many people wrongly assume "fill the queue first, then scale up," **wrong** — it's fill core, then fill queue, then scale to max when the queue is full.
+
+**Example**: core=2, max=4, queue=10. Submit 13 tasks:
+
+- Tasks 1-2: create core threads, run immediately.
+- Tasks 3-12: enqueue and wait (10).
+- Task 13: queue full, scale up to a non-core thread (thread 3) to run.
+- Task 14: scale up to thread 4 (reaches max).
+- Task 15+: rejected.
+
+## 3. The Four Rejection Policies
+
+When the queue is full and max threads are reached, the rejection policy triggers:
+
+| Policy | Behavior | Fit |
+| --- | --- | --- |
+| **`AbortPolicy`** (default) | Throws `RejectedExecutionException` | Default, surfaces problems immediately |
+| **`CallerRunsPolicy`** | The submitting thread runs the task | Does not lose tasks, back-pressures the producer |
+| **`DiscardPolicy`** | Silently discards the new task | Tolerates lost tasks (e.g. logs) |
+| **`DiscardOldestPolicy`** | Discards the oldest task in the queue, retries submit | Only cares about the newest task |
+
+**Recommendations**:
+
+- **`AbortPolicy`** — default, surfaces problems early, pair with monitoring alerts.
+- **`CallerRunsPolicy`** — common in "cannot lose tasks" scenarios, lets the caller run it — natural backpressure (the producer is blocked and stops submitting).
+- `DiscardPolicy`/`DiscardOldestPolicy` — use carefully; tasks are silently dropped and problems are hard to spot.
+
+You can also implement `RejectedExecutionHandler` to customize — for example persist to disk for later processing.
+
+## 4. The Traps of Executors Factory Methods
+
+`Executors` provides several factory methods, but **they are not recommended in production**:
+
+| Method | Problem |
+| --- | --- |
+| `newFixedThreadPool(n)` | Uses `LinkedBlockingQueue` (unbounded by default), queue piles up → OOM |
+| `newSingleThreadExecutor()` | Same as above, unbounded queue → OOM |
+| `newCachedThreadPool()` | `maxPoolSize = Integer.MAX_VALUE`, unlimited thread creation → OOM |
+| `newScheduledThreadPool(n)` | Uses `DelayedWorkQueue` (unbounded), task pile-up → OOM |
+
+The **Alibaba Java Development Manual** explicitly forbids using `Executors` to create thread pools; you must use `new ThreadPoolExecutor` — the reason is precisely the "unbounded" risks above.
+
+**The right way**:
+
+```java
+ThreadPoolExecutor pool = new ThreadPoolExecutor(
+    4,                                    // core
+    8,                                    // max
+    60L, TimeUnit.SECONDS,                // keepAlive
+    new ArrayBlockingQueue<>(100),        // bounded queue!
+    new ThreadFactoryBuilder().setNameFormat("biz-pool-%d").build(),  // naming
+    new ThreadPoolExecutor.CallerRunsPolicy()  // rejection policy
+);
+```
+
+> `ThreadFactoryBuilder` comes from Guava. Without Guava you can hand-write a `ThreadFactory`:
+
+```java
+ThreadFactory factory = new ThreadFactory() {
+    private final AtomicInteger counter = new AtomicInteger();
+    public Thread newThread(Runnable r) {
+        return new Thread(r, "biz-pool-" + counter.getAndIncrement());
+    }
+};
+```
+
+## 5. Sizing the Thread Pool Reasonably
+
+Pool size is not a guess — compute it from the task type.
+
+### 5.1 CPU-Intensive
+
+Tasks are mostly computation — the CPU stays busy.
+
+- **Threads = N + 1** (N = CPU cores)
+- The extra thread covers occasional page faults / system calls so the CPU is not wasted.
+- Too many threads add context-switch overhead.
+
+### 5.2 IO-Intensive
+
+Tasks mostly wait on IO (network, disk, database) — the CPU is largely idle.
+
+- **Threads = 2N** or **N × (1 + wait time / compute time)**
+- The longer the wait, the more threads you can set — the CPU switches to other threads while waiting.
+
+### 5.3 Mixed
+
+Both computation and waiting — split into two pools and configure separately.
+
+```java
+int cpuN = Runtime.getRuntime().availableProcessors();
+// CPU-intensive
+ThreadPoolExecutor cpuPool = new ThreadPoolExecutor(
+    cpuN + 1, cpuN + 1, 0L, TimeUnit.MILLISECONDS,
+    new ArrayBlockingQueue<>(1000));
+// IO-intensive
+ThreadPoolExecutor ioPool = new ThreadPoolExecutor(
+    2 * cpuN, 2 * cpuN, 60L, TimeUnit.SECONDS,
+    new ArrayBlockingQueue<>(1000));
+```
+
+### 5.4 Practical Advice
+
+- **Core threads = normal load** — avoid frequent creation/destruction.
+- **Max threads = peak load** — handle bursts.
+- **Queue size = tolerable latency** — the larger the queue, the higher the latency.
+- **Monitor** — `getActiveCount`/`getQueue().size()`/`getCompletedTaskCount()`.
+
+## 6. ForkJoinPool and Divide-and-Conquer
+
+`ForkJoinPool` is a thread pool dedicated to divide-and-conquer tasks — its core is **work-stealing**.
+
+### 6.1 Work-Stealing
+
+Each thread has its own deque of tasks. A thread takes tasks from the **head** of its own deque (LIFO); when its deque is empty, it steals from the **tail** of another thread's deque (FIFO).
+
+```
+Thread A's deque: [T1, T2, T3] → take T1 from head
+Thread B's deque: [] → steal T3 from A's tail
+```
+
+Benefit: reduces contention between threads (each thread mostly operates on its own deque) and improves CPU utilization.
+
+### 6.2 ForkJoinTask
+
+`ForkJoinTask` is the abstraction for divide-and-conquer tasks — `RecursiveTask` (with return value) / `RecursiveAction` (no return value).
+
+Classic example — parallel sum:
+
+```java
+class SumTask extends RecursiveTask<Long> {
+    private final long[] arr;
+    private final int start, end;
+    private static final int THRESHOLD = 10000;
+
+    SumTask(long[] arr, int start, int end) {
+        this.arr = arr; this.start = start; this.end = end;
+    }
+
+    @Override
+    protected Long compute() {
+        if (end - start <= THRESHOLD) {
+            long sum = 0;
+            for (int i = start; i < end; i++) sum += arr[i];
+            return sum;
+        }
+        int mid = (start + end) >>> 1;
+        SumTask left = new SumTask(arr, start, mid);
+        SumTask right = new SumTask(arr, mid, end);
+        left.fork();          // asynchronously execute the left half
+        long rightResult = right.compute();   // synchronously execute the right half
+        long leftResult = left.join();        // wait for the left half
+        return leftResult + rightResult;
+    }
+}
+
+ForkJoinPool pool = new ForkJoinPool();
+long sum = pool.invoke(new SumTask(arr, 0, arr.length));
+```
+
+### 6.3 parallelStream
+
+`parallelStream` is backed by `ForkJoinPool.commonPool()` — the default parallelism is CPU cores - 1.
+
+```java
+long sum = Arrays.stream(arr).parallel().sum();
+```
+
+**Notes**:
+
+- `parallelStream` fits "large data + heavy compute" — with little data the splitting overhead exceeds the gain.
+- **Do not do blocking IO in parallelStream** — it starves the common pool.
+- The common pool is JVM-global — one slow task drags every parallelStream user.
+
+## 7. Hands-On: Custom Thread Pool + Monitoring
+
+The example below shows a complete thread pool definition, workflow verification, comparison of the four rejection policies, and `ForkJoinPool` divide-and-conquer sum.
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        int cpuN = Runtime.getRuntime().availableProcessors();
+        System.out.println("=== Thread pool demo (CPU cores=" + cpuN + ") ===\\n");
+
+        // === 1. Custom thread pool + monitoring ===
+        System.out.println("--- Custom thread pool ---");
+        ThreadFactory factory = new ThreadFactory() {
+            private final AtomicInteger counter = new AtomicInteger();
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "biz-pool-" + counter.getAndIncrement());
+                t.setDaemon(false);
+                return t;
+            }
+        };
+
+        // core=2, max=4, queue=2, convenient for demonstrating the workflow
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+            2, 4, 30L, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(2),
+            factory,
+            new ThreadPoolExecutor.AbortPolicy()
+        );
+
+        // Submit 6 tasks (core 2 + queue 2 + max 2 = 6), the 7th will trigger rejection
+        System.out.println("Submit 6 tasks (each runs 500ms):");
+        for (int i = 1; i <= 6; i++) {
+            final int taskId = i;
+            try {
+                pool.execute(() -> {
+                    System.out.println("  Task " + taskId + " start ["
+                        + Thread.currentThread().getName() + "]");
+                    try { Thread.sleep(500); } catch (InterruptedException e) {}
+                    System.out.println("  Task " + taskId + " done");
+                });
+                System.out.println("  Submit task " + taskId
+                    + " | pool size=" + pool.getPoolSize()
+                    + " queue=" + pool.getQueue().size()
+                    + " active=" + pool.getActiveCount());
+            } catch (RejectedExecutionException e) {
+                System.out.println("  Task " + taskId + " rejected!");
+            }
+            Thread.sleep(50);
+        }
+
+        // The 7th will be rejected
+        try {
+            pool.execute(() -> System.out.println("should not run"));
+        } catch (RejectedExecutionException e) {
+            System.out.println("  Task 7 triggers AbortPolicy: " + e.getClass().getSimpleName());
+        }
+
+        pool.shutdown();
+        pool.awaitTermination(5, TimeUnit.SECONDS);
+
+        // === 2. Rejection policy comparison ===
+        System.out.println("\\n--- Rejection policy comparison ---");
+        testRejection("CallerRunsPolicy", new ThreadPoolExecutor.CallerRunsPolicy());
+        testRejection("DiscardPolicy", new ThreadPoolExecutor.DiscardPolicy());
+        testRejection("DiscardOldestPolicy", new ThreadPoolExecutor.DiscardOldestPolicy());
+
+        // === 3. ForkJoinPool divide-and-conquer sum ===
+        System.out.println("\\n--- ForkJoinPool divide-and-conquer sum ---");
+        long[] arr = new long[10_000_000];
+        for (int i = 0; i < arr.length; i++) arr[i] = i + 1;
+
+        long t1 = System.nanoTime();
+        long serialSum = 0;
+        for (long v : arr) serialSum += v;
+        long serialTime = System.nanoTime() - t1;
+
+        ForkJoinPool fjPool = new ForkJoinPool();
+        long t2 = System.nanoTime();
+        Long parallelSum = fjPool.invoke(new SumTask(arr, 0, arr.length));
+        long parallelTime = System.nanoTime() - t2;
+        fjPool.shutdown();
+
+        System.out.printf("Serial sum: %d, took %d ms%n", serialSum, serialTime / 1_000_000);
+        System.out.printf("Parallel sum: %d, took %d ms%n", parallelSum, parallelTime / 1_000_000);
+        System.out.printf("Parallelism: %d, speedup: %.2fx%n",
+            Runtime.getRuntime().availableProcessors(),
+            (double) serialTime / parallelTime);
+
+        // === 4. parallelStream ===
+        System.out.println("\\n--- parallelStream ---");
+        long psSum = Arrays.stream(arr).parallel().sum();
+        System.out.println("parallelStream sum: " + psSum);
+        System.out.println("parallelStream default parallelism: "
+            + ForkJoinPool.commonPool().getParallelism());
+    }
+
+    static void testRejection(String name, RejectedExecutionHandler handler) throws Exception {
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(1),    // queue capacity 1
+            r -> new Thread(r, "test-" + name),
+            handler
+        );
+        // Task 1 occupies the thread for 1 second
+        pool.execute(() -> { try { Thread.sleep(1000); } catch (InterruptedException e) {} });
+        // Task 2 fills the queue
+        pool.execute(() -> {});
+        // Task 3 triggers rejection
+        try {
+            pool.execute(() -> System.out.println("  [" + name + "] task3 ran"));
+            System.out.println("  [" + name + "] task3 accepted");
+        } catch (RejectedExecutionException e) {
+            System.out.println("  [" + name + "] task3 rejected");
+        }
+        // CallerRunsPolicy makes the main thread run task3
+        Thread.sleep(50);
+        pool.shutdownNow();
+    }
+}
+
+class SumTask extends RecursiveTask<Long> {
+    private final long[] arr;
+    private final int start, end;
+    private static final int THRESHOLD = 50_000;
+
+    SumTask(long[] arr, int start, int end) {
+        this.arr = arr; this.start = start; this.end = end;
+    }
+
+    @Override
+    protected Long compute() {
+        if (end - start <= THRESHOLD) {
+            long sum = 0;
+            for (int i = start; i < end; i++) sum += arr[i];
+            return sum;
+        }
+        int mid = (start + end) >>> 1;
+        SumTask left = new SumTask(arr, start, mid);
+        SumTask right = new SumTask(arr, mid, end);
+        left.fork();
+        return right.compute() + left.join();
+    }
+}`} />
+
+> **What to watch for**:
+> - **Workflow**: with core=2, tasks 1 and 2 create core threads; tasks 3 and 4 enqueue; tasks 5 and 6 trigger scale-up to max=4; task 7 triggers AbortPolicy.
+> - **CallerRunsPolicy**: makes the submitting thread (main) run the task itself — back-pressures the producer, no task is lost.
+> - **DiscardPolicy**: the task is silently dropped.
+> - **DiscardOldestPolicy**: drops the oldest task in the queue, the new task enqueues.
+> - **ForkJoinPool**: divide-and-conquer sum may beat serial (clear speedup with many cores), but with little data it is slower — splitting overhead.
+> - **parallelStream**: backed by `ForkJoinPool.commonPool()`, default parallelism is CPU cores - 1.
+
+## 8. Graceful Shutdown of a Thread Pool
+
+The difference between `shutdown()` and `shutdownNow()`:
+
+| Method | Behavior |
+| --- | --- |
+| `shutdown()` | No new tasks; submitted ones (queued + running) continue to completion |
+| `shutdownNow()` | Tries to interrupt running tasks, returns the unexecuted queued tasks |
+
+**Graceful shutdown pattern**:
+
+```java
+pool.shutdown();                          // no new tasks
+if (!pool.awaitTermination(60, TimeUnit.SECONDS)) {
+    List<Runnable> dropped = pool.shutdownNow();   // force shutdown on timeout
+    log.warn("Thread pool forcibly shut down, dropped {} tasks", dropped.size());
+}
+```
+
+## 9. Chapter Summary
+
+| Concept | Key point |
+| --- | --- |
+| Seven parameters | core/max/keepAlive/unit/queue/factory/handler |
+| Workflow | core → queue → max → reject |
+| AbortPolicy | Default, throws exception |
+| CallerRunsPolicy | Caller runs, backpressure |
+| DiscardPolicy | Drops new task |
+| DiscardOldestPolicy | Drops oldest task |
+| Executors traps | Unbounded queue / unlimited threads, OOM risk, forbidden |
+| CPU-intensive | N+1 |
+| IO-intensive | 2N or N×(1+wait/compute) |
+| ForkJoinPool | Work-stealing, dedicated to divide-and-conquer |
+| parallelStream | Backed by ForkJoinPool.commonPool |
+
+**Mnemonics**:
+
+- **Don't forget the seven parameters**: core, max, keepAlive, unit, queue, factory, handler.
+- **Order**: core → queue → max → reject (not "fill the queue before scaling up").
+- **Don't use Executors** — unbounded queue OOM, unlimited threads OOM; use `new ThreadPoolExecutor`.
+- **CPU-intensive N+1, IO-intensive 2N** — size by task type.
+- **CallerRunsPolicy backpressure** — does not lose tasks, slows the producer.
+- **ForkJoinPool fits divide-and-conquer** — recursive splitting + work-stealing.
+- **Don't do blocking IO in parallelStream** — starves the common pool.
+
+## Closing: Thread Pools Are Where Engineering Begins
+
+Thread pools are the key that turns "starting threads" into "submitting tasks" — they let you focus on business and hand the thread lifecycle to the framework. Mastering `ThreadPoolExecutor`'s seven parameters, workflow, rejection policies, and reasonable sizing is the entry bar for writing production-grade concurrent code.
+
+But the `Future.get()` returned by `ExecutorService.submit()` is **blocking** — you must wait for the result before continuing, with no "callback on completion." That is clumsy for asynchronous programming. The next chapter covers **CompletableFuture** — Java's "Promise," letting asynchronous tasks be chained, composed, and exception-handled — the core of modern Java async programming.

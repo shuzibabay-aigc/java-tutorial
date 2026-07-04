@@ -1,0 +1,374 @@
+---
+title: "Basic Syntax"
+chapter: 2
+stage: "Stage 1"
+stageName: "Java Fundamentals"
+order: 2
+description: "Master Java program structure, identifier naming conventions, keywords, comments, the 8 primitive data types, variables and constants, type conversion, and input/output"
+pubDate: 2026-07-03
+tags: ["Java", "语法", "数据类型", "变量", "基础入门"]
+---
+
+# Basic Syntax
+
+In the previous chapter, we tasted Java's first sip of aroma and ran the HelloWorld program. But a barista cannot brew coffee on enthusiasm alone—he must understand the origin of the beans, the roast level, the grind size, the water temperature, and the extraction time. Likewise, to write elegant Java programs, we must first become familiar with its rules of syntax.
+
+This chapter is the foundation of your Java journey. A solid foundation allows a tall building to rise. Let us begin with the overall structure of a program and work our way deeper.
+
+## I. The Structure of a Java Program
+
+Let us revisit the HelloWorld program, this time with a more discerning eye:
+
+```java
+public class HelloWorld {
+    public static void main(String[] args) {
+        System.out.println("Hello, World!");
+    }
+}
+```
+
+This code reveals the basic skeleton of a Java program:
+
+1. **Class**: `public class HelloWorld` defines a class. Java is an object-oriented language, so all code must be written inside a class. A `.java` file can contain multiple classes, but only one of them may be `public`, and the file name must exactly match that `public` class name.
+
+2. **Method**: `public static void main(String[] args)` is a method—the "behavior" of a class. Methods define what a class can do.
+
+3. **The main method**: This is the entry point of a Java application. When the JVM runs a program, it begins execution from the main method. Every independently runnable Java program must have a main method with the fixed signature:
+   ```java
+   public static void main(String[] args)
+   ```
+   - `public`: Accessible from the outside (by the JVM).
+   - `static`: A static method; can be called without creating an object.
+   - `void`: Returns no value.
+   - `String[] args`: An array of command-line arguments.
+
+4. **Statement**: `System.out.println("Hello, World!");` is a statement, terminated by a semicolon `;`. Every statement in Java must end with a semicolon.
+
+5. **Block**: A region of code surrounded by curly braces `{}`. Both class bodies and method bodies are enclosed in braces.
+
+### Why Does Java Put Everything Inside Classes?
+
+This is a design philosophy choice. Java embraces "everything is an object." Organizing code within classes binds data and the methods that operate on it together naturally. This makes the structure of large programs clearer, and facilitates reuse and extension.
+
+## II. Identifiers and Naming Conventions
+
+### 2.1 What Is an Identifier?
+
+An identifier is the name a programmer gives to various elements in a program—class names, method names, and variable names are all identifiers. Java has the following rules for identifiers:
+
+- They may consist only of letters (A-Z, a-z), digits (0-9), underscores `_`, and the dollar sign `$`.
+- They cannot begin with a digit.
+- They cannot be Java keywords.
+- They are case-sensitive (`name` and `Name` are different identifiers).
+- There is no length limit.
+
+> 💡 Java supports Unicode characters, so non-Latin characters such as Chinese can technically be used as identifiers (e.g., `int 年龄 = 18;`). However, in real-world development, using English is strongly recommended to avoid encoding issues.
+
+### 2.2 Camel Case Naming
+
+Good naming is the cornerstone of code readability. The Java community has adopted **Camel Case** by convention, which comes in several variants:
+
+| Element | Naming Style | Examples |
+| --- | --- | --- |
+| Class names, interface names | Upper Camel Case (PascalCase) | `HelloWorld`, `CoffeeMaker` |
+| Method names, variable names | Lower Camel Case (camelCase) | `makeCoffee`, `cupCount` |
+| Constant names | All uppercase with underscores | `MAX_CUPS`, `DEFAULT_TEMP` |
+| Package names | All lowercase | `com.example.coffee` |
+
+Names should be self-explanatory. `int a = 5;` leaves readers scratching their heads, while `int cupCount = 5;` is immediately clear.
+
+## III. Keywords
+
+Keywords are words reserved by the Java language that carry special meaning and cannot be used as identifiers. Java has 50 keywords in total (including the 2 reserved words `goto` and `const`, which are currently unused). Common ones include:
+
+- **Data types**: `byte`, `short`, `int`, `long`, `float`, `double`, `char`, `boolean`
+- **Flow control**: `if`, `else`, `switch`, `case`, `for`, `while`, `do`, `break`, `continue`, `return`
+- **Classes and objects**: `class`, `interface`, `extends`, `implements`, `new`, `this`, `super`, `instanceof`
+- **Access modifiers**: `public`, `private`, `protected`
+- **Other modifiers**: `static`, `final`, `abstract`, `synchronized`, `volatile`, `native`
+- **Exception handling**: `try`, `catch`, `finally`, `throw`, `throws`
+- **Package-related**: `package`, `import`
+- **Literals**: `true`, `false`, `null` (strictly speaking these are literals, but they are often listed alongside keywords)
+- **Unused**: `goto`, `const`
+
+> 💡 `enum` (enumeration, introduced in Java 5) and `assert` (assertion, introduced in Java 1.4) are also keywords. Meanwhile, `var` (local variable type inference, introduced in Java 10) is a "reserved type name," not a keyword in the strict sense—it can still be used as a variable name (though this is not recommended).
+
+## IV. Comments
+
+Comments are text written for programmers; the compiler ignores them. Good comments are like the descriptions on a café menu, helping customers understand what each coffee has to offer.
+
+Java has three kinds of comments:
+
+```java
+// This is a single-line comment, from // to the end of the line
+
+/*
+   This is a multi-line comment
+   It can span multiple lines
+   Suitable for longer explanations
+*/
+
+/**
+ * This is a documentation comment (Javadoc)
+ * Used to generate API documentation
+ * @author Barista
+ * @version 1.0
+ */
+public class Coffee {}
+```
+
+Documentation comments begin with `/**` and end with `*/`. They can be used with the `javadoc` tool to generate API documentation in HTML format. The `@author`, `@param`, `@return` markers within them are documentation tags.
+
+> 💡 Comments should explain "why," not "what"—the code itself already describes "what." Too many meaningless comments can actually get in the way of reading.
+
+## V. The Eight Primitive Data Types
+
+Java is a strongly typed language: every variable must have its type declared before it can be used. Java's data types fall into two broad categories: **primitive types** and **reference types**. This section focuses on primitive types.
+
+Primitive types are like the standard cup sizes in a coffee shop—fixed capacity, uniform specifications. Java has 8 primitive types, which can be grouped into four categories:
+
+### 5.1 Integer Types
+
+| Type | Storage | Range | Default Value |
+| --- | --- | --- | --- |
+| `byte` | 1 byte | -128 to 127 (-2⁷ to 2⁷-1) | 0 |
+| `short` | 2 bytes | -32,768 to 32,767 (-2¹⁵ to 2¹⁵-1) | 0 |
+| `int` | 4 bytes | -2,147,483,648 to 2,147,483,647 (roughly ±2.1 billion) | 0 |
+| `long` | 8 bytes | -2⁶³ to 2⁶³-1 (roughly ±922 quintillion) | 0L |
+
+- Integer literals are of type `int` by default. When declaring a `long` literal, append the suffix `L` (uppercase is recommended to avoid confusion with the digit `1`).
+- Integers can be written in four bases: decimal (`100`), octal (`0144`, prefixed with `0`), hexadecimal (`0x64`, prefixed with `0x`), and binary (`0b1100100`, prefixed with `0b`, Java 7+).
+
+### 5.2 Floating-Point Types
+
+| Type | Storage | Precision | Default Value |
+| --- | --- | --- | --- |
+| `float` | 4 bytes | Approximately 6-7 significant digits | 0.0f |
+| `double` | 8 bytes | Approximately 15 significant digits | 0.0d |
+
+- Floating-point literals are of type `double` by default. To declare a `float`, append the suffix `f` or `F`.
+- Floating-point numbers follow the IEEE 754 standard. Note: floating-point arithmetic suffers from precision errors, so **never use floating-point types to represent money**! For precise calculations, use `java.math.BigDecimal`.
+
+### 5.3 Character Type
+
+| Type | Storage | Range | Default Value |
+| --- | --- | --- | --- |
+| `char` | 2 bytes | 0 to 65,535 (i.e., '\u0000' to '\uffff') | '\u0000' |
+
+`char` stores Unicode characters and can represent Chinese characters, English letters, symbols, and more. Character literals are enclosed in single quotes: `'A'`, `'中'`, `'\n'` (newline).
+
+Common escape sequences: `\n` (newline), `\t` (tab), `\\` (backslash), `\'` (single quote), `\"` (double quote), `\uXXXX` (Unicode code point).
+
+### 5.4 Boolean Type
+
+| Type | Storage | Values | Default Value |
+| --- | --- | --- | --- |
+| `boolean` | Not strictly defined (typically 1 byte or 1 bit) | `true` or `false` | false |
+
+`boolean` is used for logical evaluation and has only two values: `true` and `false`. Note: Java's `boolean` **cannot be converted to or from integers**—unlike C, you cannot use `0` to mean `false` and any non-zero value to mean `true`.
+
+### 5.5 Data Types in Action
+
+Let us use a program to get an intuitive feel for these types:
+
+<CodeRunner code={`public class Main {
+    public static void main(String[] args) {
+        // 整数类型
+        byte cups = 5;
+        short beans = 1000;
+        int population = 2_147_483_647;  // 下划线分隔，Java 7+ 支持提升可读性
+        long stars = 9_223_372_036_854_775_807L;
+
+        // 浮点类型
+        float temperature = 92.5f;
+        double price = 28.88;
+
+        // 字符类型
+        char grade = 'A';
+        char chinese = '咖';
+
+        // 布尔类型
+        boolean isHot = true;
+
+        System.out.println("杯子数: " + cups);
+        System.out.println("咖啡豆数: " + beans);
+        System.out.println("世界人口: " + population);
+        System.out.println("银河星辰: " + stars);
+        System.out.println("水温: " + temperature + "°C");
+        System.out.println("价格: " + price + " 元");
+        System.out.println("评级: " + grade);
+        System.out.println("中文字符: " + chinese);
+        System.out.println("是否烫手: " + isHot);
+
+        // 数据类型的大小（以位为单位）
+        System.out.println("\\n--- 各类型位数 ---");
+        System.out.println("byte: " + Byte.SIZE + " 位");
+        System.out.println("short: " + Short.SIZE + " 位");
+        System.out.println("int: " + Integer.SIZE + " 位");
+        System.out.println("long: " + Long.SIZE + " 位");
+        System.out.println("float: " + Float.SIZE + " 位");
+        System.out.println("double: " + Double.SIZE + " 位");
+        System.out.println("char: " + Character.SIZE + " 位");
+    }
+}`} />
+
+> 💡 Notice the `2_147_483_647` in the code—underscores are used to separate digits for readability, and the compiler ignores them. This is a feature introduced in Java 7.
+
+## VI. Variables and Constants
+
+### 6.1 Declaring and Initializing Variables
+
+A variable is a "container" that stores data in a program. When declaring a variable, you must specify its type and name:
+
+```java
+int age;              // Declaration
+age = 18;             // Assignment
+
+String name = "Java"; // Declaration and initialization
+```
+
+Variables can be categorized by where they are declared:
+- **Local variables**: Declared inside a method; must be assigned a value before use and have no default value.
+- **Member variables (fields)**: Declared inside a class but outside any method; they belong to an object and have default values (`int` defaults to `0`, `boolean` to `false`, reference types to `null`).
+- **Static variables**: Member variables modified with `static`; they belong to the class and are shared by all objects.
+
+### 6.2 Constants
+
+A constant is a variable whose value cannot be changed. It is declared with the `final` keyword:
+
+```java
+final double PI = 3.14159265;
+final int MAX_CUPS = 100;
+PI = 3.14;  // Compile error: cannot assign a value to a final variable
+```
+
+Constants are named in all uppercase with words separated by underscores. Using constants makes code more meaningful and easier to maintain—`MAX_CUPS` is far more readable than a bare `100`, and if it ever needs to change, you only update it in one place.
+
+## VII. Type Conversion
+
+Java is a strongly typed language, so you cannot arbitrarily assign values between different types. But sometimes you need to convert a value from one type to another—this is called type conversion.
+
+### 7.1 Automatic Type Conversion (Implicit)
+
+When assigning a type with a **smaller range** to a type with a **larger range**, the JVM performs the conversion automatically, with no extra code required. It is like pouring a small coffee into a large cup—effortless.
+
+The conversion direction (from small to large):
+```
+byte → short → int → long → float → double
+              ↑
+             char
+```
+
+```java
+int a = 100;
+double b = a;   // Automatic conversion, b = 100.0
+```
+
+### 7.2 Casting (Explicit)
+
+When assigning a type with a **larger range** to a type with a **smaller range**, you must perform an explicit cast, and precision may be lost. It is like pouring a large coffee into a small cup—it might overflow!
+
+```java
+double d = 3.99;
+int i = (int) d;   // Cast, i = 3 (the decimal part is truncated, not rounded)
+```
+
+### 7.3 Type Promotion in Expressions
+
+In arithmetic expressions, the result type is automatically "promoted" to the largest type participating in the operation. But there is a catch: `byte`, `short`, and `char` are **first promoted to `int`** before any operation:
+
+```java
+byte a = 10;
+byte b = 20;
+byte c = a + b;       // Compile error! The result of a + b is int
+byte d = (byte)(a + b);  // Correct: explicit cast
+```
+
+## VIII. var: Local Variable Type Inference (Java 10+)
+
+Starting from Java 10, the `var` keyword allows you to omit the type when declaring a local variable, letting the compiler infer it from the expression on the right:
+
+```java
+var name = "Java";       // Compiler infers String
+var count = 100;         // Infers int
+var price = 28.88;       // Infers double
+var cups = new ArrayList<String>();  // Infers ArrayList<String>
+```
+
+`var` is purely syntactic sugar—the variable is still statically typed, and after compilation it is completely equivalent to an explicitly declared type. It reduces verbosity, but keep these caveats in mind:
+
+- It can only be used for local variables (inside methods), not for member variables, method parameters, or return types.
+- The variable must be initialized at declaration (`var x;` is illegal—the compiler has nothing to infer from).
+- You cannot initialize it with `null` (the type cannot be inferred).
+- Do not overuse it: when the type is not obvious, an explicit declaration is clearer.
+
+## IX. Input and Output
+
+### 9.1 Output
+
+The most common way to produce output in Java is through `System.out`:
+
+```java
+System.out.print("No newline");
+System.out.println("With newline");      // Prints, then moves to a new line
+System.out.printf("Formatted: %d, %.2f, %s%n", 10, 3.14159, "Java");
+```
+
+`printf` uses a format string with these common placeholders:
+- `%d`: Integer
+- `%f`: Floating-point number (`%.2f` means 2 decimal places)
+- `%s`: String
+- `%c`: Character
+- `%b`: Boolean
+- `%n`: Platform-independent line separator (prefer `%n` over `\n`)
+
+### 9.2 Input
+
+To read user input from the console, use the `java.util.Scanner` class:
+
+```java
+import java.util.Scanner;
+
+Scanner scanner = new Scanner(System.in);
+System.out.print("Please enter your name: ");
+String name = scanner.nextLine();
+System.out.print("Please enter your age: ");
+int age = scanner.nextInt();
+System.out.println("Hello, " + name + "! You are " + age + " years old.");
+scanner.close();  // Remember to close it when done
+```
+
+`Scanner` provides a variety of reading methods: `nextLine()` (reads a line of text), `nextInt()` (reads an integer), `nextDouble()` (reads a floating-point number), `nextBoolean()` (reads a boolean), and more.
+
+> 💡 In this tutorial's online execution environment, standard input may not be available. But understanding how `Scanner` works is still important—in your local command-line programs, it is the standard way to read user input.
+
+## X. A Comprehensive Example
+
+Let us bring together everything we have learned in this chapter and write a "coffee order" mini-program:
+
+```java
+import java.util.Scanner;
+
+public class CoffeeOrder {
+    public static void main(String[] args) {
+        final double PRICE_PER_CUP = 28.0;  // Constant: price per cup
+        Scanner scanner = new Scanner(System.in);
+
+        System.out.println("☕ Welcome to the Java Café ☕");
+        System.out.print("How many cups would you like? ");
+        var count = scanner.nextInt();  // var type inference
+
+        double total = count * PRICE_PER_CUP;
+        System.out.printf("You ordered %d cups, total: %.2f yuan%n", count, total);
+        System.out.println("Thank you, come again!");
+
+        scanner.close();
+    }
+}
+```
+
+## Conclusion
+
+In this chapter, we learned the skeleton of a Java program—classes and methods—along with naming rules, keywords, comments, the eight primitive data types and their ranges, variables and constants, the two modes of type conversion, and input/output. These are the fundamental building blocks of any Java program.
+
+Now that we are familiar with the kinds of coffee beans, grind sizes, and water temperatures, the next step—just as a barista would learn extraction techniques—is to learn Java's **operators**, mastering how to perform all manner of computations and manipulations on data. Arithmetic, logic, bitwise operations... a marvelous journey of computation awaits.

@@ -1,0 +1,433 @@
+---
+title: "Collections Framework Overview"
+chapter: 18
+stage: "Stage 4"
+stageName: "Collections Framework"
+order: 1
+description: "An overview of the two main families of the Java Collections Framework: Collection and Map, the Iterable/Iterator pattern, a collection selection guide, and array-to-collection conversion techniques"
+pubDate: 2026-07-03
+tags: ["Java", "集合框架", "Collection", "Map", "Iterator", "Collections Framework"]
+---
+
+# Collections Framework Overview
+
+If a variable is "a box that holds one piece of data," then a collection is "a container that holds a whole pile of data." A single variable can only remember one phone number, but what about the hundreds of contacts in your address book? Arrays can hold multiple values, but their length is fixed and insertions are cumbersome—to insert someone in the middle, you have to shift everyone after them back by one position. The Java Collections Framework was born for exactly this need to "manage a group of objects": it provides a complete set of carefully designed containers, each with its own strengths, covering virtually every data organization scenario.
+
+This chapter opens Stage 4. We will first take a bird's-eye view of the entire collections framework—its two main family trees, the iterator mechanism, and a selection guide—before diving deep into each specific container in the chapters that follow.
+
+## 1. Why We Need a Collections Framework
+
+### 1.1 The Limitations of Arrays
+
+Arrays are Java's most primitive "container," but they have obvious shortcomings:
+
+```java
+String[] names = new String[3];
+names[0] = "Alice";
+names[1] = "Bob";
+// Want to add Charlie? The length is 3, no room left
+// You have to create a larger array and copy the old one over
+String[] bigger = new String[6];
+System.arraycopy(names, 0, bigger, 0, names.length);
+```
+
+The pain points of arrays:
+
+1. **Fixed length**—once created, the capacity cannot change. Adding or removing elements requires manual relocation.
+2. **Sparse API**—only `length` and index access are available; no convenience methods like `contains`, `indexOf`, or `sort`.
+3. **Only one type**—while this is sometimes an advantage (type safety), it lacks flexibility.
+4. **Cannot express key-value pairs**—arrays are linear, but many scenarios require "looking things up by name."
+
+### 1.2 The Birth of the Collections Framework
+
+Java 1.2 introduced the Collections Framework, which unified the abstraction of "containers":
+
+- **A set of interfaces**: `Collection`, `List`, `Set`, `Map`, `Queue`, and so on, defining the contracts of containers.
+- **Multiple implementations**: each interface has several implementations, chosen by scenario.
+- **A set of algorithms**: the `Collections` utility class provides general algorithms like sorting, searching, and shuffling.
+
+The beauty of this design lies in **separating interface from implementation**. You write code against `List`, use `ArrayList` today, swap in `LinkedList` tomorrow, and not a single line of business logic needs to change.
+
+## 2. Two Family Trees: Collection and Map
+
+The root of the entire collections framework splits into two lines: the `Collection` family (holding a group of individual elements) and the `Map` family (holding key-value mappings).
+
+### 2.1 The Collection Family Tree
+
+`Collection＜E＞` is the root interface of all "single-element containers," and it branches into three major sub-interfaces:
+
+```
+Collection
+├── List (list: ordered, allows duplicates, indexable)
+│   ├── ArrayList      (dynamic array)
+│   ├── LinkedList     (doubly-linked list)
+│   └── CopyOnWriteArrayList (copy-on-write, thread-safe)
+├── Set (set: unordered, no duplicates)
+│   ├── HashSet        (based on HashMap)
+│   ├── LinkedHashSet  (maintains insertion order)
+│   └── TreeSet        (based on a red-black tree, sorted)
+└── Queue (queue: primarily FIFO)
+    ├── PriorityQueue  (priority queue, min-heap)
+    ├── ArrayDeque     (double-ended queue, circular array)
+    └── Various BlockingQueues (blocking queues, for concurrency)
+```
+
+The personalities of the three branches:
+
+- **List**—like a **queue of people**: there is an order, everyone has a number (index), and duplicates are allowed. Ideal for "access by position."
+- **Set**—like a **club**: there is no notion of order (or order doesn't matter), everyone is unique, and duplicates are not allowed. Ideal for "deduplication" and "existence checks."
+- **Queue**—like a **ticket counter**: it is all about the rules of entry and exit (FIFO, priority, LIFO stack). Ideal for "processing elements in a specific order."
+
+### 2.2 The Map Family Tree
+
+`Map＜K, V＞` is an independent branch—it does not extend `Collection`, because it does not hold "single elements" but "key-value pairs" (Entries):
+
+```
+Map
+├── HashMap            (array + linked list + red-black tree)
+├── LinkedHashMap      (HashMap + linked list, maintains order)
+├── TreeMap            (red-black tree, sorted by key)
+├── Hashtable          (antique, thread-safe but obsolete)
+└── ConcurrentHashMap  (modern concurrent Map)
+```
+
+The core idea of Map is "**look up a value by key**"—give it a key, and it instantly returns the value. It is like a dictionary: you know the word "apple" (key), and you can look up its definition (value).
+
+> 💡 **Why doesn't Map extend Collection?** Because Collection operates on individual elements (`add(E)`, `remove(Object)`), while Map operates on key-value pairs. Making Map extend Collection would make the contract awkward—what should `add` add? The key? The value? Or the Entry? Java chose to keep Map independent, which is cleaner. However, Map can still expose Collection views through `entrySet()`, `keySet()`, and `values()`.
+
+## 3. Core Methods of the Collection Interface
+
+The `Collection` interface defines the basic operations shared by all containers:
+
+```java
+public interface Collection<E> extends Iterable<E> {
+    // Basic operations
+    int size();                    // number of elements
+    boolean isEmpty();             // is it empty
+    boolean contains(Object o);    // does it contain
+    boolean add(E e);              // add (Set rejects duplicates)
+    boolean remove(Object o);      // remove
+    void clear();                  // clear all
+
+    // Bulk operations
+    boolean addAll(Collection<? extends E> c);
+    boolean removeAll(Collection<?> c);
+    boolean retainAll(Collection<?> c);   // intersection
+    boolean containsAll(Collection<?> c);
+
+    // Conversion
+    Object[] toArray();
+    <T> T[] toArray(T[] a);
+
+    // View
+    Iterator<E> iterator();
+}
+```
+
+Note that `Collection` extends `Iterable＜E＞`—this is precisely the contract for "iterability," discussed in detail in the next section.
+
+## 4. Iterable and Iterator
+
+### 4.1 The Iterator Pattern
+
+A collection is a "container," but how do you "take elements out one by one"? The most straightforward way is by index (`list.get(i)`), but `Set` has no index, and `Map` is all key-value pairs. Java uses the **Iterator Pattern** to unify the concept of "traversal":
+
+- `Iterable＜E＞` means "I can be iterated over"—its `iterator()` method returns an `Iterator＜E＞`.
+- `Iterator＜E＞` is the actual "cursor," providing `hasNext()`, `next()`, and `remove()`.
+
+```java
+public interface Iterable<E> {
+    Iterator<E> iterator();
+    // Java 8+ also has forEach and spliterator
+}
+
+public interface Iterator<E> {
+    boolean hasNext();   // is there a next element?
+    E next();            // fetch the next one, advance the cursor
+    default void remove() { /* optional */ }
+}
+```
+
+### 4.2 Manual Iteration
+
+```java
+List<String> list = List.of("A", "B", "C");
+Iterator<String> it = list.iterator();
+while (it.hasNext()) {
+    String s = it.next();
+    System.out.println(s);
+}
+```
+
+The cursor logic: initially the cursor points "before the first element," `hasNext()` checks whether there is anything ahead, and `next()` fetches the current element and advances the cursor.
+
+### 4.3 The Enhanced for Loop
+
+Java 5's enhanced for loop (for-each) is syntactic sugar over the iterator—any object that implements `Iterable` can use it:
+
+```java
+for (String s : list) {
+    System.out.println(s);
+}
+```
+
+The compiler translates this into equivalent iterator code. That's why **all Collections can use for-each**, and even arrays work (arrays use the index-based version).
+
+### 4.4 Removing Elements While Iterating
+
+A classic trap: modifying the collection while iterating throws `ConcurrentModificationException`:
+
+```java
+List<Integer> list = new ArrayList<>(List.of(1, 2, 3, 4));
+for (Integer n : list) {
+    if (n % 2 == 0) list.remove(n);   // ❌ throws an exception!
+}
+```
+
+The for-each loop uses an iterator, but you're calling `list.remove()`—the iterator detects that the list was modified "externally" and immediately complains.
+
+The correct approach is to use **the iterator's own `remove()`**:
+
+```java
+Iterator<Integer> it = list.iterator();
+while (it.hasNext()) {
+    if (it.next() % 2 == 0) it.remove();   // ✅ safe
+}
+```
+
+The iterator's `remove()` keeps its own modification count in sync, so it won't trigger the exception. From Java 8 onward, `removeIf` is even more recommended:
+
+```java
+list.removeIf(n -> n % 2 == 0);   // ✅ safe removal internally
+```
+
+### 4.5 fail-fast vs. fail-safe
+
+Most iterators in the Java collections are **fail-fast**—as soon as they detect concurrent modification, they throw an exception immediately, preferring to "fail loudly" rather than "silently carry on with errors." `ArrayList` and `HashMap` fall into this category.
+
+Concurrent collections (`CopyOnWriteArrayList`, `ConcurrentHashMap`) have **fail-safe** iterators—they traverse a snapshot or weakly consistent view taken at creation time, never throwing exceptions, but they may not see the latest modifications.
+
+## 5. Collection Selection Guide
+
+Faced with a pile of containers, beginners often struggle: "Which one should I actually use?" In fact, selection follows a clear line of reasoning.
+
+### 5.1 Step One: Do You Need Key-Value Pairs?
+
+- **Yes** → use `Map`.
+  - Need to sort by key? → `TreeMap`
+  - Need to maintain insertion order / LRU? → `LinkedHashMap`
+  - High concurrency? → `ConcurrentHashMap`
+  - Default → `HashMap`
+
+### 5.2 Step Two: Do You Need Uniqueness?
+
+- **Yes** (no duplicates allowed) → use `Set`.
+  - Need sorting? → `TreeSet`
+  - Need to maintain insertion order? → `LinkedHashSet`
+  - Default → `HashSet`
+
+### 5.3 Step Three: Do You Need to Process in a Specific Order?
+
+- **Yes** (FIFO, priority, stack) → use `Queue/Deque`.
+  - Priority (heap)? → `PriorityQueue`
+  - Stack / double-ended queue? → `ArrayDeque`
+  - Blocking with waiting? → `ArrayBlockingQueue`, etc.
+
+### 5.4 Step Four: Use List
+
+- Default → `ArrayList` (best all-rounder)
+- Frequent insertions/deletions at the head? → `LinkedList`
+- Read-heavy, write-light, and concurrent? → `CopyOnWriteArrayList`
+
+### 5.5 Quick Selection Table
+
+| Scenario | Recommended Container |
+| --- | --- |
+| General-purpose list | `ArrayList` |
+| Frequent head insertions/deletions | `LinkedList` (or `ArrayDeque` as a stack) |
+| Deduplication | `HashSet` |
+| Deduplication + sorting | `TreeSet` |
+| Deduplication + order preservation | `LinkedHashSet` |
+| Key-value mapping | `HashMap` |
+| Key-value mapping + sorting | `TreeMap` |
+| Key-value mapping + order preservation | `LinkedHashMap` |
+| Concurrent Map | `ConcurrentHashMap` |
+| Priority processing | `PriorityQueue` |
+| Stack | `ArrayDeque` (do not use `Stack`) |
+| Blocking queue | `ArrayBlockingQueue` / `LinkedBlockingQueue` |
+
+> 💡 **Why not use `Stack`?** `Stack` extends `Vector`, so all its methods are `synchronized`, making it slow, and its design "exposes too many List methods." The official recommendation is to use `ArrayDeque` as a stack—it carries none of this historical baggage and is faster and cleaner.
+
+### 5.6 One Universal Default
+
+If you are completely unsure, just remember: **`ArrayList` + `HashMap`**. Together they cover 90% of everyday scenarios, with balanced performance, and you will almost never regret the choice. Switch when you hit a bottleneck—that is the pragmatic engineering attitude.
+
+## 6. Converting Between Collections and Arrays
+
+Arrays and collections often need to be converted to one another, and there are a few easily overlooked pitfalls here.
+
+### 6.1 Collection to Array: toArray
+
+```java
+List<String> list = List.of("A", "B", "C");
+
+// Method 1: returns Object[], losing type information
+Object[] arr1 = list.toArray();
+
+// Method 2: pass in a typed array (recommended)
+String[] arr2 = list.toArray(new String[0]);
+// or specify the size
+String[] arr3 = list.toArray(new String[list.size()]);
+```
+
+Why is passing `new String[0]` recommended? When you pass an empty array, the collection internally creates and returns an array of the matching size. Passing `new String[list.size()]` also works, but modern JVMs have optimized the `new String[0]` pattern, and it can actually perform better.
+
+Note: **you cannot directly cast** `Object[]` to `String[]`:
+
+```java
+String[] bad = (String[]) list.toArray();   // ❌ ClassCastException
+```
+
+Because `toArray()` really does return `Object[]`, which is not a `String[]` at runtime.
+
+### 6.2 Array to Collection: Arrays.asList
+
+```java
+String[] arr = {"A", "B", "C"};
+List<String> list = Arrays.asList(arr);
+```
+
+**Pitfall one: it returns a fixed-size view that cannot be added to or removed from.**
+
+```java
+list.add("D");      // ❌ UnsupportedOperationException
+list.remove(0);     // ❌ UnsupportedOperationException
+list.set(0, "X");   // ✅ you can modify elements (and it affects the original array!)
+```
+
+`Arrays.asList` returns an `Arrays$ArrayList` (an inner class, not `java.util.ArrayList`); it directly references the original array and does not support structural modification. Modifying its elements is reflected in the original array—they share storage.
+
+**Pitfall two: the primitive type array trap.**
+
+```java
+int[] nums = {1, 2, 3};
+List<int[]> list = Arrays.asList(nums);   // ⚠️ List<int[]>, not List<Integer>!
+System.out.println(list.size());           // 1 (the entire array is treated as a single element)
+```
+
+Because `Arrays.asList(T... a)` cannot have `T` as a primitive type, the `int[]` is treated as a single `Object`. You need to use `Integer[]`:
+
+```java
+Integer[] nums = {1, 2, 3};
+List<Integer> list = Arrays.asList(nums);   // ✅ List<Integer>, size=3
+```
+
+### 6.3 Converting to a Real ArrayList
+
+If you want a freely modifiable `ArrayList`:
+
+```java
+// Java 8+
+List<String> list = new ArrayList<>(Arrays.asList(arr));
+
+// Java 9+ (immutable)
+List<String> immutable = List.of(arr);
+
+// Java 10+ (immutable copy)
+List<String> copy = List.copyOf(Arrays.asList(arr));
+
+// Stream approach
+List<String> streamList = Arrays.stream(arr).collect(Collectors.toList());
+```
+
+## 7. Hands-On: Tying It All Together
+
+Here is a comprehensive example demonstrating common operations for collection selection and conversion:
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 数组转集合（注意坑）
+        String[] names = {"Alice", "Bob", "Charlie", "Alice"};
+        List<String> listView = Arrays.asList(names);
+        System.out.println("asList 视图: " + listView);
+
+        // 转成真正的 ArrayList
+        List<String> nameList = new ArrayList<>(Arrays.asList(names));
+
+        // 2. 去重用 Set
+        Set<String> nameSet = new HashSet<>(nameList);
+        System.out.println("去重后: " + nameSet);
+
+        // 3. 保序去重用 LinkedHashSet
+        Set<String> linkedSet = new LinkedHashSet<>(nameList);
+        System.out.println("保序去重: " + linkedSet);
+
+        // 4. 排序去重用 TreeSet
+        Set<String> treeSet = new TreeSet<>(nameList);
+        System.out.println("排序去重: " + treeSet);
+
+        // 5. 用 Map 统计词频
+        Map<String, Integer> freq = new HashMap<>();
+        for (String n : nameList) {
+            freq.merge(n, 1, Integer::sum);
+        }
+        System.out.println("词频统计: " + freq);
+
+        // 6. 迭代器演示：删除短名字
+        Iterator<String> it = nameList.iterator();
+        while (it.hasNext()) {
+            if (it.next().length() <= 3) it.remove();
+        }
+        System.out.println("删除短名后: " + nameList);
+
+        // 7. 集合转数组
+        String[] result = nameList.toArray(new String[0]);
+        System.out.println("转数组: " + Arrays.toString(result));
+
+        // 8. Queue 当队列
+        Queue<String> queue = new ArrayDeque<>(List.of("A", "B", "C"));
+        System.out.println("\\n--- 队列处理 ---");
+        while (!queue.isEmpty()) {
+            System.out.println("处理: " + queue.poll());
+        }
+
+        // 9. Deque 当栈
+        Deque<String> stack = new ArrayDeque<>();
+        stack.push("第一层");
+        stack.push("第二层");
+        stack.push("第三层");
+        System.out.println("\\n--- 栈处理（后进先出） ---");
+        while (!stack.isEmpty()) {
+            System.out.println("弹出: " + stack.pop());
+        }
+    }
+}`} />
+
+This example ties together: array conversion, deduplication (three Set variants), word frequency (Map), safe iterator removal, Queue as a queue, and Deque as a stack. Each scenario picks the most appropriate container—this is the practical meaning of "selection."
+
+## 8. Chapter Summary
+
+| Topic | Key Points |
+| --- | --- |
+| Framework composition | `Collection` (List/Set/Queue) + `Map`, two major family trees |
+| List | Ordered, allows duplicates, indexable |
+| Set | Unordered (or order-preserving/sorted), no duplicates |
+| Queue/Deque | Process elements in a specific order |
+| Map | Key-value mapping, look up value by key |
+| Iterable | The "iterable" contract; `iterator()` returns an Iterator |
+| Iterator | `hasNext()` / `next()` / `remove()` |
+| for-each | Syntactic sugar over Iterable |
+| fail-fast | Detects concurrent modification, throws `ConcurrentModificationException` |
+| `toArray(T[])` | Collection to array, recommend passing `new T[0]` |
+| `Arrays.asList` | Array to collection view, **fixed size, no add/remove** |
+| Default selection | `ArrayList` + `HashMap` covers 90% of scenarios |
+
+## Conclusion: Climbing High to See Far
+
+This chapter is the "map" of the collections framework—we stood at a height and surveyed the whole system's landscape, memorized the names of the two family trees, understood the iterator's unified approach to traversal, and tucked away a quick selection table.
+
+But a map is still just a map; the real scenery has to be experienced on foot. In the chapters ahead, we will dive into each one: the contest between dynamic arrays and linked lists in `List`, the deduplication mechanism behind `Set`, the marvel of hashing in `Map`, the flow of elements in `Queue`, the treasure chest of the `Collections` utility, and the transformative `Stream API`.
+
+The Java Collections Framework is one of the language's proudest designs—its elegance, uniformity, and extensibility are the cornerstone of countless Java programmers' daily productivity. Let us begin this journey.

@@ -1,0 +1,478 @@
+---
+title: "Java Interview Questions In Depth"
+chapter: 80
+stage: "Stage 16"
+stageName: "Interviews and Advanced Topics"
+order: 1
+description: "A curated set of high-frequency Java interview questions, covering basics (equals/hashCode/String), collections (HashMap/ConcurrentHashMap), concurrency (volatile/synchronized/thread pools/AQS), the JVM (GC/memory model), and the Spring framework — each with a passing answer and bonus points"
+pubDate: 2026-07-03
+tags: ["Java", "面试题", "HashMap", "并发", "JVM", "Spring", "GC", "AQS"]
+---
+
+# Java Interview Questions In Depth
+
+An interview is a special kind of conversation — it doesn't test what you're best at; it tests **how deep your understanding goes**. "Memorizing" and "answering" are a level apart: memorizing is reciting definitions; answering is explaining principles, trade-offs, and scenarios. Interviewers want the latter.
+
+In this chapter we condense the knowledge from the previous 79 chapters into high-frequency interview questions. Each one comes with a "passing answer" (80 points) and "bonus points" (95 points). The goal isn't to make you memorize answers, but to teach you how to string scattered knowledge into a logical expression.
+
+## 1. Java Basics
+
+### Q1: What's the relationship between equals and hashCode?
+
+**Passing answer**: If two objects are `equals`-equal, their `hashCode` must be equal; if two `hashCode`s are equal, the objects are not necessarily `equals`-equal. Override `equals` and you must override `hashCode`.
+
+**Bonus points**:
+- **Why** — HashMap uses hashCode to locate a bucket and equals to decide whether it's the same key. If two equals-equal objects have different hashCodes, they land in different buckets and HashMap ends up with "duplicate" keys.
+- **The hashCode contract** — multiple invocations on the same object must return the same value; equals-equal implies hashCode-equal; equals-unequal should ideally produce different hashCodes (for even distribution).
+- **The `Objects.hash` helper** — `return Objects.hash(field1, field2);` is safer than hand-writing a hash function.
+
+```java
+// 反例: 只重写 equals 不重写 hashCode
+Person p1 = new Person("Tom");
+Person p2 = new Person("Tom");
+p1.equals(p2);   // true
+Set<Person> set = new HashSet<>();
+set.add(p1);
+set.contains(p2);   // false! 因为 hashCode 不同, 找不到桶
+```
+
+### Q2: Why is String immutable?
+
+**Passing answer**: String is declared final, and its internal char[] (byte[] from Java 9+) is also final, so it can't be modified.
+
+**Bonus points**:
+- **Benefit 1 — security**: String is often used as a parameter (file paths, SQL, URLs); mutability would allow malicious tampering.
+- **Benefit 2 — thread safety**: Immutability is inherently thread-safe, no synchronization needed.
+- **Benefit 3 — string constant pool**: Only immutables can be safely shared, which is why `"a" == "a"` holds.
+- **Benefit 4 — hashCode caching**: Immutable, so the hashCode can be computed once and cached.
+- **When to use StringBuilder** — for heavy concatenation, use StringBuilder to avoid creating a new String each time.
+
+### Q3: The difference between == and equals?
+
+**Passing answer**: `==` compares reference addresses (for primitives it compares values); `equals` defaults to comparing addresses too (Object's implementation), but many classes (String/Integer) override equals to compare content.
+
+**Bonus points**:
+- **Integer cache** — `Integer a = 127; Integer b = 127; a == b` is true (cache range -128~127); `128` is false.
+- **String constant pool** — `String a = "ab"; String b = "ab"; a == b` is true (constant pool); `new String("ab") == new String("ab")` is false (two objects on the heap).
+
+## 2. Collections
+
+### Q4: What's the underlying principle of HashMap?
+
+**Passing answer**: HashMap is an array + linked list / red-black tree. On put, hash locates the bucket; the bucket holds a linked list, which converts to a red-black tree when its length reaches 8 and the array length reaches 64.
+
+**Bonus points**:
+- **Hash computation** — `(h = key.hashCode()) ^ (h ＞＞＞ 16)`, high 16 bits XOR low 16 bits, dispersing the hash.
+- **Capacity is always a power of 2** — `hash & (n-1)` is equivalent to `hash % n` but faster.
+- **Resizing** — load factor 0.75; when exceeded, double the capacity and redistribute every element.
+- **Thread-unsafe** — concurrent puts may lose data; JDK 7's head-insertion could form a cycle and infinite-loop; JDK 8 switched to tail-insertion but is still unsafe.
+- **Alternative** — `ConcurrentHashMap` (thread-safe).
+
+### Q5: How does ConcurrentHashMap ensure thread safety?
+
+**Passing answer**: JDK 7 used segmented locks (Segment); JDK 8 switched to CAS + synchronized locking a single bucket.
+
+**Bonus points**:
+- **JDK 7 segmented locks** — split the whole map into 16 Segments, one lock per Segment, concurrency level 16.
+- **JDK 8 optimization** — lock granularity refined to the bucket (Node); CAS inserts into empty buckets, synchronized locks the head node of non-empty buckets.
+- **size computation** — accumulates baseCount + CounterCell[] to reduce contention.
+- **Why not ReentrantLock** — synchronized was heavily optimized after JDK 6 (biased/lightweight locks); performance is sufficient and memory footprint is smaller.
+
+### Q6: ArrayList vs LinkedList?
+
+**Passing answer**: ArrayList is a dynamic array, random access O(1), tail add/remove O(1) but middle add/remove O(n); LinkedList is a doubly-linked list, random access O(n), head/tail add/remove O(1).
+
+**Bonus points**:
+- **Real-world scenarios** — most scenarios use ArrayList; it's CPU-cache-friendly (contiguous memory), while LinkedList nodes are scattered and often slower.
+- **LinkedList's trap** — `linkedList.get(i)` is O(n) because it has to traverse from the head.
+- **The add/remove truth** — ArrayList's middle add/remove shifts elements, but memcpy is fast; LinkedList's add/remove news a Node, which can be slower.
+
+## 3. Concurrency
+
+### Q7: What does volatile do?
+
+**Passing answer**: volatile guarantees visibility and ordering (prevents instruction reordering), but not atomicity.
+
+**Bonus points**:
+- **Visibility principle** — writing a volatile flushes to main memory; reading loads from main memory (skipping the CPU cache). Implemented with memory barriers.
+- **Ordering** — prevents compiler/CPU reordering; the happens-before rule guarantees a volatile write precedes a subsequent volatile read.
+- **No atomicity** — `volatile int i; i++` is still read-modify-write, three steps, non-atomic. Use `AtomicInteger` or `synchronized`.
+- **Classic application** — the `instance` of a double-checked locking singleton must be volatile, to prevent "publishing before construction completes."
+
+```java
+// 双检锁单例
+class Singleton {
+    private static volatile Singleton instance;   // volatile 必须!
+    public static Singleton getInstance() {
+        if (instance == null) {
+            synchronized (Singleton.class) {
+                if (instance == null) instance = new Singleton();
+            }
+        }
+        return instance;
+    }
+}
+```
+
+### Q8: The difference between synchronized and ReentrantLock?
+
+**Passing answer**: synchronized is a keyword, at the JVM level; ReentrantLock is a class, at the API level. ReentrantLock is richer — interruptible, timeoutable, fair, with multiple condition variables.
+
+**Bonus points**:
+- **synchronized optimizations** — JDK 6 introduced biased, lightweight, and heavyweight locks, so performance is no longer bad.
+- **Lock escalation** — unlocked → biased → lightweight (spin) → heavyweight (OS mutex), one-way, no downgrade.
+- **ReentrantLock caveat** — you must `finally { lock.unlock(); }`, or you risk deadlock. synchronized releases automatically on exception.
+- **Fair lock** — `new ReentrantLock(true)` acquires in FIFO order; throughput is slightly lower but starvation is avoided.
+- **Condition** — ReentrantLock's `newCondition()` is more flexible than synchronized's wait/notify, supporting multiple condition queues.
+
+### Q9: How do you configure a thread pool?
+
+**Passing answer**: Use `ThreadPoolExecutor`, with four core parameters: core thread count, max thread count, queue, and rejection policy.
+
+**Bonus points**:
+- **Thread-count formula** — CPU-bound: N+1; IO-bound: 2N or N×(1 + wait time / compute time). N is the number of CPU cores.
+- **Queue choice** — bounded queue (ArrayBlockingQueue) prevents OOM; unbounded queue (LinkedBlockingQueue) may pile up and blow memory.
+- **Rejection policies** — AbortPolicy (throw, default) / CallerRunsPolicy (caller runs, backpressure) / DiscardPolicy (drop) / DiscardOldestPolicy (drop oldest).
+- **Don't use Executors** — `newFixedThreadPool` uses an unbounded queue and may OOM; `newCachedThreadPool` has max threads of Integer.MAX_VALUE and may create too many threads. Alibaba's guidelines require constructing `ThreadPoolExecutor` explicitly.
+- **submit vs execute** — execute has no return value; submit returns a Future and surfaces exceptions.
+
+### Q10: What is CAS? What problems does it have?
+
+**Passing answer**: CAS (Compare And Swap) — three operands: memory value V, expected value E, new value N. If V==E, set V to N; otherwise do nothing. Atomic, backed by a hardware instruction (cmpxchg).
+
+**Bonus points**:
+- **ABA problem** — the value goes A→B→A, and CAS thinks nothing changed. Fix: a version number (AtomicStampedReference).
+- **Spinning cost** — failed CAS loops and retries, wasting CPU under heavy contention. JDK 8's LongAdder reduces contention with segmented accumulation.
+- **AQS uses CAS** — AbstractQueuedSynchronizer is the foundation of locks/synchronizers and uses CAS to mutate the state variable.
+- **Optimistic-lock thinking** — CAS is optimistic (assume no conflict, retry on failure); synchronized is pessimistic (lock first, ask questions later).
+
+## 4. JVM
+
+### Q11: JVM memory structure?
+
+**Passing answer**: Heap, method area (metaspace), VM stack, native method stack, program counter. The heap and method area are shared across threads; the others are thread-private.
+
+**Bonus points**:
+- **Heap generations** — young generation (Eden + 2 Survivor) + old generation. Objects start in Eden, survive a Minor GC into Survivor, and after several survivals enter the old generation.
+- **Method area evolution** — before JDK 7 it was the permanent generation (PermGen, in JVM memory); JDK 8 changed it to metaspace (Metaspace, in direct memory), avoiding OOM.
+- **Stack frames** — each method call is a stack frame, containing the local variable table, operand stack, dynamic linking, and return address. Stack overflow (StackOverflowError) is usually from recursion too deep.
+- **Object memory layout** — object header (Mark Word + Klass Pointer) + instance data + alignment padding. 64-bit JVM aligns to 8 bytes by default.
+
+### Q12: GC algorithms and collectors?
+
+**Passing answer**: Object liveness is judged by reachability analysis (GC Roots). Algorithms include mark-sweep, mark-copy, mark-compact. Collectors include Serial, Parallel, CMS, G1, ZGC.
+
+**Bonus points**:
+- **GC Roots** — VM-stack local variables, static variables in the method area, constants, JNI references in the native method stack, active threads.
+- **Generational collection** — young generation uses copy (Survivor copy); old generation uses mark-sweep / mark-compact.
+- **CMS** — old-generation collector, concurrent mark + concurrent sweep, low pause but fragmented. Deprecated since JDK 9.
+- **G1** — splits the heap into Regions, predicts pause times, default since JDK 9.
+- **ZGC/Shenandoah** — JDK 11+, colored pointers + read barriers, pause ＜ 10ms, suited to large heaps.
+- **Tuning core** — avoid Full GC; balance throughput vs pause time.
+
+### Q13: Class loading and the parent-delegation model?
+
+**Passing answer**: Class loading has five steps: loading, verification, preparation, resolution, initialization. Parent delegation — a child loader first delegates to its parent.
+
+**Bonus points**:
+- **Loader hierarchy** — bootstrap class loader (rt.jar) → extension class loader (ext) → application class loader (classpath) → custom.
+- **Purpose of parent delegation** — security; prevents core classes from being tampered with (a custom `java.lang.String` gets loaded as the real String by the bootstrap loader).
+- **Breaking parent delegation** — SPI (JDBC DriverManager uses the thread context class loader), Tomcat (each webapp has its own ClassLoader for isolation), OSGi.
+- **Initialization timing** — new, reflection, child-class init triggers parent-class init, the main class. `Class.forName` initializes; `ClassLoader.loadClass` does not.
+
+## 5. Spring Framework
+
+### Q14: Understanding Spring IoC?
+
+**Passing answer**: IoC (Inversion of Control) — object creation and dependencies are managed by the container, not by objects new-ing themselves. DI (Dependency Injection) is how IoC is implemented.
+
+**Bonus points**:
+- **Benefits** — decoupling (depend on interfaces, not implementations), easy testing (mock interfaces), unified lifecycle management.
+- **Three injection styles** — constructor injection (recommended, immutable), setter injection, field injection (@Autowired, not recommended, hard to test).
+- **Circular dependencies** — Spring resolves setter-injection circular dependencies for singletons with a three-level cache (singletonObjects, earlySingletonObjects, singletonFactories). Constructor-injection circular dependencies have no solution.
+- **@ComponentScan** — scans classes annotated with @Component/@Service/@Repository/@Controller and registers them as beans.
+
+### Q15: How is Spring AOP implemented?
+
+**Passing answer**: AOP (Aspect-Oriented Programming) uses dynamic proxies to weave cross-cutting logic (logging, transactions, authorization) before/after methods. Interfaces use JDK dynamic proxies; classes use CGLIB bytecode generation.
+
+**Bonus points**:
+- **JDK dynamic proxy** — `Proxy.newProxyInstance`, interface-based, generates a class implementing the interface.
+- **CGLIB** — subclasses the target and overrides methods. final classes/methods can't be proxied.
+- **Spring's choice** — defaults to JDK proxy when interfaces exist (Spring Boot 2.x+ defaults to CGLIB); `@EnableAspectJAutoProxy(proxyTargetClass=true)` forces CGLIB.
+- **AOP terminology** — Aspect, Pointcut, Advice (Before/After/Around), Weaving.
+- **Transaction pitfalls** — same-class internal calls bypass the proxy (this.method() is not the proxy object); non-public methods; exceptions caught and not rethrown.
+
+### Q16: Spring Boot auto-configuration principle?
+
+**Passing answer**: `@SpringBootApplication` includes `@EnableAutoConfiguration`, which scans configuration classes listed in META-INF/spring.factories (Spring Boot 2.7+ uses META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports), applying them conditionally (@Conditional).
+
+**Bonus points**:
+- **@ConditionalOnClass** — takes effect only when the specified class is on the classpath.
+- **@ConditionalOnMissingBean** — takes effect only when the container lacks that bean, letting users override defaults.
+- **Starter mechanism** — pulling in `spring-boot-starter-redis` auto-configures RedisTemplate, zero config.
+- **Startup flow** — `SpringApplication.run` → create ApplicationContext → load auto-configurations → refresh → start Tomcat.
+
+## 6. Database and Caching
+
+### Q17: MySQL transaction isolation levels?
+
+**Passing answer**: Four levels — read uncommitted, read committed, repeatable read (MySQL default), serializable. They address dirty reads, non-repeatable reads, and phantom reads.
+
+**Bonus points**:
+- **MVCC** — multi-version concurrency control; each row has a hidden version number, and a transaction sees a snapshot. RC generates a new snapshot on each read; RR uses the same snapshot for the whole transaction.
+- **MySQL RR prevents phantom reads** — via gap locks, locking a range to block inserts.
+- **Lock types** — record locks, gap locks, next-key locks (record + gap). `SELECT ... FOR UPDATE` adds next-key locks.
+
+### Q18: Redis persistence?
+
+**Passing answer**: RDB snapshots and AOF logs. RDB is small and fast to restore but may lose data; AOF is complete but slower.
+
+**Bonus points**:
+- **Hybrid persistence** (4.0+) — the front half of an AOF file is RDB binary, the back half is incremental commands.
+- **forking a child process** — both RDB and AOF rewrite fork a child process, using COW (copy-on-write) to avoid blocking the main process.
+- **AOF rewrite** — as the AOF file grows, rewrite merges many commands into one equivalent command.
+
+## 7. Design Patterns
+
+### Q19: Implementations of the singleton pattern?
+
+**Passing answer**: eager (created at class load), lazy (double-checked locking), static inner class, enum.
+
+**Bonus points**:
+- **Enum is best** — `enum Singleton { INSTANCE; }`, inherently resistant to reflection attacks and deserialization breakage, and the simplest code.
+- **Double-checked locking essentials** — `instance` must be volatile, to prevent reordering from publishing an "uninitialized object."
+- **Static inner class** — `private static class Holder { static final Singleton INSTANCE = new Singleton(); }`, leverages class loading for thread safety and lazy loading.
+
+### Q20: How does the strategy pattern eliminate if-else?
+
+**Passing answer**: Pull each branch into a strategy class (implementing the same interface), register them in a Map, and at runtime look up the strategy by key and execute.
+
+**Bonus points**:
+- **Pair with a factory** — strategy + factory, the factory creates/looks up strategies.
+- **Spring integration** — annotate strategy classes with @Component, inject `Map＜String, Strategy＞`, and Spring injects by bean name automatically.
+- **Open-closed principle** — adding a new strategy only adds a class, without touching existing code.
+
+```java
+// 消除 if-else
+interface PayStrategy { void pay(double amount); }
+@Component("alipay") class AlipayStrategy implements PayStrategy { ... }
+@Component("wechat") class WechatStrategy implements PayStrategy { ... }
+
+@Service
+class PayService {
+    @Autowired Map<String, PayStrategy> strategies;  // Spring 自动注入
+    public void pay(String type, double amount) {
+        strategies.get(type).pay(amount);   // 无 if-else
+    }
+}
+```
+
+## 8. Hands-On: Interview Question Code Demo
+
+The code below demonstrates "code-level" answers to several high-frequency questions — equals/hashCode, HashMap internals, volatile visibility, double-checked locking singleton, and the strategy pattern eliminating if-else.
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 面试题代码演示 ===\\n");
+
+        // 1. equals/hashCode 关系
+        System.out.println("--- 1. equals 与 hashCode ---");
+        Person p1 = new Person("Tom", 20);
+        Person p2 = new Person("Tom", 20);
+        System.out.println("p1.equals(p2): " + p1.equals(p2));   // true
+        System.out.println("p1.hashCode == p2.hashCode: " + (p1.hashCode() == p2.hashCode()));
+        Set<Person> set = new HashSet<>();
+        set.add(p1);
+        System.out.println("set.contains(p2): " + set.contains(p2));   // true (hashCode 一致)
+
+        // 2. Integer 缓存
+        System.out.println("\\n--- 2. Integer 缓存 (-128~127) ---");
+        Integer a = 127, b = 127;
+        Integer c = 128, d = 128;
+        System.out.println("127 == 127: " + (a == b));   // true (缓存)
+        System.out.println("128 == 128: " + (c == d));   // false (超出缓存)
+
+        // 3. HashMap 原理
+        System.out.println("\\n--- 3. HashMap 桶分布 ---");
+        Map<String, Integer> map = new HashMap<>(16);
+        String[] keys = {"apple", "banana", "cherry", "date", "elderberry"};
+        for (String k : keys) {
+            int hash = k.hashCode() ^ (k.hashCode() >>> 16);
+            int bucket = hash & 15;   // n-1 = 15
+            map.put(k, k.length());
+            System.out.printf("  %-12s hash=%-10d 桶=%d%n", k, hash, bucket);
+        }
+
+        // 4. volatile 可见性
+        System.out.println("\\n--- 4. volatile 可见性 ---");
+        VolatileDemo.demo();
+
+        // 5. 双检锁单例
+        System.out.println("\\n--- 5. 双检锁单例 ---");
+        Singleton s1 = Singleton.getInstance();
+        Singleton s2 = Singleton.getInstance();
+        System.out.println("s1 == s2: " + (s1 == s2));   // true
+
+        // 6. CAS 演示 (AtomicInteger)
+        System.out.println("\\n--- 6. CAS (AtomicInteger) ---");
+        AtomicInteger counter = new AtomicInteger(0);
+        Thread[] threads = new Thread[10];
+        for (int i = 0; i < 10; i++) {
+            threads[i] = new Thread(() -> {
+                for (int j = 0; j < 1000; j++) counter.incrementAndGet();
+            });
+            threads[i].start();
+        }
+        for (Thread t : threads) t.join();
+        System.out.println("10 线程各 +1000: " + counter.get() + " (CAS 保证原子)");
+
+        // 7. 策略模式消除 if-else
+        System.out.println("\\n--- 7. 策略模式 ---");
+        Map<String, DiscountStrategy> strategies = new HashMap<>();
+        strategies.put("normal", amount -> amount);
+        strategies.put("vip", amount -> amount * 0.8);
+        strategies.put("svip", amount -> amount * 0.6);
+        double price = 100.0;
+        for (String type : new String[]{"normal", "vip", "svip"}) {
+            System.out.println("  " + type + " 用户 100 元 -> " + strategies.get(type).discount(price) + " 元");
+        }
+
+        // 8. 线程池
+        System.out.println("\\n--- 8. 线程池 ---");
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+            2, 4, 30, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(10),
+            Executors.defaultThreadFactory(),
+            new ThreadPoolExecutor.CallerRunsPolicy()
+        );
+        List<Future<Integer>> futures = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            final int x = i;
+            futures.add(pool.submit(() -> {
+                Thread.sleep(100);
+                return x * x;
+            }));
+        }
+        System.out.println("  5 个任务结果:");
+        for (Future<Integer> f : futures) System.out.println("    " + f.get());
+        pool.shutdown();
+        System.out.println("  池状态: 活跃=" + pool.getActiveCount() + " 完成=" + pool.getCompletedTaskCount());
+    }
+}
+
+// equals/hashCode 正确实现
+class Person {
+    String name;
+    int age;
+    Person(String name, int age) { this.name = name; this.age = age; }
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Person)) return false;
+        Person p = (Person) o;
+        return age == p.age && Objects.equals(name, p.name);
+    }
+    public int hashCode() { return Objects.hash(name, age); }
+}
+
+// volatile 可见性演示
+class VolatileDemo {
+    static volatile boolean stopped = false;
+    static void demo() throws InterruptedException {
+        Thread t = new Thread(() -> {
+            long count = 0;
+            while (!stopped) count++;   // 没 volatile 会一直循环
+            System.out.println("  子线程收到停止信号, count=" + count);
+        });
+        t.start();
+        Thread.sleep(50);
+        stopped = true;   // 主线程改 volatile, 子线程立即可见
+        t.join();
+        System.out.println("  volatile 保证可见性: 子线程正确停止");
+    }
+}
+
+// 双检锁单例
+class Singleton {
+    private static volatile Singleton instance;
+    private Singleton() { System.out.println("  Singleton 构造 (只调一次)"); }
+    public static Singleton getInstance() {
+        if (instance == null) {
+            synchronized (Singleton.class) {
+                if (instance == null) instance = new Singleton();
+            }
+        }
+        return instance;
+    }
+}
+
+// 策略接口
+interface DiscountStrategy {
+    double discount(double amount);
+}`} />
+
+> **Key observations**: Person overrides equals and hashCode, so HashSet correctly recognizes "equal" objects; Integer 127 is a cached object so `==` is true, 128 is not; volatile lets the child thread immediately see the main thread's change, otherwise it could spin forever; AtomicInteger uses CAS to keep 10,000 increments correct; the strategy pattern uses a Map to eliminate if-else.
+
+## 9. Interview Soft Skills
+
+Answering the tech well isn't enough — **delivery** matters too.
+
+### 9.1 Answer Structure — STAR
+
+- **S**ituation — context ("In my previous project...")
+- **T**ask — your responsibility ("I was in charge of...")
+- **A**ction — what you did ("I used X to do Y, because...")
+- **R**esult — outcome ("performance improved N times, QPS from X to Y")
+
+Don't just talk tech — talk about **why you chose it, what problem it solved, and what the impact was**.
+
+### 9.2 What if you don't know?
+
+- **Don't bluff** — one follow-up question and you're exposed.
+- **Admit it, but show your thinking** — "I haven't dug into this, but I'd guess it's XX, because YY..."
+- **Transfer knowledge** — "I haven't used Kafka, but I know RabbitMQ well; it's probably a similar mechanism..."
+
+### 9.3 The questions-you-ask round
+
+At the end they'll ask, "Do you have any questions?" — this is a chance to score points:
+- "What's the team's tech stack and future direction?"
+- "What project would I take over after joining?"
+- "What's the team's code review process?"
+- Don't ask "how much is the pay, do you work overtime" (save that for HR).
+
+## 10. Chapter Summary
+
+| Module | High-Frequency Topics |
+| --- | --- |
+| Basics | equals/hashCode, String immutability, Integer cache |
+| Collections | HashMap internals, ConcurrentHashMap, ArrayList vs LinkedList |
+| Concurrency | volatile, synchronized escalation, thread-pool config, CAS/AQS |
+| JVM | Memory structure, GC algorithms/collectors, class loading/parent delegation |
+| Spring | IoC three-level cache, AOP dynamic proxy, Boot auto-configuration |
+| Database | Transaction isolation, MVCC, indexes |
+| Design patterns | Four singleton implementations, strategy eliminates if-else |
+
+## Mnemonic
+
+- **equals/hashCode** — equal implies equal hash; override equals, override hashCode.
+- **HashMap** — array + linked list + red-black tree, power of 2, 0.75 resize.
+- **volatile's three traits** — visible, ordered, not atomic.
+- **Thread pool's four params** — core, max, queue, rejection.
+- **Spring AOP** — interfaces use JDK proxy, classes use CGLIB.
+- **Class loading** — load, verify, prepare, resolve, initialize; parent delegation keeps it safe.
+
+## Closing — Also the Closing of the Whole Series
+
+Congratulations on making it here. Eighty chapters, from the story of a cup of coffee to interview questions in depth. We walked through Java's syntax, object-oriented programming, collections, concurrency, IO, the JVM, reflection, networking, the Spring family, microservices, Docker, design patterns, algorithms...
+
+This knowledge is no archipelago — it's a web. HashMap uses bit operations, Stream uses generics, Spring uses reflection and dynamic proxies, thread pools use blocking queues, JVM GC uses reachability analysis... every chapter sets the stage for the ones that follow.
+
+But knowledge is ultimately **dead**. What brings it alive is **practice**. Build projects, read source code, step into pitfalls, fill them back in. This series gave you the map; the road is yours to walk.
+
+May you go ever farther and ever deeper on this Java road.
+
+Let's raise that cup of Java once more — to these thirty years, to everyone who writes code, and to what's next.

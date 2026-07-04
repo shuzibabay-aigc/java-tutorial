@@ -1,0 +1,329 @@
+---
+title: "The Module System"
+chapter: 46
+stage: "Stage 8"
+stageName: "Modern Java Features"
+order: 1
+description: "Understand the JPMS module system, jar hell pain points, module-info.java's requires/exports/opens/uses/provides, module path vs class path, jdeps dependency analysis, and unnamed/automatic module migration strategies"
+pubDate: 2026-07-03
+tags: ["Java", "JPMS", "模块化", "Module", "jdeps", "JDK 9"]
+---
+
+# The Module System
+
+From this chapter onward, we enter **Stage 8: Modern Java Features**. This stage covers a batch of "modernized" syntax and APIs that Java gradually introduced after 2017 — the module system, Records, Sealed Classes, Pattern Matching, HttpClient, Text Blocks, and more. While preserving backward compatibility, Java finally caught up with the expressiveness of "younger upstarts" like Kotlin and Scala.
+
+We begin with the most controversial, deeply impactful, and arguably hardest-to-use feature — the **Java Platform Module System (JPMS)**, also known as JSR 376 and JEP 261, officially released in JDK 9. It brings the philosophy of "Lego bricks" to Java: each module is an independent brick with clear interfaces and hidden internals, and bricks snap together through explicit contracts.
+
+## 1. Why Modules: The Pain of Jar Hell
+
+Before explaining "what," let's feel the "why."
+
+### 1.1 Jar Hell: Java's Version of Dependency Hell
+
+In the era before the module system, Java dumped every jar onto the classpath, and problems abounded:
+
+- **Version conflicts** — `A.jar` depends on `commons-lang3:3.8`, while `B.jar` depends on `commons-lang3:3.12`. The classpath only knows class names, not versions — whoever comes first wins. The result could be a runtime crash on a method that doesn't exist.
+- **Visibility out of control** — `public` means "visible to the entire universe." You can't keep an `internal` package for your module alone. Spring and Guava were forced to mark internal APIs `public`, only to see them heavily misused by users — once released, they couldn't be changed.
+- **Classpath is one big soup** — every class on the classpath is visible to every other class, with no boundaries. A jar missing a dependency won't fail at compile time; it fails at runtime with `NoClassDefFoundError`.
+- **The JDK itself was too fat** — `rt.jar` had thousands of classes, and even a HelloWorld dragged in AWT, Swing, and CORBA. Embedded devices and cloud-native images all found it too large.
+
+### 1.2 What the Module System Solves
+
+JPMS goals:
+
+1. **Reliable configuration** — modules declare what they need and provide, and dependency integrity is checked at startup rather than crashing at runtime.
+2. **Strong encapsulation** — `public` is no longer "visible to the entire universe," only to packages that are `exports`-ed; internal packages are truly hidden.
+3. **Composable platform** — the JDK itself is split into dozens of small modules, applications carry only what they need, and custom JREs are supported (`jlink`).
+
+## 2. module-info.java: The Module's ID Card
+
+Every module has a `module-info.java` file at its root — it's the module's "ID card."
+
+### 2.1 The Simplest Module
+
+```
+myapp/
+├── module-info.java
+└── com/example/
+    └── Main.java
+```
+
+```java
+// module-info.java
+module myapp {
+    requires java.sql;       // depends on the java.sql module
+    exports com.example;     // exposes the com.example package
+}
+```
+
+```java
+// com/example/Main.java
+package com.example;
+import java.sql.Connection;
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("Module myapp started");
+    }
+}
+```
+
+### 2.2 The Five Key Keywords
+
+There aren't many keywords you can use in `module-info.java`, but each one matters:
+
+| Keyword | Purpose | Example |
+| --- | --- | --- |
+| `requires` | Declares a dependency on a module | `requires java.sql;` |
+| `requires transitive` | Transitive dependency (consumers can also read it) | `requires transitive java.logging;` |
+| `requires static` | Required at compile time, optional at runtime | `requires static lombok;` |
+| `exports` | Exports a package | `exports com.example.api;` |
+| `exports ... to` | Exports only to specific modules | `exports com.example.internal to mylib;` |
+| `opens` | Opens at runtime (for reflection) | `opens com.example.dto;` |
+| `opens ... to` | Opens reflection only to specific modules | `opens com.example.dto to myframework;` |
+| `uses` | Declares use of a ServiceLoader service | `uses com.example.Driver;` |
+| `provides ... with` | Provides an implementation of a service | `provides com.example.Driver with com.example.MyDriver;` |
+
+**`exports` vs `opens` — the difference** — this is the point beginners most easily confuse:
+
+- `exports`: **visible at both compile time and runtime** — other modules can `import` your classes and call them directly.
+- `opens`: **visible only at runtime through reflection** — cannot be imported at compile time, but reflection can access it. Typically used by frameworks like Spring and Hibernate that scan fields via reflection.
+
+If a package is both `exports`-ed and `opens`-ed, it can be both used directly and accessed via reflection.
+
+### 2.3 uses/provides: The Service Mechanism
+
+JPMS ships a built-in SPI-like (Service Provider Interface) mechanism. One module declares `uses` an interface, another module `provides` an implementation, and at runtime `ServiceLoader` discovers it automatically.
+
+```java
+// Framework module
+module myframework {
+    exports com.fw.api;
+    uses com.fw.api.Plugin;     // I want to find Plugin implementations
+}
+
+// Plugin module
+module myplugin {
+    requires myframework;
+    provides com.fw.api.Plugin with com.plugin.MyPlugin;  // I provide the implementation
+}
+```
+
+```java
+// Framework code
+ServiceLoader<Plugin> loader = ServiceLoader.load(Plugin.class);
+for (Plugin p : loader) {
+    p.run();
+}
+```
+
+This is exactly how JDBC 4.0+ auto-discovers drivers — the `java.sql` module `uses java.sql.Driver`, and each driver jar `provides java.sql.Driver with ...`.
+
+## 3. Module Path vs Class Path
+
+The module system introduced the **module path**, which coexists with the traditional class path.
+
+| Dimension | class path | module path |
+| --- | --- | --- |
+| Unit | jar/directory | modular jar/directory |
+| Visibility | All classes mutually visible (public) | Controlled by `exports`/`requires` |
+| Check timing | Runtime (you find out when it crashes) | Startup (startup fails) |
+| Package conflict | Same-named package may be loaded twice (no error, behavior undefined) | Same-named package strictly forbidden (**split package** error) |
+
+**Key rule**: JPMS strictly forbids **split packages** — the same package cannot appear in two modules. This is the most common pitfall during modular migration.
+
+### 3.1 The Unnamed Module: Code on the Class Path
+
+All classes on the class path are automatically placed in a container called the **unnamed module**. It has several characteristics:
+
+- **Automatically `requires` all modules** — can read all `exports`-ed packages on the module path.
+- **Does not `exports` any package** — code on the module path cannot see classes on the class path (except via reflection).
+- **One unnamed module per class loader**.
+
+This is why "old code on the classpath, new modules on the module path" can coexist — the unnamed module is a "second-class citizen," accessible only via reflection from modules, not directly `import`-ed.
+
+### 3.2 The Automatic Module: A Jar's Transitional Identity
+
+A **plain jar** (without `module-info.class`) placed on the **module path** automatically becomes an **automatic module**. Its characteristics:
+
+- **Module name** derived from the jar name (`foo-bar-1.0.jar` → module name `foo.bar`, can be explicitly specified via `Automatic-Module-Name: foo.bar` in MANIFEST).
+- **`requires` all modules** — can read all `exports`-ed packages.
+- **`exports` all packages** — all packages automatically visible to the outside.
+
+This is the "transitional bridge" for migration — you don't have to modularize every jar at once; modularize the core first, and use dependent jars as automatic modules.
+
+## 4. jdeps: The Dependency Analysis Weapon
+
+The biggest workload in modular refactoring is figuring out "who depends on whom." The JDK's built-in `jdeps` tool does exactly this.
+
+```bash
+# Analyze which JDK modules a jar depends on
+jdeps --jdk-internals myapp.jar
+
+# Analyze dependencies between jars
+jdeps -recursive -module-path libs myapp.jar
+
+# Generate a recommended module-info.java
+jdeps --generate-module-info ./out myapp.jar
+```
+
+`jdeps --jdk-internals` also warns you about uses of JDK internal APIs (like `sun.misc.Unsafe`) — these internal APIs are strongly encapsulated starting from JDK 17, so you must scan them before migrating.
+
+## 5. Modular Migration Strategies: Bottom-Up
+
+Migrating an old project to fully modular is a "gradual" process. The community has summarized two paths:
+
+### 5.1 Bottom-Up
+
+1. **Modularize low-level libraries first** — jars that aren't depended on by anything internal get priority.
+2. **Middle layer follows gradually** — once the libraries you depend on are modularized, add `module-info`.
+3. **Application layer goes last**.
+
+At each step, put already-modularized jars on the module path and unmodularized ones on the class path or treat them as automatic modules.
+
+### 5.2 Top-Down
+
+If the low-level libraries aren't yours and third parties haven't modularized yet:
+
+1. **Modularize the application code first**, treating dependent jars as automatic modules.
+2. Use the automatic module's package name as the module name — make do.
+3. Swap in modular versions when third parties release them.
+
+### 5.3 Practical Example: Demonstrating Module Path and Reflection
+
+The following example demonstrates accessing unexported packages via reflection in a **single file**, along with the basic usage of the `Module` API — this is the easiest way to run a demo without splitting into a multi-module project structure.
+
+<CodeRunner code={`import java.lang.reflect.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== JPMS Module System Demo ===");
+        System.out.println("Java version: " + System.getProperty("java.version"));
+
+        // 1. The module the current class belongs to
+        Module myModule = Main.class.getModule();
+        System.out.println("\\nCurrent module: " + myModule.getName()
+            + " (is named module: " + myModule.isNamed() + ")");
+        System.out.println("Class loader: " + Main.class.getClassLoader());
+
+        // 2. List all requires of the current module
+        System.out.println("\\nCurrent module's declared dependencies (requires):");
+        myModule.getDescriptor().requires().forEach(req ->
+            System.out.println("  - " + req.name() + " " + req.modifiers()));
+
+        // 3. Look at the java.base module where String lives
+        Module javaBase = String.class.getModule();
+        System.out.println("\\njava.base module info:");
+        System.out.println("  Module name: " + javaBase.getName());
+        System.out.println("  Exported packages (partial):");
+        javaBase.getDescriptor().exports().stream()
+            .limit(8)
+            .forEach(e -> System.out.println("    - " + e.source()));
+
+        // 4. Demonstrate exports control: java.base exports java.lang, but not sun.* internal packages
+        System.out.println("\\n=== Module Encapsulation Demo ===");
+        try {
+            // Try to access JDK internal class (encapsulated after modularization)
+            Class<?> unsafe = Class.forName("sun.misc.Unsafe");
+            System.out.println("Successfully loaded sun.misc.Unsafe (should not be visible)");
+        } catch (ClassNotFoundException e) {
+            System.out.println("Cannot directly load sun.misc.Unsafe - encapsulated by module");
+        } catch (Throwable e) {
+            System.out.println("Access denied: " + e.getClass().getSimpleName()
+                + " - " + e.getMessage());
+        }
+
+        // 5. Demonstrate reflective export of the Module API (open at runtime)
+        System.out.println("\\n=== Runtime Module API ===");
+        System.out.println("Does java.base export java.lang to current module: "
+            + javaBase.isExported("java.lang", myModule));
+        System.out.println("Does java.base export sun.misc to current module: "
+            + javaBase.isExported("sun.misc", myModule));
+        System.out.println("Does java.base open sun.misc to current module: "
+            + javaBase.isOpen("sun.misc", myModule));
+
+        // 6. List some JDK modules loaded by the system
+        System.out.println("\\n=== Some JDK modules in the system ===");
+        ModuleLayer.boot().modules().stream()
+            .map(Module::getName)
+            .filter(n -> n.startsWith("java."))
+            .sorted()
+            .limit(10)
+            .forEach(n -> System.out.println("  - " + n));
+
+        // 7. Simple illustration: manually construct a module descriptor (simulating module-info parsing)
+        System.out.println("\\n=== Manual Module Descriptor Construction Example ===");
+        java.lang.module.ModuleDescriptor desc =
+            java.lang.module.ModuleDescriptor.newModule("myapp")
+                .requires(java.lang.module.ModuleDescriptor.Requires.MODULE_BASE)
+                .requires("java.sql")
+                .exports("com.example.api")
+                .build();
+        System.out.println("Constructed module name: " + desc.name());
+        System.out.println("requires:");
+        desc.requires().forEach(r -> System.out.println("  - " + r.name()));
+        System.out.println("exports:");
+        desc.exports().forEach(e -> System.out.println("  - " + e.source()));
+
+        System.out.println("\\n=== Summary ===");
+        System.out.println("1. Module = namespace + dependency declaration + strong encapsulation");
+        System.out.println("2. module-info.java uses requires/exports/opens/uses/provides");
+        System.out.println("3. Module path controls visibility via exports/requires, class path is fully visible");
+        System.out.println("4. unnamed module (classpath) and automatic module (jar) are migration bridges");
+        System.out.println("5. jdeps analyzes dependencies, jlink customizes JRE");
+    }
+}`} />
+
+> **Key observations**:
+> - The current class is in the **unnamed module** (`isNamed()=false`) — because we didn't write a `module-info.java`.
+> - `sun.misc.Unsafe` cannot be loaded directly — internal packages are strongly encapsulated from JDK 17 onward, unless you add the `--add-opens` startup parameter.
+> - The `Module` API lets you **query a module's export/open status at runtime** — commonly used by frameworks doing reflection scanning.
+> - `ModuleDescriptor.newModule` can **programmatically construct** a module descriptor — used by dynamic proxies and bytecode enhancement libraries.
+
+## 6. jlink: Custom JREs
+
+One of the "dividends" of modularization is `jlink` — it packages your application + the JDK modules it depends on into a **custom JRE**, without the JVM's redundant modules.
+
+```bash
+jlink --module-path out:JAVA_HOME/jmods \
+      --add-modules myapp \
+      --launcher launch=myapp/com.example.Main \
+      --output myapp-image
+```
+
+The output is a complete directory containing the JVM, application modules, and a startup script — users don't need to install Java. Docker images can shrink from hundreds of MB to tens of MB.
+
+## 7. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| jar hell | Version conflicts, visibility out of control, runtime-only dependency failures |
+| module-info.java | The module's ID card, declares requires/exports/opens/uses/provides |
+| `requires` | Depends on a module; `transitive` is transitive; `static` is optional at runtime |
+| `exports` | Visible at compile + runtime; `exports to` restricts targets |
+| `opens` | Visible at runtime via reflection; for framework reflection access |
+| `uses/provides` | ServiceLoader service mechanism |
+| Module path | Strictly controls visibility via exports/requires |
+| Class path | All classes mutually visible, enters the unnamed module |
+| Automatic module | Plain jar on the module path, auto-modularized, exports all packages |
+| Split package | Same package forbidden across multiple modules |
+| jdeps | Dependency analysis, generates module-info drafts, scans internal APIs |
+| jlink | Custom JRE, cloud-native image friendly |
+
+**Mnemonics**:
+
+- **Modules are like Lego bricks** — they have studs (exports) and sockets (requires); they only fit when matched.
+- **`exports` is the doorplate** — packages hung out can be entered by outsiders; un-hung ones stay locked.
+- **`opens` is the backdoor key** — reflection can enter, but the compiler won't let you import.
+- **`unnamed` is the transit zone** — a refuge for old code.
+- **`automatic` is a temporary identity** — the transitional costume before a jar is refactored.
+- **Split packages are taboo** — the same package cannot cross modules.
+- **`jdeps` is the scout** — send it ahead to scout the path before migration.
+
+## Conclusion: The Reality of Modularization
+
+JPMS is the hardest upgrade in Java's history — from project kickoff in 2011 to release in 2017, it was debated for six years; even IBM and Red Hat publicly opposed it. After release, the community response was lukewarm: Spring and Tomcat still aren't fully modularized, and the vast majority of applications still use the classpath.
+
+But the value of modularization is real — **strong encapsulation** finally lets library authors refactor internal APIs, **jlink** shrinks cloud-native images, and **JDK self-modularization** makes the platform trimmable. Even if you don't write `module-info.java`, the module system runs silently underneath — every JDK class you use lives in some module.
+
+The next chapter looks at a more "approachable" modern feature — **Records**. It's a syntactic sugar introduced in Java 14 and finalized in Java 16, replacing dozens of lines of POJO boilerplate with a single line. If the module system is "heavy engineering," Records are "light dessert" — see you in the next chapter.

@@ -1,0 +1,381 @@
+---
+title: "Collections 工具类"
+chapter: 23
+stage: "第四阶段"
+stageName: "集合框架"
+order: 6
+description: "掌握 Collections 工具类的排序/反转/洗牌、不可变包装与同步包装，以及 Java 9+ 的 List.of/Map.of/Set.of 不可变工厂方法与 copyOf"
+pubDate: 2026-07-03
+tags: ["Java", "Collections", "不可变集合", "List.of", "Map.of", "Set.of", "同步包装"]
+---
+
+# Collections 工具类
+
+如果说前面的 `List`、`Set`、`Map` 是各种"容器"，那 `Collections` 就是这套容器的"瑞士军刀"——它提供了一堆静态工具方法，让容器更好用：排序、反转、洗牌、查找、不可变包装、同步包装……此外，Java 9 引入的 `List.of`/`Set.of`/`Map.of` 工厂方法和 Java 10 的 `copyOf`，让"造一个不可变集合"变得前所未有地简单。
+
+这一章，我们把这套工具一件件拿出来，看看它们各自的妙用。
+
+## 一、Collections.sort：排序
+
+`Collections.sort(list)` 是最经典的排序方法。它要求元素实现 `Comparable`，或传一个 `Comparator`：
+
+```java
+List<Integer> nums = new ArrayList<>(List.of(5, 1, 3, 2, 4));
+Collections.sort(nums);                 // [1, 2, 3, 4, 5]
+Collections.sort(nums, Comparator.reverseOrder());   // [5, 4, 3, 2, 1]
+```
+
+底层实现：Java 7 之前用归并排序，Java 7 起改为 **TimSort**（归并+插入的混合，对"部分有序"的数据特别快）。`List.sort()` 实际把列表转成数组排序后再写回——所以 `ArrayList` 排序快，`LinkedList` 排序慢（先转数组）。
+
+> 💡 **从 Java 8 开始**，更推荐用 `list.sort(comparator)`——它是 `List` 接口的默认方法，比 `Collections.sort` 更"面向对象"。
+
+## 二、reverse 与 shuffle
+
+### 2.1 reverse：反转
+
+```java
+List<Integer> list = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+Collections.reverse(list);    // [5, 4, 3, 2, 1]
+```
+
+它通过"头尾交换"实现，O(n)。
+
+### 2.2 shuffle：洗牌
+
+```java
+Collections.shuffle(list);              // 随机打乱
+Collections.shuffle(list, new Random(42));   // 指定随机种子（可复现）
+```
+
+洗牌算法是经典的 **Fisher-Yates**——从后往前遍历，每个元素与前面随机一个位置交换。保证每个排列等概率出现。
+
+`shuffle` 在游戏开发（洗牌）、机器学习（数据打乱）、随机抽样中常用。
+
+## 三、swap 与 fill
+
+```java
+List<Integer> list = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+Collections.swap(list, 0, 4);    // 交换位置 0 和 4 → [5, 2, 3, 4, 1]
+
+Collections.fill(list, 0);       // 全部填成 0 → [0, 0, 0, 0, 0]
+```
+
+`swap` 是交换两个位置，`fill` 是把所有元素替换为指定值。简单但实用。
+
+## 四、其他常用方法
+
+```java
+List<Integer> list = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+
+Collections.max(list);                      // 5
+Collections.min(list);                      // 1
+Collections.frequency(list, 3);             // 1（出现次数）
+Collections.indexOfSubList(list, List.of(3,4));   // 2
+Collections.replaceAll(list, 3, 30);        // 把 3 全替换成 30
+Collections.rotate(list, 2);                // 整体右移 2 位
+Collections.disjoint(List.of(1,2), List.of(3,4)); // true（无交集）
+```
+
+`rotate(list, distance)` 比较有意思——它把列表"循环右移" `distance` 位：
+
+```java
+[1, 2, 3, 4, 5] rotate 2 → [4, 5, 1, 2, 3]
+```
+
+## 五、不可变包装：unmodifiableXxx
+
+有时你想把一个集合"只读化"——给别人用但不让别人改。`Collections.unmodifiableXxx` 给集合套一层"只读壳"，调用修改方法会抛 `UnsupportedOperationException`：
+
+```java
+List<String> mutable = new ArrayList<>(List.of("A", "B", "C"));
+List<String> immutable = Collections.unmodifiableList(mutable);
+
+immutable.add("D");   // ❌ UnsupportedOperationException
+immutable.set(0, "X"); // ❌
+immutable.get(0);      // ✅ 可以读
+```
+
+**注意**：`unmodifiableList` 是个**视图**——它和原集合共享数据。修改原集合，只读视图也跟着变：
+
+```java
+mutable.add("D");
+System.out.println(immutable);   // [A, B, C, D]！
+```
+
+所以"不可变"指的是"通过这个引用不能改"，不是"永远不变"。如果要真正的快照不可变，用 `List.copyOf`（见下文）。
+
+对应方法：
+
+- `Collections.unmodifiableList(list)`
+- `Collections.unmodifiableSet(set)`
+- `Collections.unmodifiableMap(map)`
+- `Collections.unmodifiableCollection(c)`
+
+## 六、同步包装：synchronizedXxx
+
+普通 `ArrayList`、`HashMap` 是非线程安全的。`Collections.synchronizedXxx` 给它们套一层同步壳，每个方法都加 `synchronized`：
+
+```java
+List<String> syncList = Collections.synchronizedList(new ArrayList<>());
+Map<String, Integer> syncMap = Collections.synchronizedMap(new HashMap<>());
+Set<String> syncSet = Collections.synchronizedSet(new HashSet<>());
+```
+
+线程安全，但**性能差**——每个操作都锁住整个集合，并发度极低。现代 Java 更推荐用 `CopyOnWriteArrayList`、`ConcurrentHashMap`、`ConcurrentSkipListSet` 等并发专用容器。
+
+**关键陷阱**：迭代时仍需手动同步！
+
+```java
+List<String> syncList = Collections.synchronizedList(new ArrayList<>());
+// ...
+synchronized (syncList) {     // 必须手动同步！
+    for (String s : syncList) {
+        System.out.println(s);
+    }
+}
+```
+
+因为迭代器本身不是同步的——如果在迭代中别的线程修改了列表，仍会抛 `ConcurrentModificationException`。这是 `synchronizedXxx` 最容易踩的坑。
+
+## 七、Java 9+：不可变工厂方法
+
+Java 9 引入了一组**不可变集合工厂方法**——一行代码造一个真正的不可变集合：
+
+### 7.1 List.of / Set.of / Map.of
+
+```java
+List<String> list = List.of("A", "B", "C");
+Set<Integer> set = Set.of(1, 2, 3);
+Map<String, Integer> map = Map.of("a", 1, "b", 2);   // 最多 10 对
+Map<String, Integer> bigMap = Map.ofEntries(
+    Map.entry("a", 1),
+    Map.entry("b", 2),
+    Map.entry("c", 3)
+);
+```
+
+特点：
+
+1. **不可变**：`add`/`remove`/`set` 都抛 `UnsupportedOperationException`。
+2. **不允许 null**：传入 null 抛 `NullPointerException`。
+3. **Set/Map 不允许重复**：`Set.of(1, 1)` 抛 `IllegalArgumentException`。
+4. **序列化友好**：底层实现经过优化，比 `unmodifiableXxx` 更省内存。
+
+### 7.2 与 Arrays.asList / unmodifiableList 的区别
+
+| 特性 | `Arrays.asList` | `unmodifiableList` | `List.of` |
+| --- | --- | --- | --- |
+| 可变 | 改元素可以，增删不行 | 完全不可变 | 完全不可变 |
+| null | 允许 | 允许 | **不允许** |
+| 是否视图 | 是（共享原数组） | 是（共享原集合） | 否（独立） |
+
+`List.of` 是"真不可变"——它不依赖任何原集合，是个独立的不可变对象。
+
+### 7.3 Java 10+：copyOf
+
+`List.copyOf`、`Set.copyOf`、`Map.copyOf` 从一个现有集合创建不可变副本：
+
+```java
+List<String> mutable = new ArrayList<>(List.of("A", "B", "C"));
+List<String> snapshot = List.copyOf(mutable);   // 不可变快照
+
+mutable.add("D");
+System.out.println(snapshot);   // [A, B, C]（不受原集合影响）
+```
+
+`copyOf` 是"防御性复制"的优雅写法——以前要 `Collections.unmodifiableList(new ArrayList＜＞(original))`，现在一行 `List.copyOf(original)` 搞定。
+
+注意：如果传入的本身就是 `List.of` 创建的不可变集合，`copyOf` 不会复制，直接返回原对象——这是个优化。
+
+<CodeRunner code={`import java.util.*;
+import java.util.stream.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 排序、反转、洗牌
+        List<Integer> nums = new ArrayList<>(List.of(5, 1, 3, 2, 4));
+        System.out.println("原始: " + nums);
+        Collections.sort(nums);
+        System.out.println("排序: " + nums);
+        Collections.reverse(nums);
+        System.out.println("反转: " + nums);
+        Collections.shuffle(nums, new Random(42));   // 固定种子可复现
+        System.out.println("洗牌(种子42): " + nums);
+        Collections.swap(nums, 0, nums.size() - 1);
+        System.out.println("交换首尾: " + nums);
+
+        // 2. 其他常用操作
+        System.out.println("\\n--- 常用操作 ---");
+        nums = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+        System.out.println("max: " + Collections.max(nums));
+        System.out.println("min: " + Collections.min(nums));
+        System.out.println("frequency(3): " + Collections.frequency(nums, 3));
+        Collections.rotate(nums, 2);
+        System.out.println("rotate 2: " + nums);
+
+        // 3. 不可变包装
+        System.out.println("\\n--- 不可变包装 ---");
+        List<String> mutable = new ArrayList<>(List.of("A", "B", "C"));
+        List<String> readOnly = Collections.unmodifiableList(mutable);
+        try {
+            readOnly.add("D");
+        } catch (UnsupportedOperationException e) {
+            System.out.println("unmodifiableList 不允许 add");
+        }
+
+        // 4. Java 9+ 不可变工厂方法
+        System.out.println("\\n--- List.of / Set.of / Map.of ---");
+        List<String> imList = List.of("A", "B", "C");
+        Set<Integer> imSet = Set.of(1, 2, 3);
+        Map<String, Integer> imMap = Map.of("apple", 5, "banana", 3);
+
+        System.out.println("List: " + imList);
+        System.out.println("Set: " + imSet);
+        System.out.println("Map: " + imMap);
+
+        try {
+            imList.add("D");
+        } catch (UnsupportedOperationException e) {
+            System.out.println("List.of 不允许 add");
+        }
+        try {
+            imSet.add(4);
+        } catch (UnsupportedOperationException e) {
+            System.out.println("Set.of 不允许 add");
+        }
+
+        // 5. null 不允许
+        try {
+            List<String> hasNull = List.of("A", null);
+        } catch (NullPointerException e) {
+            System.out.println("List.of 不允许 null");
+        }
+
+        // 6. copyOf 防御性复制
+        System.out.println("\\n--- copyOf 防御性复制 ---");
+        List<String> original = new ArrayList<>(List.of("X", "Y", "Z"));
+        List<String> snapshot = List.copyOf(original);
+        original.add("W");
+        System.out.println("原集合: " + original);    // [X, Y, Z, W]
+        System.out.println("快照: " + snapshot);       // [X, Y, Z] 不受影响
+
+        // 7. 实用：方法返回不可变集合
+        System.out.println("\\n--- 实用：方法返回不可变集合 ---");
+        Config config = new Config();
+        config.add("key1", "value1");
+        config.add("key2", "value2");
+        Map<String, String> all = config.getAll();   // 返回不可变副本
+        System.out.println("配置: " + all);
+        try {
+            all.put("key3", "value3");   // 调用方无法修改内部状态
+        } catch (UnsupportedOperationException e) {
+            System.out.println("调用方无法修改返回的配置");
+        }
+    }
+}
+
+class Config {
+    private final Map<String, String> store = new HashMap<>();
+
+    void add(String k, String v) { store.put(k, v); }
+
+    // 返回不可变副本，保护内部状态
+    Map<String, String> getAll() {
+        return Map.copyOf(store);
+    }
+}`} />
+
+## 八、实战：用 Collections 处理扑克牌
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 造一副牌
+        List<String> deck = new ArrayList<>();
+        String[] suits = {"♠", "♥", "♣", "♦"};
+        String[] ranks = {"A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"};
+        for (String s : suits) {
+            for (String r : ranks) {
+                deck.add(s + r);
+            }
+        }
+        System.out.println("新牌: " + deck);
+        System.out.println("共 " + deck.size() + " 张");
+
+        // 洗牌
+        Collections.shuffle(deck, new Random(123));
+        System.out.println("\\n洗牌后: " + deck);
+
+        // 发牌给 4 个玩家
+        List<List<String>> players = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            players.add(new ArrayList<>());
+        }
+        for (int i = 0; i < deck.size(); i++) {
+            players.get(i % 4).add(deck.get(i));
+        }
+
+        // 每个玩家整理手牌（排序）
+        System.out.println("\\n--- 发牌（每位玩家排序）---");
+        String[] names = {"东", "南", "西", "北"};
+        for (int i = 0; i < 4; i++) {
+            Collections.sort(players.get(i));
+            System.out.println(names[i] + ": " + players.get(i) + " (" + players.get(i).size() + "张)");
+        }
+
+        // 求每家最大牌（按自定义规则）
+        System.out.println("\\n--- 每家最大牌 ---");
+        Comparator<String> byRank = Comparator.comparingInt(c -> {
+            String r = c.substring(1);
+            return List.of("2","3","4","5","6","7","8","9","10","J","Q","K","A").indexOf(r);
+        });
+        for (int i = 0; i < 4; i++) {
+            String max = Collections.max(players.get(i), byRank);
+            System.out.println(names[i] + " 最大: " + max);
+        }
+
+        // 反转某家手牌展示
+        List<String> east = new ArrayList<>(players.get(0));
+        Collections.reverse(east);
+        System.out.println("\\n东家反转: " + east);
+    }
+}`} />
+
+这个例子串起了 `shuffle`、`sort`、`max`、`reverse`、自定义 `Comparator`——一副扑克牌发牌、整理、找最大，全靠 `Collections` 几行搞定。
+
+## 九、Collections vs Collection
+
+别搞混这两个名字几乎一样的家伙：
+
+- `Collection＜E＞`——**接口**，所有单元素容器的根（List/Set/Queue 的父接口）。
+- `Collections`——**工具类**，全是静态方法，提供排序、查找、包装等算法。
+
+一个是"容器本身"，一个是"操作容器的工具箱"。
+
+## 十、本章小结
+
+| 主题 | 要点 |
+| --- | --- |
+| `sort` | TimSort，要求 Comparable 或 Comparator |
+| `reverse` / `shuffle` / `swap` / `fill` | 常用变换 |
+| `max` / `min` / `frequency` / `rotate` | 常用查询 |
+| `unmodifiableXxx` | 只读视图，仍共享原集合 |
+| `synchronizedXxx` | 同步包装，性能差，迭代需手动同步 |
+| `List.of` / `Set.of` / `Map.of` | Java 9+ 不可变工厂，不允许 null |
+| `Map.ofEntries` | Java 9+ 超过 10 对的不可变 Map |
+| `copyOf` | Java 10+ 防御性复制，真不可变 |
+| `Collections` vs `Collection` | 工具类 vs 接口 |
+
+## 结语：工具让容器更强
+
+`Collections` 工具类和 `List.of` 等工厂方法，是集合框架的"放大器"——它们不创造新容器，却让现有容器更好用、更安全。
+
+记住几条原则：
+
+1. **返回集合给外部时用 `copyOf` 或 `unmodifiableXxx`**——保护内部状态不被修改。
+2. **需要常量集合用 `List.of` / `Set.of` / `Map.of`**——比 `new ArrayList＜＞` + `add` 简洁得多。
+3. **需要并发用专用并发容器，别用 `synchronizedXxx`**——`ConcurrentHashMap` 等才是现代答案。
+4. **`Collections.sort` 已经是历史**——Java 8+ 用 `list.sort()` 更地道。
+
+下一章，我们迎来集合框架的高潮——`Stream API`。它把"声明式数据处理"带入了 Java，让集合操作从"怎么写"变成"想要什么"。

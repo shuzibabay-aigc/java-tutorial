@@ -1,0 +1,703 @@
+---
+title: "Bytecode Basics"
+chapter: 55
+stage: "Stage 9"
+stageName: "JVM Deep Dive"
+order: 5
+description: "Master the javap command, an overview of bytecode instructions (load/store/arith/control/method invocation), understanding i++ vs ++i through bytecode, generic erasure, and how try-with-resources auto-close is implemented"
+pubDate: 2026-07-03
+tags: ["Java", "JVM", "字节码", "javap", "Bytecode", "泛型擦除"]
+---
+
+# Bytecode Basics
+
+This is the final chapter of Stage 9 — JVM Deep Dive. The previous four chapters covered the memory model, GC, class loading, and performance tuning — all at the "macro" level of the JVM. In this chapter we drill into the `.class` file to look at **bytecode** — the instructions the JVM actually executes.
+
+Bytecode is the foundation of Java's "write once, run anywhere" — `.java` is compiled into `.class` (bytecode), and the bytecode is platform-independent, interpreted or JIT-compiled by the JVM on each platform. Understanding bytecode lets you see the truth behind Java's syntactic sugar — are `i++` and `++i` really the same? Are generics really erased? What does `try-with-resources` add after compilation? This chapter answers all these questions at once.
+
+## 1. javap: The Bytecode Viewer
+
+`javap` (Java Class File Disassembler) is a disassembler bundled with the JDK — it turns `.class` files back into readable bytecode.
+
+### 1.1 Basic Usage
+
+```bash
+# Disassemble a class (-c shows bytecode, -p shows private members)
+$ javap -c -p MyClass
+
+# More complete: -v shows constant pool, line numbers, etc.
+$ javap -v -p MyClass > bytecode.txt
+
+# Common combinations
+$ javap -c -p -l MyClass    # -l shows line numbers and local variable table
+$ javap -s MyClass          # -s shows internal type signatures (after generic erasure)
+```
+
+### 1.2 Output Structure
+
+`javap -v` output contains:
+
+- **Basic class info** — version number, access flags, superclass, interfaces.
+- **Constant Pool** — a constant table of strings, class names, method names, field names.
+- **Field table** — which fields the class has.
+- **Method table** — the bytecode for each method.
+- **Attribute table** — line numbers, local variable table, annotations, etc.
+
+We focus on the **bytecode in the method table**.
+
+### 1.3 A Simple Example
+
+```java
+public class Hello {
+    public static void main(String[] args) {
+        int a = 1;
+        int b = 2;
+        int c = a + b;
+        System.out.println(c);
+    }
+}
+```
+
+`javap -c -p Hello`:
+
+```
+public static void main(java.lang.String[]);
+  Code:
+     0: iconst_1           # Push constant 1 onto the operand stack
+     1: istore_1           # Pop top, store to local variable 1 (i.e., a)
+     2: iconst_2           # Push constant 2 onto the operand stack
+     3: istore_2           # Pop, store to local variable 2 (i.e., b)
+     4: iload_1            # Load local variable 1 (a) onto the stack
+     5: iload_2            # Load local variable 2 (b) onto the stack
+     6: iadd               # Pop two ints, add them, push the result back
+     7: istore_3           # Store to local variable 3 (i.e., c)
+     8: getstatic     #2   // Field java/lang/System.out:Ljava/io/PrintStream;
+    11: iload_3            # Load c
+    12: invokevirtual #3   // Method java/io/PrintStream.println:(I)V
+    15: return
+```
+
+Each line is a **bytecode instruction** — an opcode (mnemonic) plus operands. The number on the left is the **offset** (bytecode address). `#2` and `#3` are constant pool indices.
+
+## 2. Bytecode Instruction Overview
+
+The JVM instruction set has about 200 instructions, grouped by function:
+
+### 2.1 Load/Store Instructions
+
+Move data between the **local variable table** and the **operand stack**:
+
+| Instruction | Purpose |
+| --- | --- |
+| `iconst_＜n＞` / `lconst_＜n＞` / `fconst_＜n＞` / `dconst_＜n＞` | Push constant 0/1/2/3/4/5 onto the stack |
+| `bipush` / `sipush` | Push a byte/short onto the stack |
+| `ldc` / `ldc_w` / `ldc2_w` | Load a constant from the constant pool onto the stack |
+| `iload_＜n＞` / `lload_＜n＞` / `fload_＜n＞` / `dload_＜n＞` / `aload_＜n＞` | Load a local variable onto the stack |
+| `istore_＜n＞` / `lstore_＜n＞` / `fstore_＜n＞` / `dstore_＜n＞` / `astore_＜n＞` | Pop the stack and store to a local variable |
+| `iaload` / `aaload` etc. | Load an array element |
+| `iastore` / `aastore` etc. | Store an array element |
+
+The prefix `i`/`l`/`f`/`d`/`a` indicates the type — `i` int, `l` long, `f` float, `d` double, `a` reference.
+
+`＜n＞` is a common shorthand — `iload_0` is equivalent to `iload 0`, saving one byte.
+
+### 2.2 Arithmetic Instructions
+
+| Instruction | Purpose |
+| --- | --- |
+| `iadd` / `ladd` / `fadd` / `dadd` | Add |
+| `isub` / `lsub` / `fsub` / `dsub` | Subtract |
+| `imul` / `lmul` / `fmul` / `dmul` | Multiply |
+| `idiv` / `ldiv` / `fdiv` / `ddiv` | Divide |
+| `irem` / `lrem` / `frem` / `drem` | Modulo |
+| `ineg` / `lneg` / `fneg` / `dneg` | Negate |
+| `iand` / `ior` / `ixor` | Bitwise operations |
+| `ishl` / `ishr` / `iushr` | Shift |
+
+Arithmetic instructions pop operands from the operand stack, compute, and push the result back.
+
+### 2.3 Type Conversion
+
+| Instruction | Purpose |
+| --- | --- |
+| `i2l` / `i2f` / `i2d` | int → long/float/double |
+| `l2i` / `l2f` / `l2d` | long → ... |
+| `f2i` / `f2l` / `f2d` | float → ... |
+| `d2i` / `d2l` / `d2f` | double → ... |
+| `i2b` / `i2c` / `i2s` | int → byte/char/short |
+
+Converting a wide type (long/double) to a narrow type (int/float) may lose precision.
+
+### 2.4 Object/Array Operations
+
+| Instruction | Purpose |
+| --- | --- |
+| `new` | Create a new object |
+| `newarray` / `anewarray` / `multianewarray` | Create a new array |
+| `arraylength` | Array length |
+| `getfield` / `putfield` | Read/write an instance field |
+| `getstatic` / `putstatic` | Read/write a static field |
+| `checkcast` | Type check (cast) |
+| `instanceof` | instanceof check |
+
+### 2.5 Control Flow
+
+| Instruction | Purpose |
+| --- | --- |
+| `if_icmpeq` / `if_icmpne` / `if_icmplt` / `if_icmpge` etc. | int compare + branch |
+| `ifeq` / `ifne` / `iflt` / `ifge` etc. | Compare with 0 + branch |
+| `ifnull` / `ifnonnull` | null check + branch |
+| `if_acmpeq` / `if_acmpne` | Reference equality + branch |
+| `goto` / `goto_w` | Unconditional branch |
+| `tableswitch` / `lookupswitch` | switch statements |
+| `iinc` | Increment a local variable (**important — the key to i++**) |
+
+### 2.6 Method Invocation
+
+| Instruction | Purpose |
+| --- | --- |
+| `invokevirtual` | Instance method, **dynamic dispatch** (based on actual type) |
+| `invokestatic` | Static method |
+| `invokeinterface` | Interface method |
+| `invokespecial` | Constructors, `private` methods, `super.method()` |
+| `invokedynamic` | Dynamic method (lambda, string concatenation) |
+| `return` / `ireturn` / `lreturn` / `freturn` / `dreturn` / `areturn` | Method return |
+
+**`invokevirtual` vs `invokespecial`** is the key to polymorphism — `invokevirtual` looks up the method at runtime based on the object's actual type (virtual method dispatch), while `invokespecial` determines which method to call at compile time (constructors, private methods).
+
+### 2.7 Exception Handling
+
+| Instruction | Purpose |
+| --- | --- |
+| `athrow` | Throw an exception |
+| Exception Table | The mechanism behind try-catch |
+
+There are no `try`/`catch` keywords in bytecode — they are compiled into an **exception table**: a range of bytecode (start_pc ~ end_pc), an exception type (catch_type), and a handler jump address (handler_pc). When an exception occurs, the JVM searches the exception table and jumps to the handler if it matches.
+
+## 3. i++ vs ++i: The Bytecode Truth
+
+This is a common interview question — what's the difference between `i++` and `++i` inside an expression? Bytecode reveals the answer.
+
+### 3.1 As a Standalone Statement: Identical
+
+```java
+int i = 0;
+i++;     // standalone statement
+++i;     // standalone statement
+```
+
+`i++` bytecode:
+```
+iinc 1 1   # Increment local variable 1 by 1
+```
+
+`++i` bytecode:
+```
+iinc 1 1   # Exactly the same!
+```
+
+**When used standalone, `i++` and `++i` produce identical bytecode** — the `iinc` instruction directly adds 1 to the local variable, without needing to push/pop the stack. So performance is exactly the same too.
+
+### 3.2 Inside an Expression: Different
+
+```java
+int i = 0;
+int a = i++;   // postfix: a = 0, i = 1
+int b = ++i;   // prefix: i = 2, b = 2
+```
+
+`i++` bytecode (`a = i++`):
+```
+0: iconst_0
+1: istore_1           # i = 0
+2: iload_1            # Load i onto the stack (stack now holds 0)
+3: iinc 1 1           # Increment i (i becomes 1)
+6: istore_2           # Store the 0 from the stack to a (a = 0)
+```
+
+`++i` bytecode (`b = ++i`):
+```
+7: iinc 1 1           # Increment i (i becomes 2)
+10: iload_1           # Load i onto the stack (stack holds 2)
+11: istore_3          # Store the 2 from the stack to b (b = 2)
+```
+
+**The difference** — `i++` does `iload` (fetch value) first, then `iinc` (increment); `++i` does `iinc` (increment) first, then `iload` (fetch value). So `i++` gets the pre-increment value, while `++i` gets the post-increment value.
+
+At the bytecode level, `i++` does one extra "fetch first" — but after JIT optimization, standalone statements are identical. Inside expressions, the two have different semantics — it's not a performance difference.
+
+### 3.3 The Classic Trap: i++ in Loops
+
+```java
+for (int i = 0; i < 10; i++) {
+    // ...
+}
+```
+
+```java
+for (int i = 0; i < 10; ++i) {
+    // ...
+}
+```
+
+These two loops compile to **identical bytecode** — because `i++`/`++i` are standalone statements, using `iinc` to increment. **Using `i++` or `++i` in a loop has identical performance** (the same is true in C++; modern compilers all optimize this). The interview "standard answer that i++ is slower" is an outdated myth.
+
+## 4. Generic Erasure: The Bytecode Truth
+
+Java generics are **compile-time type checks**, erased at runtime. Bytecode makes this clear — `List＜String＞` and `List＜Integer＞` are the same `List` at runtime.
+
+```java
+List<String> strings = new ArrayList<>();
+List<Integer> ints = new ArrayList<>();
+strings.add("hello");
+ints.add(42);
+
+// Check class via reflection
+System.out.println(strings.getClass() == ints.getClass());   // true!
+```
+
+In the bytecode — `List＜String＞` compiles to `List`, the `String` type parameter is erased.
+
+### 4.1 The Signature Attribute
+
+The bytecode's **field table/method table** has a `Signature` attribute that **preserves** generic signature information (used for reflection). But the **bytecode of method bodies** is fully erased.
+
+```java
+public List<String> getList() { ... }
+```
+
+Bytecode:
+```
+public getList() :Ljava/util/List;   // Return type is List (erased)
+  Signature: ()Ljava/util/List<String>;   // Signature attribute preserves generics
+```
+
+The method's return type at the bytecode level is `List`, but the `Signature` attribute records `List＜String＞` — reflection's `Method.getGenericReturnType()` can read it.
+
+### 4.2 The Cost of Erasure
+
+- **Cannot `new T()`** — T is erased to Object, can't be instantiated.
+- **Cannot `new T[]`** — same reason.
+- **Cannot `instanceof T`** — no T information at runtime.
+- **Primitive types can't be generic parameters** — `List＜int＞` is invalid; must use `List＜Integer＞` (boxing).
+- **Overload conflicts** — `void m(List＜String＞)` and `void m(List＜Integer＞)` have the same erased signature, causing a compile error.
+
+```java
+// Bytecode view of the add method
+List<Integer> ints = new ArrayList<>();
+ints.add(42);
+
+// After compilation:
+// 9: aload_1
+// 10: bipush 42
+// 12: invokestatic Integer.valueOf   // Box int to Integer
+// 15: invokeinterface List.add       // Call List.add(Object)
+// 20: pop
+```
+
+`add(42)` compiles to `Integer.valueOf(42)` + `List.add(Object)` — after generic erasure, the parameter is Object, so primitive types must be boxed. This is the fundamental reason generics can't directly use primitive types.
+
+## 5. try-with-resources: How Auto-Close Is Implemented
+
+`try-with-resources` (Java 7+) automatically calls `close()` — what does the compiler do behind the scenes? Bytecode reveals it.
+
+```java
+try (FileInputStream fis = new FileInputStream("a.txt")) {
+    int b = fis.read();
+} catch (IOException e) {
+    e.printStackTrace();
+}
+```
+
+After compilation, it's equivalent to (pseudocode):
+
+```java
+FileInputStream fis = new FileInputStream("a.txt");
+Throwable primaryExc = null;
+try {
+    int b = fis.read();
+} catch (Throwable t) {
+    primaryExc = t;
+    throw t;
+} finally {
+    if (fis != null) {
+        if (primaryExc != null) {
+            try {
+                fis.close();
+            } catch (Throwable closeT) {
+                primaryExc.addSuppressed(closeT);   // Suppress the exception
+            }
+        } else {
+            fis.close();
+        }
+    }
+}
+```
+
+Key points at the bytecode level:
+
+1. **`addSuppressed`** — when both the `try` block exception and the `close` exception are thrown, the `close` exception is "suppressed" (attached as suppressed) to the primary exception. This is `Throwable.addSuppressed`, introduced in Java 7.
+2. **null check** — checks that the resource is not null before calling `close`.
+3. **Double-nested try** — outer catch + inner finally close.
+
+Actual bytecode (simplified):
+```
+0: new FileInputStream
+...
+8: invokespecial FileInputStream.<init>
+11: astore_2                  # Store fis
+12: aload_2
+13: invokevirtual read
+...
+// finally block
+   aload_2                     # Load fis
+   ifnull exit                 # null check
+   invokevirtual close         # Call close
+   ...
+   // Exception handling: addSuppressed
+```
+
+Understanding this mechanism explains why `try-with-resources` is better than manual `close` — it correctly handles the "two exceptions" case without losing any exception information.
+
+### 5.1 Java 9+ Improvement
+
+Starting in Java 9, `try-with-resources` supports external variables (as long as they're effectively final):
+
+```java
+FileInputStream fis = new FileInputStream("a.txt");
+try (fis) {   // Java 9+ allows this
+    int b = fis.read();
+}
+```
+
+The bytecode is equivalent.
+
+## 6. String Concatenation: The invokedynamic Evolution
+
+The `+` operator for string concatenation produces completely different bytecode in Java 8 vs Java 9+.
+
+### 6.1 Java 8: StringBuilder
+
+```java
+String s = "a" + "b" + c;
+```
+
+Java 8 compiles this to:
+```java
+String s = new StringBuilder().append("a").append("b").append(c).toString();
+```
+
+Bytecode:
+```
+new StringBuilder
+dup
+invokespecial StringBuilder.<init>
+ldc "a"
+invokevirtual StringBuilder.append
+ldc "b"
+invokevirtual StringBuilder.append
+iload_1   // c
+invokevirtual StringBuilder.append
+invokevirtual StringBuilder.toString
+astore_2
+```
+
+### 6.2 Java 9+: invokedynamic
+
+Java 9 switched to `invokedynamic` + `StringConcatFactory` — the JVM decides the optimal concatenation strategy at runtime (possibly `makeConcatWithConstants` directly, possibly precompiled bytecode):
+
+```
+ldc "a"
+ldc "b"
+iload_1
+invokedynamic makeConcatWithConstants   // Dynamic call
+astore_2
+```
+
+`invokedynamic` lets the JVM choose a strategy based on runtime conditions, performing better than Java 8's fixed StringBuilder — especially for concatenation outside loops, avoiding repeated StringBuilder creation.
+
+## 7. Hands-On: Demonstrating Bytecode
+
+The example below uses Java code to demonstrate `i++` vs `++i`, generic erasure, and try-with-resources behavior, paired with reflection to show the effects of type erasure.
+
+<CodeRunner code={`import java.util.*;
+import java.lang.reflect.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Bytecode Basics Demo ===\\n");
+        System.out.println("(This program demonstrates bytecode-level semantics, doesn't actually run javap)\\n");
+
+        // 1. i++ vs ++i
+        System.out.println("--- 1. i++ vs ++i ---");
+        int i = 0;
+        int a = i++;   // Postfix: use i (0) first, then increment
+        System.out.println("After i=0; a = i++: a=" + a + ", i=" + i);   // a=0, i=1
+
+        int j = 0;
+        int b = ++j;   // Prefix: increment first, then use j (1)
+        System.out.println("After j=0; b = ++j: b=" + b + ", j=" + j);   // b=1, j=1
+
+        // Standalone statement: bytecode is identical (both iinc)
+        int k = 0;
+        k++;
+        int m = 0;
+        ++m;
+        System.out.println("After k++: k=" + k + ", after ++m: m=" + m + " (bytecode identical)");
+
+        // Complex expression
+        int x = 5;
+        int y = x++ + x++;   // 5 + 6 = 11, x=7
+        System.out.println("After x=5; y = x++ + x++: y=" + y + ", x=" + x);
+
+        // 2. Generic erasure
+        System.out.println("\\n--- 2. Generic Erasure ---");
+        List<String> strings = new ArrayList<>();
+        List<Integer> ints = new ArrayList<>();
+        System.out.println("Class of List<String> and List<Integer>:");
+        System.out.println("  strings.getClass() = " + strings.getClass().getName());
+        System.out.println("  ints.getClass()    = " + ints.getClass().getName());
+        System.out.println("  Same Class? " + (strings.getClass() == ints.getClass()));
+
+        // At bytecode level: List<String> and List<Integer> are both List
+        // Signature attribute preserves generic info, but method bytecode is erased
+        Method addMethod = ArrayList.class.getMethod("add", Object.class);
+        System.out.println("  Parameter type of ArrayList.add: " + addMethod.getParameterTypes()[0]);
+        System.out.println("  (Erased to Object, no generics)");
+
+        // Read generic signature via reflection (Signature attribute)
+        Method getListMethod = GenericsDemo.class.getMethod("getList");
+        System.out.println("\\n  GenericsDemo.getList():");
+        System.out.println("    getReturnType()         = " + getListMethod.getReturnType());
+        System.out.println("    getGenericReturnType()  = " + getListMethod.getGenericReturnType());
+        System.out.println("    (The latter reads from Signature attribute, preserves generics)");
+
+        // 3. Exception suppression in try-with-resources
+        System.out.println("\\n--- 3. Exception Suppression in try-with-resources ---");
+        try (MyResource res = new MyResource()) {
+            res.work();
+        } catch (Exception e) {
+            System.out.println("Caught primary exception: " + e.getMessage());
+            System.out.println("  Suppressed exceptions:");
+            for (Throwable suppressed : e.getSuppressed()) {
+                System.out.println("    - " + suppressed.getClass().getSimpleName()
+                    + ": " + suppressed.getMessage());
+            }
+            System.out.println("  (try-with-resources auto addSuppressed, no exception lost)");
+        }
+
+        // 4. String concatenation bytecode (Java 9+ invokedynamic)
+        System.out.println("\\n--- 4. String Concatenation ---");
+        String name = "World";
+        int n = 42;
+        // Java 8: new StringBuilder().append("Hello ").append(name).append(" ").append(n).toString()
+        // Java 9+: invokedynamic makeConcatWithConstants
+        String msg = "Hello " + name + " " + n;
+        System.out.println("Concatenation result: " + msg);
+        System.out.println("  Java 8: StringBuilder concatenation");
+        System.out.println("  Java 9+: invokedynamic makeConcatWithConstants (more efficient)");
+
+        // 5. Method invocation instruction comparison
+        System.out.println("\\n--- 5. Method Invocation Instructions ---");
+        // invokevirtual: instance method (dynamic dispatch)
+        "hello".length();
+        // invokestatic: static method
+        Math.max(1, 2);
+        // invokespecial: constructor/private/super
+        new Object();
+        // invokeinterface: interface method
+        List<String> list = new ArrayList<>();
+        list.size();
+        // invokedynamic: lambda/string concatenation
+        Runnable r = () -> System.out.println("lambda");
+        System.out.println("  Instance method: invokevirtual (dynamic dispatch)");
+        System.out.println("  Static method: invokestatic");
+        System.out.println("  Constructor/private/super: invokespecial");
+        System.out.println("  Interface method: invokeinterface");
+        System.out.println("  lambda/concatenation: invokedynamic");
+
+        // 6. lambda's invokedynamic
+        System.out.println("\\n--- 6. Lambda and invokedynamic ---");
+        Runnable r1 = () -> System.out.println("lambda 1");
+        Runnable r2 = new Runnable() {
+            @Override public void run() {
+                System.out.println("anonymous class");
+            }
+        };
+        r1.run();
+        r2.run();
+        System.out.println("  Class of r1: " + r1.getClass().getName());
+        System.out.println("  Class of r2: " + r2.getClass().getName());
+        System.out.println("  (lambda doesn't create anonymous inner class, generated by invokedynamic at runtime)");
+
+        // 7. Autoboxing/unboxing
+        System.out.println("\\n--- 7. Autoboxing/Unboxing (bytecode level) ---");
+        Integer boxed = 42;   // Compiles to Integer.valueOf(42)
+        int unboxed = boxed;  // Compiles to Integer.intValue()
+        System.out.println("Integer boxed = 42 -> compiles to Integer.valueOf(42)");
+        System.out.println("int unboxed = boxed -> compiles to Integer.intValue()");
+
+        // 8. Enhanced for loop
+        System.out.println("\\n--- 8. Enhanced for Loop (compiles to iterator) ---");
+        List<String> items = List.of("a", "b", "c");
+        // for (String s : items) compiles to:
+        // Iterator it = items.iterator();
+        // while (it.hasNext()) { String s = it.next(); ... }
+        for (String s : items) {
+            System.out.print(s + " ");
+        }
+        System.out.println();
+        System.out.println("  (Enhanced for compiles to iterator() call, not sugar on top of sugar)");
+
+        // 9. switch bytecode
+        System.out.println("\\n--- 9. switch Bytecode ---");
+        // switch(int) compiles to tableswitch or lookupswitch
+        // switch(String) compiles to hashCode + equals
+        // switch(enum) compiles to ordinal() + tableswitch
+        String color = "red";
+        String colorDesc = switch (color) {
+            case "red" -> "Red";
+            case "green" -> "Green";
+            case "blue" -> "Blue";
+            default -> "Other";
+        };
+        System.out.println("switch(String) \"red\" -> " + colorDesc);
+        System.out.println("  (switch(String) compiles to hashCode comparison first, then equals confirmation)");
+
+        System.out.println("\\n=== Bytecode Learning Tips ===");
+        System.out.println("1. Use javap -c -p MyClass to view bytecode");
+        System.out.println("2. Use javap -v -p MyClass to view constant pool/Signature");
+        System.out.println("3. Bytecode is the foundation of Java's portability (.class is cross-platform)");
+        System.out.println("4. i++/++i standalone statements have identical bytecode (iinc), differ in expressions");
+        System.out.println("5. Generic erasure: no generics in bytecode, Signature attribute preserved");
+        System.out.println("6. try-with-resources compiles to finally + addSuppressed");
+        System.out.println("7. String concatenation in Java 9+ uses invokedynamic");
+        System.out.println("8. lambda uses invokedynamic generated at runtime, no anonymous class created");
+    }
+
+    static class GenericsDemo {
+        public List<String> getList() { return new ArrayList<>(); }
+    }
+
+    static class MyResource implements AutoCloseable {
+        MyResource() { System.out.println("  [Resource] Opened"); }
+        void work() throws Exception {
+            System.out.println("  [Resource] Working, throwing exception");
+            throw new Exception("Exception during work");
+        }
+        @Override
+        public void close() throws Exception {
+            System.out.println("  [Resource] Closing (close auto-called, also throws exception)");
+            throw new Exception("Exception during close");
+        }
+    }
+}`} />
+
+> **Key observations**:
+> - **After `a = i++`, a=0 and i=1; after `b = ++i`, b=1 and j=1** — prefix and postfix have different semantics.
+> - **`strings.getClass() == ints.getClass()` returns true** — after generic erasure, List＜String＞ and List＜Integer＞ are the same Class.
+> - **`getGenericReturnType()` returns `List＜String＞`** — the Signature attribute preserves generic info, readable via reflection.
+> - **`e.getSuppressed()` returns the close exception** — try-with-resources automatically "attaches" the close exception to the primary exception.
+> - **The lambda's class name contains `$$Lambda$`** — generated at runtime by invokedynamic, not an anonymous inner class.
+> - **switch(String) works** — compiled into a double check of hashCode + equals.
+
+## 8. How to Learn Bytecode
+
+### 8.1 Practical Tools
+
+- **`javap -c -p`** — simplest, view bytecode.
+- **`javap -v -p`** — view constant pool, Signature, line numbers.
+- **ASM Bytecode Outline** (Eclipse plugin) — shows bytecode in real time as you edit Java code.
+- **jclasslib Bytecode Viewer** (IntelliJ plugin) — GUI bytecode browser, more intuitive than javap.
+- **`class` file structure diagram** — JVM Specification Chapter 4 has the complete definition.
+
+### 8.2 Recommended Practice
+
+- Write simple methods (addition, loops, if-else) and view the bytecode with javap.
+- Compare the bytecode of `i++`/`++i`, `for`/`while`, `switch`/`if-else`.
+- Look at the bytecode of lambda, generics, autoboxing — understand syntactic sugar.
+- Examine the exception tables of try-with-resources and try-catch-finally.
+- Look at `monitorenter`/`monitorexit` instructions after `synchronized` compilation.
+
+### 8.3 Application Scenarios for Bytecode
+
+- **Performance optimization** — see which operations have bytecode-level costs (boxing, string concatenation).
+- **Framework development** — ASM/ByteBuddy manipulate bytecode for AOP, dynamic proxies.
+- **Reverse engineering** — inspect the implementation of closed-source libraries.
+- **Understanding syntactic sugar** — the truth behind lambda, generics, try-with-resources.
+- **Interview hard skills** — bytecode is a sign of "inner strength."
+
+## 9. Chapter Summary
+
+| Concept | Key Point |
+| --- | --- |
+| `javap -c -p` | Disassemble bytecode |
+| `javap -v -p` | View constant pool, Signature, line numbers |
+| Load/store instructions | `iload`/`istore`/`iconst`/`ldc` |
+| Arithmetic instructions | `iadd`/`isub`/`imul`/`idiv`/`irem` |
+| Control flow | `if_icmpeq`/`goto`/`tableswitch`/`iinc` |
+| Method invocation | `invokevirtual`/`invokestatic`/`invokespecial`/`invokeinterface`/`invokedynamic` |
+| `iinc` | Increment local variable; `i++`/`++i` produce identical bytecode as standalone statements |
+| Generic erasure | No generics in bytecode; Signature attribute preserves generic info |
+| try-with-resources | Compiles to finally + addSuppressed |
+| Exception table | The mechanism behind try-catch |
+| String concatenation | Java 8 StringBuilder, Java 9+ invokedynamic |
+| lambda | invokedynamic generated at runtime, no anonymous class created |
+
+**Memory mnemonics**:
+
+- **`javap -c -p` to view bytecode** — the basic command.
+- **`iinc` increments without going through the stack** — `i++` standalone and `++i` have identical bytecode.
+- **Generic erasure leaves only Signature** — no `＜String＞` in bytecode, only readable via reflection.
+- **try-with-resources = finally + addSuppressed** — no exception lost when two occur.
+- **5 invoke instructions** — virtual/static/special/interface/dynamic.
+- **lambda is invokedynamic** — generated at runtime, not an anonymous class.
+- **switch(String) = hashCode + equals** — how string switch is implemented.
+- **JVM is a stack-based machine** — all operations go through the operand stack.
+
+## Conclusion: Stage 9 Complete — From Syntax to Bytecode
+
+Stage 9 ends here. Looking back at these 5 chapters, we went from "using Java" to "understanding the JVM":
+
+- **Chapter 51 JVM Memory Model** — five runtime data areas, generational heap, object layout.
+- **Chapter 52 Garbage Collection** — reachability analysis, four reference types, GC algorithms, collector evolution.
+- **Chapter 53 Class Loading Mechanism** — five loading phases, parent delegation, breaking parent delegation.
+- **Chapter 54 Performance Monitoring and Tuning** — jstack/jmap/jfr/MAT, OOM and CPU spike troubleshooting.
+- **Chapter 55 Bytecode Basics (this chapter)** — javap, instruction set, the truth of i++/generics/try-with-resources.
+
+This body of knowledge forms the Java engineer's "inner strength" — writing code is foundational; understanding the JVM is advanced. When production issues arise, someone who knows the JVM can locate them in 5 minutes; someone who doesn't will still be groping in the dark after 5 hours — that's the gap.
+
+## The Grand Finale of the Entire Java Tutorial
+
+With this, **all 9 stages and 55 chapters of the Java tutorial are complete**. Looking back on this journey:
+
+- **Stage 1 (Chapters 1-5)** — Introductory syntax: variables, operators, control flow, arrays.
+- **Stage 2 (Chapters 6-12)** — Object-oriented: classes, encapsulation, inheritance, polymorphism, interfaces, inner classes, enums and annotations.
+- **Stage 3 (Chapters 13-17)** — Core libraries: String, wrapper classes, date/time, exceptions, generics.
+- **Stage 4 (Chapters 18-24)** — Collections framework: List/Set/Map/Queue, utilities, Stream.
+- **Stage 5 (Chapters 25-27)** — Functional programming: Lambda, functional interfaces, method references.
+- **Stage 6 (Chapters 28-33)** — IO and NIO: byte streams, character streams, serialization, NIO, Files.
+- **Stage 7 (Chapters 34-45)** — Concurrent programming: threads, synchronization, JMM, locks, CAS, concurrent collections, thread pools, virtual threads.
+- **Stage 8 (Chapters 46-50)** — Modern Java: module system, Records, Sealed classes, Pattern Matching, HttpClient, etc.
+- **Stage 9 (Chapters 51-55)** — JVM Deep Dive: memory, GC, class loading, tuning, bytecode.
+
+From a single line of `System.out.println("Hello")` to understanding `javap -v` bytecode, from `Thread.sleep` to ZGC's colored pointers — this has been a long journey, and an essential path of growth for every Java engineer.
+
+After these 55 chapters, you now have the ability to:
+
+- **Write** Java — from syntax to concurrency, from IO to modern features.
+- **Tune** Java — use tools to monitor and locate OOM and CPU issues.
+- **Understand** Java — comprehend JVM memory, GC, class loading, and bytecode.
+
+Where to go next? A few directions:
+
+- **Frameworks** — Spring, Spring Boot, MyBatis, to use Java at production scale.
+- **Architecture** — distributed systems, microservices, message queues, caching.
+- **Databases** — MySQL, Redis, Elasticsearch; performance optimization, indexing, transactions.
+- **Middleware** — Kafka, Netty, Zookeeper.
+- **Advanced JVM** — JIT compilation, memory barriers, GC tuning in practice.
+- **Kotlin/Scala** — modern languages in the JVM ecosystem.
+
+The Java world is vast, and these 55 chapters have merely opened the door. I hope this journey has taken you from "can write Java" to "understands Java," from "uses tools" to "builds tools." Technology changes, but the underlying principles don't — memory, concurrency, the JVM — these are the eternal inner strength of a Java engineer.
+
+May you go ever farther and ever steadier on this path. The Java journey never ends.

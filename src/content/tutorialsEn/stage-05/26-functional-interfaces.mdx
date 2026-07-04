@@ -1,0 +1,505 @@
+---
+title: "Built-in Functional Interfaces"
+chapter: 26
+stage: "Stage 5"
+stageName: "Functional Programming"
+order: 2
+description: "Systematically master Java's built-in functional interfaces: Function, Predicate, Consumer, Supplier and their composition methods, the Bi family, and primitive type specializations"
+pubDate: 2026-07-03
+tags: ["Java", "函数式接口", "Function", "Predicate", "Consumer", "Supplier", "BiFunction", "UnaryOperator"]
+---
+
+# Built-in Functional Interfaces
+
+In the previous chapter, we said a Lambda needs a "functional interface" as its target type. If you had to define your own `StringProcessor`, `IntChecker`, and similar interfaces every time, that would be exhausting. Java 8 predefines 43 functional interfaces in the `java.util.function` package, covering the vast majority of common scenarios — they are the "standard stage" for Lambdas and the "lingua franca" of the Stream API.
+
+In this chapter, we'll categorize and clarify these interfaces. The core is really just four heavyweights: `Function`, `Predicate`, `Consumer`, and `Supplier` — everything else is a "variant" of these.
+
+## 1. The Four Core Interfaces
+
+### 1.1 Function＜T, R＞: The Transformer
+
+`Function<T, R>` takes a parameter T and returns a result R — it's a "transformer."
+
+```java
+@FunctionalInterface
+public interface Function<T, R> {
+    R apply(T t);
+
+    default <V> Function<V, R> compose(Function<? super V, ? extends T> before) { ... }
+    default <V> Function<T, V> andThen(Function<? super R, ? extends V> after) { ... }
+    static <T> Function<T, T> identity() { return t -> t; }
+}
+```
+
+The core method `apply`: takes T, returns R.
+
+```java
+Function<String, Integer> length = s -> s.length();
+System.out.println(length.apply("hello"));   // 5
+
+Function<Integer, Integer> square = x -> x * x;
+System.out.println(square.apply(5));         // 25
+```
+
+#### compose and andThen: Function Composition
+
+`Function` provides two composition methods, letting you assemble functions like building blocks:
+
+- `g.compose(f)`: execute f first, then g. Equivalent to `g(f(x))`.
+- `f.andThen(g)`: execute f first, then g. Equivalent to `g(f(x))`.
+
+Both produce the same result — they just read in opposite directions: `compose` reads right-to-left, `andThen` reads left-to-right.
+
+```java
+Function<Integer, Integer> plusOne = x -> x + 1;
+Function<Integer, Integer> square = x -> x * x;
+
+// square of (x+1)
+Function<Integer, Integer> f1 = square.compose(plusOne);   // +1 first, then square
+System.out.println(f1.apply(3));   // 16
+
+// (square of x) +1
+Function<Integer, Integer> f2 = square.andThen(plusOne);   // square first, then +1
+System.out.println(f2.apply(3));   // 10
+```
+
+`andThen` is especially useful in Stream's `map` chaining — combining multiple transformations into a single Function to avoid multiple map calls.
+
+#### identity: The Identity Function
+
+`Function.identity()` returns `t -＞ t` — whatever goes in, comes out. Useful in scenarios like `Collectors.toMap`:
+
+```java
+Map<String, String> map = list.stream()
+    .collect(Collectors.toMap(Function.identity(), String::toUpperCase));
+// key is the element itself, value is its uppercase form
+```
+
+### 1.2 Predicate＜T＞: The Tester
+
+`Predicate＜T＞` takes a parameter T and returns a boolean — it's a "tester."
+
+```java
+@FunctionalInterface
+public interface Predicate<T> {
+    boolean test(T t);
+
+    default Predicate<T> and(Predicate<? super T> other) { ... }
+    default Predicate<T> or(Predicate<? super T> other) { ... }
+    default Predicate<T> negate() { ... }
+    static <T> Predicate<T> isEqual(Object targetRef) { ... }
+    // Java 11+
+    static <T> Predicate<T> not(Predicate<? super T> target) { ... }
+}
+```
+
+The core method `test`: takes T, returns boolean.
+
+```java
+Predicate<Integer> isPositive = n -> n > 0;
+System.out.println(isPositive.test(5));    // true
+System.out.println(isPositive.test(-1));   // false
+
+Predicate<String> isEmpty = String::isEmpty;
+System.out.println(isEmpty.test(""));      // true
+```
+
+#### and / or / negate: Logical Composition
+
+`Predicate`'s power lies in its composability:
+
+```java
+Predicate<Integer> isPositive = n -> n > 0;
+Predicate<Integer> isEven = n -> n % 2 == 0;
+Predicate<Integer> isPositiveEven = isPositive.and(isEven);   // positive AND even
+Predicate<Integer> isPositiveOrEven = isPositive.or(isEven);  // positive OR even
+Predicate<Integer> isNegative = isPositive.negate();          // not positive (negative or zero)
+
+System.out.println(isPositiveEven.test(4));   // true
+System.out.println(isPositiveEven.test(-2));  // false
+System.out.println(isPositiveEven.test(3));   // false
+```
+
+This is like a "dynamic version" of boolean expressions — you can pass and compose test logic as parameters.
+
+#### isEqual and not
+
+```java
+Predicate<String> isHello = Predicate.isEqual("hello");
+System.out.println(isHello.test("hello"));   // true
+
+// Java 11+ not
+Predicate<String> notEmpty = Predicate.not(String::isEmpty);
+System.out.println(notEmpty.test("hi"));   // true
+```
+
+`Predicate.not` was added in Java 11 — previously you had to write `s -＞ !s.isEmpty()`, now you can write `Predicate.not(String::isEmpty)`, which is more elegant when combined with method references.
+
+### 1.3 Consumer＜T＞: The Consumer
+
+`Consumer＜T＞` takes a parameter T and returns nothing — it "consumes" the parameter.
+
+```java
+@FunctionalInterface
+public interface Consumer<T> {
+    void accept(T t);
+    default Consumer<T> andThen(Consumer<? super T> after) { ... }
+}
+```
+
+The core method `accept`: takes T, returns nothing.
+
+```java
+Consumer<String> printer = s -> System.out.println("received: " + s);
+printer.accept("data");   // output: received: data
+```
+
+#### andThen: Chained Consumption
+
+`Consumer.andThen` chains two Consumers together — execute the current one first, then the argument:
+
+```java
+Consumer<String> step1 = s -> System.out.println("step 1: " + s);
+Consumer<String> step2 = s -> System.out.println("step 2: " + s);
+Consumer<String> pipeline = step1.andThen(step2);
+
+pipeline.accept("data");
+// output:
+// step 1: data
+// step 2: data
+```
+
+`Consumer` appears frequently in Stream's `forEach` and `peek`, as well as in various callback scenarios.
+
+### 1.4 Supplier＜T＞: The Supplier
+
+`Supplier＜T＞` takes no parameters and returns T — it "supplies" a value.
+
+```java
+@FunctionalInterface
+public interface Supplier<T> {
+    T get();
+}
+```
+
+The core method `get`: no parameters, returns T.
+
+```java
+Supplier<String> helloSupplier = () -> "Hello!";
+System.out.println(helloSupplier.get());   // Hello!
+
+Supplier<Double> random = Math::random;
+System.out.println(random.get());          // 0.xxx
+```
+
+`Supplier`'s hallmark: **lazy evaluation**. It doesn't produce a value immediately — it only computes when `get()` is called. This makes it useful for lazy evaluation, factory patterns, and deferred logging parameters.
+
+```java
+// Deferred logging parameter: only computed when needed
+logger.debug("user: " + user.toString());   // ❌ toString is computed even if logging is disabled
+
+logger.debug(() -> "user: " + user.toString());   // ✅ only called when actually logging
+```
+
+## 2. The Bi Family: Two-Parameter Versions
+
+The four core interfaces are all single-parameter. When you need two parameters, use the Bi family:
+
+| Interface | Signature | Purpose |
+| --- | --- | --- |
+| `BiFunction＜T, U, R＞` | `(T, U) -＞ R` | Two-parameter transform |
+| `BiPredicate＜T, U＞` | `(T, U) -＞ boolean` | Two-parameter test |
+| `BiConsumer＜T, U＞` | `(T, U) -＞ void` | Two-parameter consume |
+
+```java
+BiFunction<String, Integer, String> repeat = (s, n) -> s.repeat(n);
+System.out.println(repeat.apply("ab", 3));   // ababab
+
+BiPredicate<String, String> contains = String::contains;
+System.out.println(contains.test("hello world", "world"));   // true
+
+BiConsumer<String, Integer> printKV = (k, v) -> System.out.println(k + "=" + v);
+printKV.accept("age", 25);   // age=25
+```
+
+Note: **There is no `BiSupplier`** — Supplier takes "no parameters and returns," so there's no "two-parameter" version.
+
+`BiFunction` also has a specialized version `BinaryOperator＜T＞`, detailed below.
+
+## 3. UnaryOperator and BinaryOperator
+
+### 3.1 UnaryOperator＜T＞: Unary Operation
+
+`UnaryOperator＜T＞` extends `Function＜T, T＞` — the parameter and return type are the same.
+
+```java
+@FunctionalInterface
+public interface UnaryOperator<T> extends Function<T, T> {
+    static <T> UnaryOperator<T> identity() { return t -> t; }
+}
+```
+
+```java
+UnaryOperator<String> trim = String::strip;
+UnaryOperator<Integer> negate = x -> -x;
+
+System.out.println(trim.apply("  hi  "));   // "hi"
+System.out.println(negate.apply(5));        // -5
+```
+
+It's suited for "same-type in, same-type out" transformations — e.g., when Stream's `map` keeps a `Stream＜String＞` as `Stream＜String＞`, using `UnaryOperator` is more semantic than `Function`.
+
+### 3.2 BinaryOperator＜T＞: Binary Operation
+
+`BinaryOperator＜T＞` extends `BiFunction＜T, T, T＞` — two parameters of the same type, returning the same type.
+
+```java
+@FunctionalInterface
+public interface BinaryOperator<T> extends BiFunction<T, T, T> {
+    static <T> BinaryOperator<T> minBy(Comparator<? super T> comparator) { ... }
+    static <T> BinaryOperator<T> maxBy(Comparator<? super T> comparator) { ... }
+}
+```
+
+```java
+BinaryOperator<Integer> add = (a, b) -> a + b;
+BinaryOperator<Integer> max = BinaryOperator.maxBy(Integer::compare);
+
+System.out.println(add.apply(3, 5));   // 8
+System.out.println(max.apply(3, 5));   // 5
+```
+
+`BinaryOperator` is central to `Stream.reduce` — `reduce` merges stream elements pairwise, which is exactly a binary operation.
+
+```java
+int sum = Stream.of(1, 2, 3, 4).reduce(0, (a, b) -> a + b);
+// can also use a method reference
+int sum2 = Stream.of(1, 2, 3, 4).reduce(0, Integer::sum);
+```
+
+## 4. Primitive Type Specializations
+
+Generic `Function＜T, R＞` can't use primitive types — `Function＜int, int＞` doesn't work; you'd have to use `Function＜Integer, Integer＞`, which involves boxing and unboxing overhead. Java provides specialized versions for primitive types:
+
+### 4.1 IntFunction / LongFunction / DoubleFunction
+
+Parameter is a primitive type, returns an object:
+
+```java
+IntFunction<String> intToStr = n -> "number: " + n;
+System.out.println(intToStr.apply(42));   // number: 42
+```
+
+### 4.2 ToIntFunction / ToLongFunction / ToDoubleFunction
+
+Parameter is an object, returns a primitive type:
+
+```java
+ToIntFunction<String> length = String::length;
+System.out.println(length.applyAsInt("hello"));   // 5
+```
+
+### 4.3 IntToLongFunction / IntToDoubleFunction, etc.
+
+Conversions between primitive types:
+
+```java
+IntToDoubleFunction toDouble = n -> n * 1.5;
+System.out.println(toDouble.applyAsDouble(4));   // 6.0
+```
+
+### 4.4 IntPredicate / LongPredicate / DoublePredicate
+
+Predicates for primitive types:
+
+```java
+IntPredicate isPrime = n -> {
+    if (n < 2) return false;
+    for (int i = 2; i * i <= n; i++) if (n % i == 0) return false;
+    return true;
+};
+System.out.println(isPrime.test(7));   // true
+```
+
+### 4.5 IntConsumer / IntSupplier, etc.
+
+Consuming and supplying primitive types:
+
+```java
+IntSupplier dice = () -> (int)(Math.random() * 6) + 1;
+System.out.println("dice roll: " + dice.getAsInt());
+```
+
+Note: The primitive specialization methods are named `applyAsInt`, `getAsInt`, `test` (IntPredicate still uses `test`) — they don't use `apply` or `get`.
+
+### 4.6 Why So Many Specializations
+
+43 interfaces looks intimidating, but they're all combinations of the four core interfaces:
+
+- 4 primitive types (int/long/double/boolean)
+- × multiple roles (Function/Predicate/Consumer/Supplier)
+- × parameter directions (object→primitive, primitive→object, primitive→primitive)
+
+This design avoids boxing overhead and makes numerical computation more efficient. You don't need to memorize them all — just look them up in the docs when needed.
+
+## 5. Hands-On: Composing Business Logic with Functional Interfaces
+
+<CodeRunner code={`import java.util.*;
+import java.util.function.*;
+import java.util.stream.IntStream;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. Function 基础
+        System.out.println("--- Function ---");
+        Function<String, Integer> length = String::length;
+        Function<Integer, String> describe = n -> "长度" + n;
+        Function<String, String> composed = length.andThen(describe);
+        System.out.println(composed.apply("hello"));   // 长度5
+
+        Function<String, String> composed2 = describe.compose(length);
+        System.out.println(composed2.apply("world"));   // 长度5
+
+        // identity
+        Function<String, String> id = Function.identity();
+        System.out.println(id.apply("原样返回"));
+
+        // 2. Predicate 组合
+        System.out.println("\\n--- Predicate 组合 ---");
+        Predicate<Integer> isPositive = n -> n > 0;
+        Predicate<Integer> isEven = n -> n % 2 == 0;
+        Predicate<Integer> isPositiveEven = isPositive.and(isEven);
+        Predicate<Integer> isPositiveOrEven = isPositive.or(isEven);
+        Predicate<Integer> isOdd = isEven.negate();
+
+        System.out.println("4 正且偶? " + isPositiveEven.test(4));
+        System.out.println("-2 正或偶? " + isPositiveOrEven.test(-2));
+        System.out.println("3 是奇数? " + isOdd.test(3));
+
+        // 3. Consumer 链式
+        System.out.println("\\n--- Consumer 链式 ---");
+        Consumer<String> log = s -> System.out.println("[LOG] " + s);
+        Consumer<String> audit = s -> System.out.println("[AUDIT] " + s);
+        Consumer<String> notify = s -> System.out.println("[NOTIFY] " + s);
+        Consumer<String> pipeline = log.andThen(audit).andThen(notify);
+        pipeline.accept("用户登录");
+
+        // 4. Supplier 延迟计算
+        System.out.println("\\n--- Supplier 延迟 ---");
+        Supplier<String> lazyValue = () -> {
+            try { Thread.sleep(100); } catch (InterruptedException e) {}
+            return "耗时计算的结果";
+        };
+        System.out.println("Supplier 创建后未执行");
+        String result = lazyValue.get();
+        System.out.println(result);
+
+        // 5. BiFunction
+        System.out.println("\\n--- BiFunction ---");
+        BiFunction<String, Integer, String> repeat = (s, n) -> s.repeat(n);
+        System.out.println(repeat.apply("ab", 3));
+
+        // 6. BinaryOperator
+        System.out.println("\\n--- BinaryOperator ---");
+        BinaryOperator<Integer> max = BinaryOperator.maxBy(Integer::compare);
+        System.out.println("max(3, 7) = " + max.apply(3, 7));
+        BinaryOperator<Integer> min = BinaryOperator.minBy(Integer::compare);
+        System.out.println("min(3, 7) = " + min.apply(3, 7));
+
+        // 7. 原始类型特化
+        System.out.println("\\n--- 原始类型特化 ---");
+        IntPredicate isPrime = n -> {
+            if (n < 2) return false;
+            for (int i = 2; i * i <= n; i++) if (n % i == 0) return false;
+            return true;
+        };
+        System.out.print("1-20 素数: ");
+        IntStream.rangeClosed(1, 20).filter(isPrime).forEach(n -> System.out.print(n + " "));
+        System.out.println();
+
+        IntSupplier dice = () -> (int)(Math.random() * 6) + 1;
+        System.out.print("掷骰子 5 次: ");
+        for (int i = 0; i < 5; i++) System.out.print(dice.getAsInt() + " ");
+        System.out.println();
+
+        // 8. 综合实战：动态过滤
+        System.out.println("\\n--- 综合实战：动态过滤规则 ---");
+        List<Integer> nums = List.of(-3, -1, 0, 2, 4, 6, 7, 11, 15);
+        System.out.println("原始: " + nums);
+        System.out.println("正数: " + filter(nums, n -> n > 0));
+        System.out.println("正偶数: " + filter(nums, isPositive.and(isEven)));
+        System.out.println("非素数的正数: " + filter(nums, isPrime.negate().and(n -> n > 0)));
+
+        // 9. Function 链式处理
+        System.out.println("\\n--- 综合实战：数据处理管道 ---");
+        Function<String, String> cleanPipeline =
+            ((Function<String, String>)String::strip)
+            .andThen(s -> s.toLowerCase())
+            .andThen(s -> s.replace(" ", "_"));
+        System.out.println(cleanPipeline.apply("  Hello World  "));   // hello_world
+    }
+
+    static <T> List<T> filter(List<T> list, Predicate<T> p) {
+        List<T> result = new ArrayList<>();
+        for (T t : list) if (p.test(t)) result.add(t);
+        return result;
+    }
+}`} />
+
+## 6. When to Write Custom Functional Interfaces
+
+Although `java.util.function` covers 90% of scenarios, sometimes a custom interface is more appropriate:
+
+1. **Clearer semantics**: `Comparator＜T＞` reads better than `BiFunction＜T, T, Integer＞`.
+2. **Need to throw checked exceptions**: Standard interface methods don't declare checked exceptions; custom interfaces can.
+3. **Need multiple default methods**: Custom interfaces can come with rich composition methods.
+
+```java
+// Custom: throwing checked exceptions
+@FunctionalInterface
+interface ThrowingFunction<T, R, E extends Exception> {
+    R apply(T t) throws E;
+}
+
+// Custom: semantic naming
+@FunctionalInterface
+interface PriceCalculator {
+    double calculate(Order order);
+    // more business-meaningful than ToDoubleFunction<Order>
+}
+```
+
+## 7. Chapter Summary
+
+| Interface | Signature | Purpose |
+| --- | --- | --- |
+| `Function＜T, R＞` | `T -＞ R` | Transform |
+| `Predicate＜T＞` | `T -＞ boolean` | Test |
+| `Consumer＜T＞` | `T -＞ void` | Consume |
+| `Supplier＜T＞` | `() -＞ T` | Supply (lazy) |
+| `BiFunction＜T, U, R＞` | `(T, U) -＞ R` | Two-parameter transform |
+| `BiPredicate＜T, U＞` | `(T, U) -＞ boolean` | Two-parameter test |
+| `BiConsumer＜T, U＞` | `(T, U) -＞ void` | Two-parameter consume |
+| `UnaryOperator＜T＞` | `T -＞ T` | Same-type transform |
+| `BinaryOperator＜T＞` | `(T, T) -＞ T` | Same-type binary operation |
+| `IntFunction＜R＞` | `int -＞ R` | int to R |
+| `ToIntFunction＜T＞` | `T -＞ int` | T to int |
+| `IntPredicate` | `int -＞ boolean` | int test |
+
+**Composition methods**:
+
+| Interface | Composition Methods |
+| --- | --- |
+| `Function` | `compose` (before), `andThen` (after), `identity` |
+| `Predicate` | `and`, `or`, `negate`, `isEqual`, `not` (Java 11+) |
+| `Consumer` | `andThen` |
+| `BinaryOperator` | `minBy`, `maxBy` |
+
+## Conclusion: The Building-Block World of Functional Interfaces
+
+The `java.util.function` package is Java's "standard parts library" for functional programming — 43 interfaces may seem numerous, but the core is just four heavyweights: `Function` transforms, `Predicate` tests, `Consumer` consumes, `Supplier` supplies. The rest are their "two-parameter versions," "same-type versions," and "primitive-type versions."
+
+Once you master the four core interfaces' composition methods (`andThen`, `compose`, `and`, `or`, `negate`), you can combine functions like building blocks — an `isPositive.and(isEven)` is far cleaner than an anonymous class. This is the power of functional programming: **using simple building blocks to construct complex logic**.
+
+In the next chapter, we'll look at Lambda's "minimalist form" — method references. They let `s -＞ s.length()` be further shortened to `String::length`, reducing code noise to the bare minimum.

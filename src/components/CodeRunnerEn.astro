@@ -1,0 +1,5 @@
+---
+import CodeRunner from './CodeRunner.astro';
+const { code = '', showOutput = true } = Astro.props;
+---
+<CodeRunner code={code} showOutput={showOutput} lang="en" />

@@ -1,0 +1,565 @@
+---
+title: "微服务"
+chapter: 77
+stage: "第十四阶段"
+stageName: "高级专题与分布式"
+order: 5
+description: "掌握单体到微服务的演进、服务注册发现（Nacos）、API 网关（Spring Cloud Gateway）、声明式调用（OpenFeign）、熔断限流（Sentinel）、配置中心、分布式链路追踪"
+pubDate: 2026-07-03
+tags: ["Java", "微服务", "Spring Cloud", "Nacos", "Gateway", "Sentinel", "OpenFeign", "服务注册"]
+---
+
+# 微服务
+
+设想一栋写字楼。如果整栋楼只有一个超大的开放办公区——所有人挤在一起，空调一坏全楼停工，装修一个工位全楼得搬走。这就是**单体应用**——所有功能打包在一个程序里，一改全改，一挂全挂。
+
+聪明的建筑设计师会把大楼拆成一个个独立办公室——每间自己装修、自己空调、自己门禁。这就是**微服务（Microservices）**——把大应用拆成多个小服务，各自部署、各自演进、各自扛压。
+
+这一章我们看微服务怎么拆，以及 Spring Cloud 全家桶（Nacos/Gateway/Sentinel/OpenFeign）如何撑起这套架构。
+
+## 一、从单体到微服务
+
+### 1.1 单体应用的痛
+
+单体应用（Monolith）——所有代码打成一个 JAR/WAR，跑在一个进程里。前期简单，后期灾难：
+
+- **改一处全量发布**——改一个按钮颜色也得重新部署整个系统。
+- **技术栈绑定**——Java 项目想引入 Python 写的 ML 模块？难。
+- **扩展浪费**——只是订单模块压力大，却得整体扩容。
+- **故障蔓延**——一个内存泄漏拖垮整个系统。
+
+### 1.2 微服务的解
+
+微服务把系统按业务边界拆成多个独立服务——订单服务、用户服务、商品服务、支付服务。每个服务：
+- **独立部署**——各自的进程、各自的服务器。
+- **独立数据库**——服务间不共享数据库，通过 API 通信。
+- **独立技术栈**——订单用 Java，推荐用 Go，都行。
+- **独立扩展**——订单服务压力大就只扩订单。
+
+```
+客户端 → API 网关
+            ↓
+   ┌────────┼────────┐
+   ↓        ↓        ↓
+用户服务  订单服务  商品服务
+   ↓        ↓        ↓
+ 用户DB   订单DB   商品DB
+```
+
+### 1.3 微服务的代价
+
+微服务不是银弹——它换来灵活，付出复杂：
+- **网络开销**——服务间调用走网络，比方法调用慢。
+- **分布式事务**——跨服务的事务难搞（Saga / TCC / 本地消息表）。
+- **运维成本**——几十个服务，部署、监控、日志都复杂。
+- **服务依赖**——服务 A 调 B，B 挂了 A 怎么办（熔断降级）。
+
+## 二、服务注册与发现：Nacos
+
+微服务之间要互相调用，怎么知道对方在哪？最朴素的办法——配置文件写死 IP。但服务会扩容、迁移、重启，IP 经常变。
+
+**服务注册发现**——服务启动时把自己注册到"注册中心"，调用方从注册中心查目标服务的地址。
+
+### 2.1 Nacos 简介
+
+**Nacos**（Naming and Configuration Service）是阿里开源的注册中心 + 配置中心。服务启动时往 Nacos 注册自己的 IP 和端口，调用方从 Nacos 拉取服务列表，本地负载均衡后调用。
+
+```
+订单服务启动 → 注册到 Nacos (order-service: 192.168.1.10:8080)
+用户服务要调订单 → 从 Nacos 查 order-service 列表 → 选一个调用
+```
+
+### 2.2 Spring Boot 整合
+
+```yaml
+# application.yml
+spring:
+  application:
+    name: order-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: localhost:8848
+```
+
+```java
+@SpringBootApplication
+@EnableDiscoveryClient   // 开启服务发现
+public class OrderApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(OrderApplication.class, args);
+    }
+}
+```
+
+服务注册后，Nacos 控制台能看到 `order-service` 实例列表。健康检查由 Nacos 定期 ping，挂掉的实例会被剔除。
+
+## 三、API 网关：Spring Cloud Gateway
+
+微服务有几十个，客户端不可能记每个服务的地址。**API 网关**是统一入口——所有请求先到网关，网关按规则路由到后端服务。
+
+网关还能做：
+- **路由转发**——按路径转发到不同服务。
+- **鉴权**——统一校验 token，无效直接拒绝。
+- **限流**——防恶意流量。
+- **日志监控**——统一记录请求。
+
+### 3.1 Spring Cloud Gateway 路由
+
+```yaml
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: order-service
+          uri: lb://order-service          # lb 表示负载均衡
+          predicates:
+            - Path=/api/orders/**          # 路径匹配
+        - id: user-service
+          uri: lb://user-service
+          predicates:
+            - Path=/api/users/**
+          filters:
+            - name: RequestRateLimiter     # 限流
+              args:
+                redis-rate-limiter.replenishRate: 10
+                redis-rate-limiter.burstCapacity: 20
+```
+
+请求 `/api/orders/123` 会路由到 `order-service` 的某个实例，由网关用 Ribbon/LoadBalancer 选一个。限流配置保证每秒最多 10 个请求。
+
+### 3.2 自定义过滤器
+
+```java
+@Component
+public class AuthFilter implements GlobalFilter {
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        String token = exchange.getRequest().getHeaders().getFirst("Authorization");
+        if (token == null || !validate(token)) {
+            exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+            return exchange.getResponse().setComplete();
+        }
+        return chain.filter(exchange);
+    }
+}
+```
+
+## 四、声明式调用：OpenFeign
+
+服务间调用用 `RestTemplate` 太啰嗦——拼 URL、解析响应、处理异常一堆样板代码。**OpenFeign** 用接口 + 注解的方式，像调本地方法一样调远程服务。
+
+```java
+// 声明 Feign 客户端
+@FeignClient(name = "user-service")
+public interface UserClient {
+    @GetMapping("/users/{id}")
+    User getUser(@PathVariable Long id);
+
+    @PostMapping("/users")
+    User createUser(@RequestBody User user);
+}
+
+// 使用
+@Service
+public class OrderService {
+    @Autowired
+    private UserClient userClient;
+
+    public Order createOrder(Long userId) {
+        User user = userClient.getUser(userId);   // 像调本地方法
+        // ...
+    }
+}
+```
+
+OpenFeign 内部用动态代理生成 HTTP 调用，结合 Nacos 做负载均衡，开发者只写接口。
+
+## 五、熔断限流：Sentinel
+
+微服务调用链一长，一个服务挂了可能引发**雪崩**——A 调 B，B 挂了，A 等待超时也挂了，C 调 A 也挂了……整条链塌方。
+
+**熔断（Circuit Breaker）**——下游故障超过阈值，上游直接"断开"，不再调用，给下游恢复时间。**限流（Rate Limiting）**——控制请求速率，超过就拒绝。
+
+### 5.1 Sentinel 简介
+
+**Sentinel** 是阿里开源的流量治理组件——熔断、限流、系统负载保护、热点参数限流。它用"插槽链"处理请求，规则可动态推送。
+
+### 5.2 三种熔断策略
+
+| 策略 | 触发条件 |
+| --- | --- |
+| 慢调用比例 | 慢调用占比超阈值 |
+| 异常比例 | 异常比例超阈值 |
+| 异常数 | 异常次数超阈值 |
+
+熔断器三种状态：
+- **CLOSED**——正常放行。
+- **OPEN**——熔断，请求直接 fail fast。
+- **HALF_OPEN**——半开，放一个请求试探，成功就回 CLOSED，失败继续 OPEN。
+
+### 5.3 代码示例
+
+```java
+@SentinelResource(value = "createOrder",
+                  blockHandler = "createOrderBlock",
+                  fallback = "createOrderFallback")
+public Order createOrder(OrderRequest req) {
+    return orderClient.create(req);   // 可能抛异常
+}
+
+// 限流/熔断时调用
+public Order createOrderBlock(OrderRequest req, BlockException ex) {
+    return new Order("降级订单: 系统繁忙");
+}
+
+// 业务异常时调用
+public Order createOrderFallback(OrderRequest req, Throwable t) {
+    return new Order("兜底订单: " + t.getMessage());
+}
+```
+
+## 六、配置中心：Nacos Config
+
+微服务有几十个，每个都有自己的配置（数据库、Redis、MQ 地址）。改一次配置要重新部署？太累。
+
+**配置中心**——所有配置集中存在 Nacos，服务启动时拉取，配置变更时动态推送，不用重启。
+
+```yaml
+# bootstrap.yml
+spring:
+  application:
+    name: order-service
+  cloud:
+    nacos:
+      config:
+        server-addr: localhost:8848
+        file-extension: yaml
+```
+
+```java
+@RefreshScope   // 配置变更时自动刷新
+@RestController
+public class OrderController {
+    @Value("${order.timeout:3000}")
+    private int timeout;   // 在 Nacos 改了, 这里自动更新
+}
+```
+
+## 七、分布式链路追踪
+
+微服务一个请求可能经过 5 个服务，出问题时怎么定位是哪个服务慢？**分布式链路追踪**给每个请求一个唯一 traceId，沿途每个服务都带上，最后汇总到可视化面板。
+
+主流方案——**Spring Cloud Sleuth + Zipkin**（或 SkyWalking）。每个请求生成 traceId，每个服务段生成 spanId，上报到 Zipkin，UI 上能看到调用链和耗时。
+
+```
+traceId: abc123
+  span1: gateway (10ms)
+    span2: order-service (50ms)
+      span3: user-service (30ms)
+      span4: product-service (15ms)
+```
+
+## 八、微服务 vs 单体：怎么选
+
+| 维度 | 单体 | 微服务 |
+| --- | --- | --- |
+| 团队规模 | 小团队（＜ 10 人） | 大团队（多团队协作） |
+| 部署频率 | 低 | 高（各服务独立发布） |
+| 扩展需求 | 整体扩展 | 按服务扩展 |
+| 技术栈 | 统一 | 可多样 |
+| 复杂度 | 低 | 高（运维、治理） |
+
+**经验法则**——能单体就单体，真扛不住再拆。过早微服务化是把简单问题复杂化。Martin Fowler 提倡"**单体优先**"——先单体跑通业务，遇到瓶颈再拆。
+
+## 九、实战：用 Java SE 模拟微服务
+
+Piston 在线环境跑不了 Nacos/Gateway/Sentinel。我们用 Java SE 模拟微服务核心机制——服务注册发现、网关路由、负载均衡、熔断器三态切换、限流。
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// 模拟微服务架构: 注册中心 + 网关 + 熔断器 + 限流
+class ServiceRegistry {
+    // 服务名 -> 实例列表
+    private final Map<String, List<ServiceInstance>> registry = new ConcurrentHashMap<>();
+
+    static class ServiceInstance {
+        final String name;
+        final String host;
+        final int port;
+        volatile boolean healthy = true;
+        ServiceInstance(String name, String host, int port) {
+            this.name = name; this.host = host; this.port = port;
+        }
+        public String toString() { return name + "@" + host + ":" + port; }
+    }
+
+    public void register(String service, String host, int port) {
+        registry.computeIfAbsent(service, k -> new CopyOnWriteArrayList<>())
+                .add(new ServiceInstance(service, host, port));
+        System.out.println("  [注册] " + service + " -> " + host + ":" + port);
+    }
+
+    public List<ServiceInstance> getInstances(String service) {
+        return registry.getOrDefault(service, Collections.emptyList());
+    }
+
+    // 负载均衡: 轮询
+    private final Map<String, AtomicInteger> roundRobin = new ConcurrentHashMap<>();
+    public ServiceInstance choose(String service) {
+        List<ServiceInstance> list = registry.get(service);
+        if (list == null || list.isEmpty()) return null;
+        // 只选健康的
+        List<ServiceInstance> healthy = new ArrayList<>();
+        for (ServiceInstance i : list) if (i.healthy) healthy.add(i);
+        if (healthy.isEmpty()) return null;
+        AtomicInteger idx = roundRobin.computeIfAbsent(service, k -> new AtomicInteger(0));
+        return healthy.get(Math.abs(idx.getAndIncrement()) % healthy.size());
+    }
+
+    public void markUnhealthy(String service, String host, int port) {
+        for (ServiceInstance i : registry.getOrDefault(service, Collections.emptyList())) {
+            if (i.host.equals(host) && i.port == port) {
+                i.healthy = false;
+                System.out.println("  [下线] " + i + " 标记为不健康");
+            }
+        }
+    }
+}
+
+// 熔断器: 三态切换
+class CircuitBreaker {
+    enum State { CLOSED, OPEN, HALF_OPEN }
+    private volatile State state = State.CLOSED;
+    private final AtomicInteger failures = new AtomicInteger(0);
+    private final int failureThreshold;
+    private final long openTimeoutMs;
+    private volatile long openTime = 0;
+    private final AtomicInteger halfOpenSuccess = new AtomicInteger(0);
+
+    public CircuitBreaker(int failureThreshold, long openTimeoutMs) {
+        this.failureThreshold = failureThreshold;
+        this.openTimeoutMs = openTimeoutMs;
+    }
+
+    public boolean allowRequest() {
+        switch (state) {
+            case CLOSED: return true;
+            case OPEN:
+                if (System.currentTimeMillis() - openTime > openTimeoutMs) {
+                    state = State.HALF_OPEN;
+                    halfOpenSuccess.set(0);
+                    System.out.println("    [熔断器] OPEN -> HALF_OPEN (试探)");
+                    return true;
+                }
+                return false;
+            case HALF_OPEN: return true;
+        }
+        return false;
+    }
+
+    public void recordSuccess() {
+        if (state == State.HALF_OPEN) {
+            if (halfOpenSuccess.incrementAndGet() >= 2) {
+                state = State.CLOSED;
+                failures.set(0);
+                System.out.println("    [熔断器] HALF_OPEN -> CLOSED (恢复)");
+            }
+        } else {
+            failures.set(0);
+        }
+    }
+
+    public void recordFailure() {
+        if (state == State.HALF_OPEN) {
+            state = State.OPEN;
+            openTime = System.currentTimeMillis();
+            System.out.println("    [熔断器] HALF_OPEN -> OPEN (试探失败)");
+        } else if (state == State.CLOSED) {
+            if (failures.incrementAndGet() >= failureThreshold) {
+                state = State.OPEN;
+                openTime = System.currentTimeMillis();
+                System.out.println("    [熔断器] CLOSED -> OPEN (失败 " + failures.get() + " 次)");
+            }
+        }
+    }
+
+    public State getState() { return state; }
+}
+
+// 限流器: 令牌桶
+class RateLimiter {
+    private final int capacity;
+    private final int refillPerSec;
+    private final AtomicInteger tokens;
+    private volatile long lastRefillTime;
+
+    public RateLimiter(int capacity, int refillPerSec) {
+        this.capacity = capacity;
+        this.refillPerSec = refillPerSec;
+        this.tokens = new AtomicInteger(capacity);
+        this.lastRefillTime = System.currentTimeMillis();
+    }
+
+    public boolean tryAcquire() {
+        refill();
+        return tokens.getAndUpdate(t -> t > 0 ? t - 1 : 0) > 0;
+    }
+
+    private void refill() {
+        long now = System.currentTimeMillis();
+        long elapsed = now - lastRefillTime;
+        int add = (int) (elapsed * refillPerSec / 1000);
+        if (add > 0) {
+            tokens.updateAndGet(t -> Math.min(capacity, t + add));
+            lastRefillTime = now;
+        }
+    }
+}
+
+// 模拟后端服务
+class BackendService {
+    final String name;
+    final double failureRate;   // 故障率 0~1
+    final long latencyMs;
+    private final Random rnd = new Random();
+
+    BackendService(String name, double failureRate, long latencyMs) {
+        this.name = name; this.failureRate = failureRate; this.latencyMs = latencyMs;
+    }
+
+    public String call() throws Exception {
+        Thread.sleep(latencyMs);
+        if (rnd.nextDouble() < failureRate) {
+            throw new RuntimeException(name + " 服务异常");
+        }
+        return name + " 响应 OK";
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 微服务架构模拟 ===\\n");
+
+        // 1. 服务注册发现
+        System.out.println("--- 1. 服务注册与发现 ---");
+        ServiceRegistry registry = new ServiceRegistry();
+        registry.register("order-service", "192.168.1.10", 8080);
+        registry.register("order-service", "192.168.1.11", 8080);
+        registry.register("order-service", "192.168.1.12", 8080);
+        registry.register("user-service", "192.168.1.20", 8080);
+        System.out.println("  order-service 实例: " + registry.getInstances("order-service").size() + " 个");
+
+        System.out.println("\\n--- 2. 负载均衡 (轮询) ---");
+        for (int i = 0; i < 5; i++) {
+            System.out.println("  第 " + (i+1) + " 次调用 -> " + registry.choose("order-service"));
+        }
+
+        System.out.println("\\n--- 3. 熔断器 (失败率 80% 触发熔断) ---");
+        BackendService flakyService = new BackendService("flaky", 0.8, 10);
+        CircuitBreaker breaker = new CircuitBreaker(3, 1000);   // 失败 3 次熔断, 1 秒后半开
+        for (int i = 0; i < 8; i++) {
+            if (breaker.allowRequest()) {
+                try {
+                    String r = flakyService.call();
+                    breaker.recordSuccess();
+                    System.out.println("  调用 #" + (i+1) + ": " + r);
+                } catch (Exception e) {
+                    breaker.recordFailure();
+                    System.out.println("  调用 #" + (i+1) + " 失败: " + e.getMessage());
+                }
+            } else {
+                System.out.println("  调用 #" + (i+1) + ": 熔断中, 快速失败 (fallback)");
+            }
+            Thread.sleep(50);
+        }
+
+        System.out.println("\\n--- 4. 熔断器恢复 (等待 1.2 秒后半开) ---");
+        Thread.sleep(1200);
+        BackendService healthyService = new BackendService("recovered", 0.0, 10);
+        for (int i = 0; i < 4; i++) {
+            if (breaker.allowRequest()) {
+                try {
+                    String r = healthyService.call();
+                    breaker.recordSuccess();
+                    System.out.println("  调用 #" + (i+1) + ": " + r + " (状态: " + breaker.getState() + ")");
+                } catch (Exception e) {
+                    breaker.recordFailure();
+                    System.out.println("  调用 #" + (i+1) + " 失败: " + e.getMessage());
+                }
+            }
+            Thread.sleep(50);
+        }
+
+        System.out.println("\\n--- 5. 限流 (令牌桶: 容量 5, 每秒 2) ---");
+        RateLimiter limiter = new RateLimiter(5, 2);
+        int allowed = 0, rejected = 0;
+        for (int i = 0; i < 10; i++) {
+            if (limiter.tryAcquire()) {
+                allowed++;
+                System.out.println("  请求 #" + (i+1) + ": 放行");
+            } else {
+                rejected++;
+                System.out.println("  请求 #" + (i+1) + ": 拒绝 (限流)");
+            }
+        }
+        System.out.println("  结果: 放行 " + allowed + " 条, 拒绝 " + rejected + " 条");
+
+        System.out.println("\\n--- 6. 网关路由模拟 ---");
+        Map<String, String> routes = new LinkedHashMap<>();
+        routes.put("/api/orders/**", "order-service");
+        routes.put("/api/users/**", "user-service");
+        routes.put("/api/products/**", "product-service");
+        String[] paths = {"/api/orders/123", "/api/users/456", "/api/products/789"};
+        for (String path : paths) {
+            for (Map.Entry<String, String> e : routes.entrySet()) {
+                if (path.matches(e.getKey().replace("**", ".*"))) {
+                    ServiceRegistry.ServiceInstance inst = registry.choose(e.getValue());
+                    System.out.println("  " + path + " -> " + e.getValue()
+                        + (inst != null ? " (" + inst + ")" : " (无可用实例)"));
+                    break;
+                }
+            }
+        }
+
+        System.out.println("\\n--- 7. 服务下线 ---");
+        registry.markUnhealthy("order-service", "192.168.1.11", 8080);
+        System.out.println("  剩余健康实例:");
+        for (ServiceRegistry.ServiceInstance i : registry.getInstances("order-service")) {
+            System.out.println("    " + i + (i.healthy ? " (健康)" : " (不健康)"));
+        }
+        System.out.println("  调用 order-service:");
+        for (int i = 0; i < 3; i++) {
+            System.out.println("    -> " + registry.choose("order-service"));
+        }
+    }
+}`} />
+
+> **观察重点**：注册中心记录所有实例，负载均衡轮询选实例；熔断器在失败累积后进入 OPEN 态快速失败，超时后 HALF_OPEN 试探，成功恢复 CLOSED；令牌桶限流超容量直接拒绝；网关按路径规则路由到对应服务；不健康实例从负载均衡中剔除。
+
+## 十、本章小结
+
+| 组件 | 作用 | 代表 |
+| --- | --- | --- |
+| 服务注册发现 | 服务上下线自动感知 | Nacos / Eureka / Consul |
+| API 网关 | 统一入口、路由、鉴权、限流 | Spring Cloud Gateway / Zuul |
+| 声明式调用 | 像调本地方法一样调远程 | OpenFeign / Dubbo |
+| 熔断限流 | 防雪崩、控流量 | Sentinel / Hystrix / Resilience4j |
+| 配置中心 | 集中配置、动态推送 | Nacos Config / Apollo |
+| 链路追踪 | 跨服务调用链可视化 | Sleuth + Zipkin / SkyWalking |
+
+## 记忆口诀
+
+- **微服务四独立**——部（部署）数（数据库）栈（技术栈）扩（扩展）。
+- **注册中心**——上线注册，下线剔除，调用查表。
+- **网关四职能**——路（路由）鉴（鉴权）限（限流）监（监控）。
+- **熔断三态**——闭（CLOSED）开（OPEN）半（HALF_OPEN）。
+- **拆分原则**——能单体就单体，扛不住再拆，按业务边界拆。
+
+## 结语
+
+微服务把大而僵的单体拆成小而活的独立服务——换来灵活性和可扩展性，代价是分布式复杂度。Nacos 管注册和配置，Gateway 守门口，OpenFeign 连服务，Sentinel 防雪崩——这是 Spring Cloud 的"四件套"。
+
+下一章是第十四阶段最后一篇——**Docker 与部署**。微服务有几十个，怎么把它们打包、部署、管理？Docker 容器化是答案。它让"在我机器上能跑"成为历史。

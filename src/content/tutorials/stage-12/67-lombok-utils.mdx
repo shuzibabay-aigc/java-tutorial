@@ -1,0 +1,723 @@
+---
+title: "Lombok 与常用工具库"
+chapter: 67
+stage: "第十二阶段"
+stageName: "工程化与生态"
+order: 5
+description: "掌握 Lombok（@Data/@Getter/@Setter/@Builder/@Slf4j/@AllArgsConstructor）、Apache Commons Lang/Collections、Guava（Collections/Cache/EventBus）、Hutool 国产工具集与 Vavr 函数式工具"
+pubDate: 2026-07-03
+tags: ["Java", "Lombok", "Guava", "Apache Commons", "Hutool", "工具库"]
+---
+
+# Lombok 与常用工具库
+
+写 Java 最让人头疼的是**样板代码（Boilerplate）**——一个 POJO 要写 getter/setter/toString/equals/hashCode，加起来几十行；每个类要手动声明 logger；构造器一堆重载。这些代码不写不行，写了又啰嗦。**Lombok** 就是为消灭样板代码而生——一个注解搞定几十行代码。
+
+但 Lombok 只是工具库的冰山一角。Java 生态还有 Apache Commons、Guava、Hutool、Vavr 等一堆工具库，覆盖字符串、集合、缓存、IO、函数式等方方面面。这一章我们把它们一次看完。
+
+## 一、Lombok
+
+**Lombok** 是 2009 年开源的"代码生成魔法"——通过**注解处理器**在编译期往字节码里插方法。你只写注解，编译后的 `.class` 文件里就有完整的 getter/setter。
+
+### 1.1 安装
+
+```xml
+<dependency>
+    <groupId>org.projectlombok</groupId>
+    <artifactId>lombok</artifactId>
+    <version>1.18.30</version>
+    <scope>provided</scope>
+</dependency>
+```
+
+IDEA 要装 Lombok 插件（新版已内置），Eclipse 也要装。注解处理器在编译时干活，IDE 不识别就会报红。
+
+### 1.2 @Data：一键全包
+
+```java
+import lombok.*;
+
+@Data                   // 等价于 @Getter + @Setter + @ToString + @EqualsAndHashCode + @RequiredArgsConstructor
+public class User {
+    private Long id;
+    private String name;
+    private Integer age;
+}
+```
+
+`@Data` 一行顶五句——自动生成：
+
+- 所有字段的 getter/setter
+- `toString()`
+- `equals()` / `hashCode()`
+- `@RequiredArgsConstructor`（final 字段的构造器）
+
+### 1.3 常用注解
+
+| 注解 | 生成内容 |
+| --- | --- |
+| `@Getter` / `@Setter` | getter/setter |
+| `@ToString` | `toString` |
+| `@EqualsAndHashCode` | `equals` / `hashCode` |
+| `@NoArgsConstructor` | 无参构造 |
+| `@AllArgsConstructor` | 全参构造 |
+| `@RequiredArgsConstructor` | final/@NonNull 字段构造（推荐用于依赖注入） |
+| `@Data` | 上面五个的组合 |
+| `@Builder` | Builder 模式 |
+| `@Slf4j` | `private static final Logger log = ...` |
+| `@Log` | 用 `java.util.logging` |
+| `@SneakyThrows` | 偷偷抛受检异常（不推荐滥用） |
+| `@Value` | 不可变类（全 final 字段） |
+| `@NonNull` | 自动 null 检查 |
+| `@Cleanup` | 自动 close（try-with-resources 简写） |
+
+### 1.4 @Builder：链式构造
+
+```java
+@Builder
+@Data
+public class User {
+    private Long id;
+    private String name;
+    private Integer age;
+}
+
+// 使用
+User u = User.builder()
+    .id(1L)
+    .name("张三")
+    .age(20)
+    .build();
+```
+
+Builder 模式的好处——可选参数任意组合，参数多了也不乱。Lombok 的 `@Builder` 自动生成 Builder 内部类，省去手写几十行模板。
+
+### 1.5 @Slf4j：自动声明 logger
+
+```java
+@Slf4j
+public class UserService {
+    public void login(String name) {
+        log.info("用户 {} 登录", name);   // 直接用 log
+    }
+}
+```
+
+不用每类都写 `private static final Logger log = LoggerFactory.getLogger(...)`——一个 `@Slf4j` 搞定。
+
+### 1.6 @RequiredArgsConstructor：构造器注入
+
+Spring 推荐用**构造器注入**（不用 `@Autowired` 字段注入），Lombok 让它一行搞定：
+
+```java
+@Service
+@RequiredArgsConstructor
+public class UserService {
+    private final UserRepository userRepo;     // final -> 进构造器
+    private final EmailService emailService;
+    private final CacheService cacheService;
+    // Lombok 自动生成三参构造器, Spring 自动注入
+}
+```
+
+`final` 字段会被 `@RequiredArgsConstructor` 纳入构造器——Spring 看到构造器就自动注入。
+
+### 1.7 @SneakyThrows 与 @Cleanup
+
+```java
+// @SneakyThrows: 不用 try-catch 也不用 throws
+@SneakyThrows
+public String read(String path) {
+    return Files.readString(Path.of(path));   // 不用声明 IOException
+}
+
+// @Cleanup: 自动 close
+public void copy(String src, String dst) throws IOException {
+    @Cleanup InputStream in = new FileInputStream(src);
+    @Cleanup OutputStream out = new FileOutputStream(dst);
+    in.transferTo(out);
+    // 自动 in.close() / out.close()
+}
+```
+
+这两个比较"魔法"——`@SneakyThrows` 用字节码技巧偷偷抛受检异常（绕过编译器检查），用多了破坏代码可读性。`@Cleanup` 不如 `try-with-resources` 标准化，慎用。
+
+## 二、Apache Commons
+
+Apache Commons 是 Apache 软件基金会的工具库集合，分多个模块。最有用的是 **Lang** 和 **Collections**。
+
+### 2.1 Commons Lang
+
+```xml
+<dependency>
+    <groupId>org.apache.commons</groupId>
+    <artifactId>commons-lang3</artifactId>
+    <version>3.13.0</version>
+</dependency>
+```
+
+```java
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.Validate;
+
+// 字符串
+StringUtils.isBlank("  ");              // true (空白)
+StringUtils.isEmpty("");                // true
+StringUtils.isBlank(null);              // true (null 安全)
+StringUtils.split("a,b,,c", ",");       // ["a", "b", "c"] (跳空)
+StringUtils.repeat("-", 5);             // "-----"
+StringUtils.leftPad("1", 3, '0');       // "001"
+StringUtils.substringBetween("a[b]c", "[", "]");  // "b"
+
+// Object 工具
+ObjectUtils.defaultIfNull(null, "默认");   // "默认"
+ObjectUtils.firstNonNull(null, null, "a"); // "a"
+
+// 校验
+Validate.notNull(arg, "arg 不能为 null");
+Validate.isTrue(i > 0, "i 必须正数");
+```
+
+`StringUtils.isBlank` 和 `String.isEmpty` 的区别——`isBlank` 把纯空格当空（`"  "` 是 blank），`isEmpty` 不当空。前端经常传一堆空格，用 `isBlank` 更安全。
+
+### 2.2 Commons Collections
+
+```java
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.ListUtils;
+
+// 集合操作
+CollectionUtils.isEmpty(list);        // null 安全判空
+CollectionUtils.isNotEmpty(list);
+ListUtils.union(list1, list2);        // 并集
+ListUtils.intersection(list1, list2); // 交集
+ListUtils.subtract(list1, list2);     // 差集
+```
+
+## 三、Guava：Google 的工具库
+
+**Guava** 是 Google 开源的 Java 工具库，比 Commons 现代、API 更优雅。
+
+```xml
+<dependency>
+    <groupId>com.google.guava</groupId>
+    <artifactId>guava</artifactId>
+    <version>32.1.3-jre</version>
+</dependency>
+```
+
+### 3.1 Collections 增强
+
+```java
+import com.google.common.collect.*;
+
+// 不可变集合 (强烈推荐!)
+ImmutableList<String> colors = ImmutableList.of("red", "green", "blue");
+ImmutableMap<String, Integer> prices = ImmutableMap.of(
+    "apple", 5, "banana", 3, "orange", 4);
+
+// 多值 Map (一个 key 多个 value)
+ListMultimap<String, String> multimap = ArrayListMultimap.create();
+multimap.put("fruit", "apple");
+multimap.put("fruit", "banana");
+multimap.get("fruit");   // [apple, banana]
+
+// 双向 Map (value 反查 key)
+BiMap<String, Integer> biMap = HashBiMap.create();
+biMap.put("one", 1);
+biMap.inverse().get(1);   // "one"
+
+// Table (二维表)
+Table<String, String, Integer> table = HashBasedTable.create();
+table.put("北京", "人口", 21000000);
+table.row("北京");   // {人口=21000000}
+
+// Lists/Sets 工厂
+List<String> list = Lists.newArrayList("a", "b", "c");
+Set<String> set = Sets.newHashSet("a", "b");
+
+// 集合运算
+Sets.union(set1, set2);          // 并集
+Sets.intersection(set1, set2);   // 交集
+Sets.difference(set1, set2);     // 差集
+```
+
+不可变集合是 Guava 的精华——`ImmutableList`/`ImmutableMap` 创建后不可修改，线程安全、防误改、省内存。比 `Collections.unmodifiableList` 更彻底（后者只是视图，原集合变了它也变）。
+
+### 3.2 Cache：本地缓存
+
+```java
+import com.google.common.cache.*;
+
+Cache<String, User> cache = CacheBuilder.newBuilder()
+    .maximumSize(1000)                          // 最多 1000 条
+    .expireAfterWrite(10, TimeUnit.MINUTES)     // 写后 10 分钟过期
+    .expireAfterAccess(5, TimeUnit.MINUTES)     // 访问后 5 分钟过期
+    .recordStats()                              // 记录统计
+    .build();
+
+// 写
+cache.put("user:1", new User(1, "张三"));
+
+// 读 (自动加载)
+User u = cache.get("user:1", () -> loadFromDb(1));   // 没有就调 lambda 加载
+
+// 统计
+CacheStats stats = cache.stats();
+stats.hitRate();        // 命中率
+stats.evictionCount();  // 驱逐数
+```
+
+`LoadingCache` 是更进一步的——构建时指定 `CacheLoader`，自动按需加载：
+
+```java
+LoadingCache<String, User> loadingCache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .build(new CacheLoader<String, User>() {
+        @Override
+        public User load(String key) {
+            return loadFromDb(key);   // 缓存 miss 自动调
+        }
+    });
+
+User u = loadingCache.get("user:1");   // 自动加载
+```
+
+### 3.3 EventBus：进程内事件
+
+```java
+import com.google.common.eventbus.*;
+
+EventBus bus = new EventBus();
+
+// 订阅
+class OrderEventHandler {
+    @Subscribe
+    public void onOrder(OrderEvent event) {
+        System.out.println("处理订单: " + event);
+    }
+}
+bus.register(new OrderEventHandler());
+
+// 发布
+bus.post(new OrderEvent("ORD-001", 99.5));
+// 自动调 onOrder
+```
+
+EventBus 实现"发布-订阅"——发布者不用知道谁订阅，松耦合。
+
+### 3.4 其他实用工具
+
+```java
+// Joiner / Splitter (比 JDK 的更强大)
+Joiner.on(",").join(list);                      // 不抛 NPE
+Splitter.on(",").trimResults().omitEmptyStrings().split("a, b,, c");
+// -> [a, b, c]
+
+// Preconditions (前置校验)
+Preconditions.checkNotNull(arg, "arg 不能为 null");
+Preconditions.checkArgument(i > 0, "i 必须正数, 实际 %s", i);
+Preconditions.checkState(state == READY, "状态不对");
+
+// StopWatch (计时)
+Stopwatch sw = Stopwatch.createStarted();
+// ... 业务
+sw.stop();
+sw.elapsed(TimeUnit.MILLISECONDS);
+
+// Optional (Guava 先有的, Java 8 后用 java.util.Optional)
+Optional<User> maybe = Optional.fromNullable(user);
+```
+
+## 四、Hutool：国产工具集
+
+**Hutool** 是国内开发者贡献的工具集，API 中文化、功能全面、用着亲切。
+
+```xml
+<dependency>
+    <groupId>cn.hutool</groupId>
+    <artifactId>hutool-all</artifactId>
+    <version>5.8.24</version>
+</dependency>
+```
+
+```java
+import cn.hutool.core.util.StrUtil;
+import cn.hutool.core.collection.CollUtil;
+import cn.hutool.core.date.DateUtil;
+import cn.hutool.core.io.FileUtil;
+import cn.hutool.crypto.SecureUtil;
+import cn.hutool.http.HttpUtil;
+import cn.hutool.json.JSONUtil;
+
+// 字符串
+StrUtil.isBlank("  ");                 // true
+StrUtil.format("用户 {} 的年龄 {}", "张三", 20);  // 参数化
+
+// 集合
+CollUtil.newArrayList("a", "b");
+CollUtil.isEmpty(list);
+
+// 日期
+DateUtil.now();                        // 当前时间字符串
+DateUtil.formatDateTime(new Date());
+DateUtil.parse("2024-01-15");
+
+// 文件
+FileUtil.readUtf8String("config.yml");
+FileUtil.writeUtf8String("content", "out.txt");
+
+// HTTP
+String resp = HttpUtil.get("https://example.com");
+HttpUtil.post(url, jsonBody);
+
+// JSON
+JSONUtil.toJsonStr(obj);
+JSONUtil.parseObj(json).getStr("name");
+
+// 加密
+SecureUtil.md5("password");            // MD5
+SecureUtil.sha1("password");
+```
+
+Hutool 的优势是"开箱即用"——HTTP、JSON、加密、Excel、正则、缓存全有，国内项目很流行。
+
+## 五、Vavr：函数式工具
+
+**Vavr**（原名 Javaslang）给 Java 带来 Scala 风格的函数式工具——`Option`/`Try`/`Tuple`/`Stream`/函数式集合。
+
+```xml
+<dependency>
+    <groupId>io.vavr</groupId>
+    <artifactId>vavr</artifactId>
+    <version>0.10.4</version>
+</dependency>
+```
+
+```java
+import io.vavr.control.Try;
+import io.vavr.control.Option;
+import io.vavr.collection.List;
+import io.vavr.Tuple;
+
+// Try: 替代 try-catch, 函数式处理异常
+Try<Integer> result = Try.of(() -> 1 / 0);
+result.isFailure();           // true
+result.getOrElse(-1);         // -1
+result.recover(e -> -1);      // 失败时返回 -1
+
+// Option: 替代 null, 比 java.util.Optional 更函数式
+Option<String> name = Option.of(null);
+name.getOrElse("匿名");        // "匿名"
+
+// 函数式集合 (不可变, 比Stream更强大)
+List.range(0, 5);             // List(0,1,2,3,4)
+List.of(1, 2, 3)
+    .map(x -> x * 2)
+    .filter(x -> x > 2)
+    .sum();                   // 10
+
+// Tuple (Java 没有元组, Vavr 提供)
+var t = Tuple.of("张三", 20, true);
+t._1;   // "张三"
+t._2;   // 20
+```
+
+`Try` 是 Vavr 的精华——把异常当值处理，链式 recover/transform，避免到处 try-catch。但 Vavr 风格激进，团队不熟悉函数式慎用。
+
+## 六、实战：工具库常用功能演示
+
+由于 Piston 环境没有上述第三方依赖，下面用纯 Java SE 模拟这些工具库的**核心功能**——演示它们解决什么问题。本地项目用真实库时，API 风格基本一致。
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.function.*;
+import java.time.*;
+
+// === 迷你工具库 (模拟 Lombok/Guava/Hutool 核心功能) ===
+
+// 1. 不可变集合 (模拟 Guava ImmutableList)
+class ImmutableList<E> {
+    private final List<E> data;
+    private ImmutableList(List<E> data) { this.data = List.copyOf(data); }
+    public static <E> ImmutableList<E> of(E... items) {
+        return new ImmutableList<>(Arrays.asList(items));
+    }
+    public E get(int i) { return data.get(i); }
+    public int size() { return data.size(); }
+    public ImmutableList<E> append(E e) {
+        List<E> n = new ArrayList<>(data);
+        n.add(e);
+        return new ImmutableList<>(n);
+    }
+    @Override public String toString() { return data.toString(); }
+}
+
+// 2. 多值 Map (模拟 Guava Multimap)
+class ListMultimap<K, V> {
+    private final Map<K, List<V>> map = new LinkedHashMap<>();
+    public void put(K key, V val) {
+        map.computeIfAbsent(key, k -> new ArrayList<>()).add(val);
+    }
+    public List<V> get(K key) { return map.getOrDefault(key, Collections.emptyList()); }
+    public Set<K> keySet() { return map.keySet(); }
+    @Override public String toString() { return map.toString(); }
+}
+
+// 3. 双向 Map (模拟 Guava BiMap)
+class BiMap<K, V> {
+    private final Map<K, V> forward = new HashMap<>();
+    private final Map<V, K> inverse = new HashMap<>();
+    public void put(K key, V val) {
+        forward.put(key, val);
+        inverse.put(val, key);
+    }
+    public V get(K key) { return forward.get(key); }
+    public K inverseGet(V val) { return inverse.get(val); }
+}
+
+// 4. 本地缓存 (模拟 Guava Cache)
+class MiniCache<K, V> {
+    private final ConcurrentHashMap<K, V> data = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<K, Long> expireAt = new ConcurrentHashMap<>();
+    private final long ttlMs;
+    private final Function<K, V> loader;
+    private final AtomicInteger hits = new AtomicInteger();
+    private final AtomicInteger misses = new AtomicInteger();
+
+    public MiniCache(long ttlMs, Function<K, V> loader) {
+        this.ttlMs = ttlMs; this.loader = loader;
+    }
+
+    public V get(K key) {
+        Long exp = expireAt.get(key);
+        if (exp != null && System.currentTimeMillis() < exp) {
+            V v = data.get(key);
+            if (v != null) { hits.incrementAndGet(); return v; }
+        }
+        // 加载
+        misses.incrementAndGet();
+        V v = loader.apply(key);
+        data.put(key, v);
+        expireAt.put(key, System.currentTimeMillis() + ttlMs);
+        return v;
+    }
+
+    public int hits() { return hits.get(); }
+    public int misses() { return misses.get(); }
+    public double hitRate() {
+        int total = hits.get() + misses.get();
+        return total == 0 ? 0 : (double) hits.get() / total;
+    }
+}
+
+// 5. EventBus (模拟 Guava EventBus)
+class EventBus {
+    private final Map<Class<?>, List<Consumer<?>>> subscribers = new ConcurrentHashMap<>();
+    public <T> void subscribe(Class<T> eventType, Consumer<T> handler) {
+        subscribers.computeIfAbsent(eventType, k -> new CopyOnWriteArrayList<>()).add(handler);
+    }
+    @SuppressWarnings("unchecked")
+    public void publish(Object event) {
+        List<Consumer<?>> handlers = subscribers.get(event.getClass());
+        if (handlers != null) {
+            for (Consumer<?> h : handlers) ((Consumer<Object>) h).accept(event);
+        }
+    }
+}
+
+// 6. StringUtils (模拟 Commons Lang / Hutool)
+class StringUtils {
+    public static boolean isBlank(String s) {
+        if (s == null) return true;
+        return s.trim().isEmpty();
+    }
+    public static boolean isNotBlank(String s) { return !isBlank(s); }
+    public static String repeat(String s, int n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) sb.append(s);
+        return sb.toString();
+    }
+    public static String leftPad(String s, int len, char pad) {
+        if (s.length() >= len) return s;
+        return repeat(String.valueOf(pad), len - s.length()) + s;
+    }
+    public static String format(String tpl, Object... args) {
+        StringBuilder sb = new StringBuilder();
+        int idx = 0;
+        for (int i = 0; i < tpl.length(); i++) {
+            if (i < tpl.length() - 1 && tpl.charAt(i) == '{' && tpl.charAt(i + 1) == '}') {
+                if (idx < args.length) sb.append(args[idx++]);
+                else sb.append("{}");
+                i++;
+            } else {
+                sb.append(tpl.charAt(i));
+            }
+        }
+        return sb.toString();
+    }
+}
+
+// === 业务类 (Lombok @Data 风格, 这里手写以演示其作用) ===
+class User {
+    private Long id;
+    private String name;
+    private Integer age;
+    public User() {}
+    public User(Long id, String name, Integer age) {
+        this.id = id; this.name = name; this.age = age;
+    }
+    // Lombok @Data 自动生成下面这些 ↓
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public Integer getAge() { return age; }
+    public void setAge(Integer age) { this.age = age; }
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof User u)) return false;
+        return Objects.equals(id, u.id) && Objects.equals(name, u.name)
+            && Objects.equals(age, u.age);
+    }
+    @Override
+    public int hashCode() { return Objects.hash(id, name, age); }
+    @Override
+    public String toString() { return "User(id=" + id + ", name=" + name + ", age=" + age + ")"; }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== 工具库实战 ===\\n");
+
+        // 1. Lombok 演示: 看手写的样板代码 vs @Data
+        System.out.println("--- 1. Lombok 演示 (上面 User 类手写了 30+ 行样板) ---");
+        System.out.println("Lombok @Data 一行注解 = 自动生成 getter/setter/toString/equals/hashCode");
+        System.out.println("@Builder 一行 = Builder 模式");
+        System.out.println("@Slf4j 一行 = 自动 logger");
+        User u = new User(1L, "张三", 20);
+        System.out.println("User 实例: " + u);
+        System.out.println("equals 相同对象: " + u.equals(new User(1L, "张三", 20)));
+
+        // 2. StringUtils
+        System.out.println("\\n--- 2. StringUtils ---");
+        System.out.println("isBlank('  '): " + StringUtils.isBlank("  "));
+        System.out.println("isBlank(null): " + StringUtils.isBlank(null));
+        System.out.println("repeat('-', 5): " + StringUtils.repeat("-", 5));
+        System.out.println("leftPad('1', 3, '0'): " + StringUtils.leftPad("1", 3, '0'));
+        System.out.println("format: " + StringUtils.format("用户 {} 年龄 {}", "张三", 20));
+
+        // 3. Guava Collections
+        System.out.println("\\n--- 3. Guava Collections ---");
+        ImmutableList<String> colors = ImmutableList.of("red", "green", "blue");
+        System.out.println("ImmutableList: " + colors);
+        ImmutableList<String> more = colors.append("yellow");
+        System.out.println("append 后新列表: " + more + " (原列表不变: " + colors + ")");
+
+        ListMultimap<String, String> mmap = new ListMultimap<>();
+        mmap.put("fruit", "apple");
+        mmap.put("fruit", "banana");
+        mmap.put("fruit", "orange");
+        mmap.put("veg", "carrot");
+        System.out.println("Multimap fruit: " + mmap.get("fruit"));
+
+        BiMap<String, Integer> bi = new BiMap<>();
+        bi.put("one", 1); bi.put("two", 2);
+        System.out.println("BiMap get('one'): " + bi.get("one"));
+        System.out.println("BiMap inverseGet(2): " + bi.inverseGet(2));
+
+        // 4. Cache
+        System.out.println("\\n--- 4. Guava Cache ---");
+        MiniCache<String, String> cache = new MiniCache<>(2000, key -> {
+            try { Thread.sleep(50); } catch (Exception e) {}
+            return "DB:" + key;
+        });
+        long t1 = System.currentTimeMillis();
+        cache.get("user:1");   // miss, 加载 50ms
+        long t2 = System.currentTimeMillis();
+        cache.get("user:1");   // hit, 几乎 0ms
+        long t3 = System.currentTimeMillis();
+        cache.get("user:1");   // hit
+        long t4 = System.currentTimeMillis();
+        System.out.printf("第一次 (miss): %d ms%n", t2 - t1);
+        System.out.printf("第二次 (hit):  %d ms%n", t3 - t2);
+        System.out.printf("第三次 (hit):  %d ms%n", t4 - t3);
+        System.out.printf("命中率: %.2f%%%n", cache.hitRate() * 100);
+
+        // 5. EventBus
+        System.out.println("\\n--- 5. Guava EventBus ---");
+        EventBus bus = new EventBus();
+        bus.subscribe(String.class, e -> System.out.println("  [字符串订阅者] 收到: " + e));
+        bus.subscribe(String.class, e -> System.out.println("  [日志订阅者] 记录: " + e));
+        bus.subscribe(Integer.class, e -> System.out.println("  [数字订阅者] 收到: " + e));
+        bus.publish("Hello");   // 触发两个字符串订阅者
+        bus.publish(42);        // 触发数字订阅者
+
+        System.out.println("\\n=== 工具库总结 ===");
+        System.out.println("Lombok: 注解消灭样板代码 (@Data/@Builder/@Slf4j)");
+        System.out.println("Commons Lang: StringUtils/ObjectUtils/Validate");
+        System.out.println("Guava: 不可变集合/Cache/EventBus/Preconditions");
+        System.out.println("Hutool: 国产, API 中文化, HTTP/JSON/加密全包");
+        System.out.println("Vavr: 函数式 Try/Option/Tuple/不可变集合");
+        System.out.println("\\n原则: 不重复造轮子, 但也别把所有库都引进来");
+    }
+}`} />
+
+> **观察重点**：
+> - **`User` 类手写了 30+ 行样板**——Lombok 一个 `@Data` 就全生成，省一大半代码。
+> - **`ImmutableList.append` 返回新列表，原列表不变**——不可变的核心特性，线程安全。
+> - **`Multimap` 一个 key 多个 value**——比 `Map＜K, List＜V＞＞` 用着方便。
+> - **缓存第一次 miss 加载 50ms，后两次 hit 几乎 0ms**——缓存的价值直观可见。
+> - **EventBus 发布者不用知道订阅者**——松耦合的事件驱动。
+
+## 七、工具库的取舍
+
+工具库虽好，但不是越多越好：
+
+1. **不要重叠** —— 选一个 StringUtils 就够了（Commons 或 Hutool），别同时引三个。
+2. **注意体积** —— Guava 5MB+，Hutool 2MB+，移动端/容器化场景要权衡。
+3. **JDK 优先** —— Java 8+ 的 `List.of`/`Map.of`/`Optional`/`Stream` 已替代部分 Guava 功能。能用 JDK 就别引库。
+4. **维护性** —— 选活跃维护的库。Commons Lang 还在更新，但活跃度低于 Guava。
+5. **团队熟悉度** —— 团队没人会 Vavr，引入就是负担。
+
+**实战建议**：
+
+- 后端项目标配：Lombok + Commons Lang3 + Guava（或 Hutool）。
+- Spring Boot 自带 Logback、Jackson、Hibernate Validator，不用额外引。
+- 不可变集合优先用 JDK 的 `List.of`/`Map.of`，复杂场景才上 Guava。
+- 缓存单机用 Guava/Caffeine，分布式上 Redis。
+
+## 八、本章小结
+
+| 工具库 | 核心能力 |
+| --- | --- |
+| Lombok | `@Data`/`@Builder`/`@Slf4j`/`@RequiredArgsConstructor` 消灭样板 |
+| Commons Lang | `StringUtils`/`ObjectUtils`/`Validate` |
+| Commons Collections | `CollectionUtils`/`ListUtils` |
+| Guava | 不可变集合/Multimap/BiMap/Cache/EventBus/Preconditions |
+| Hutool | 中文化 API、HTTP/JSON/加密/Excel 全包 |
+| Vavr | `Try`/`Option`/`Tuple`/函数式集合 |
+
+**记忆口诀**：
+
+- **Lombok 一个 @Data 顶 30 行**——getter/setter/toString/equals/hashCode 全自动。
+- **Guava 不可变集合**——`ImmutableList.of(...)`，线程安全。
+- **Guava Cache 自动加载**——`LoadingCache` miss 自动调 loader。
+- **Hutool 国产全家桶**——HTTP/JSON/加密/IO 一站式。
+- **JDK 能做的别引库**——`List.of`/`Optional`/`Stream` 已很强大。
+- **不要重叠引库**——选一个 StringUtils，别上三个。
+
+## 结语：第十二阶段完结
+
+这一章我们看了 Java 生态的"工具箱"——Lombok 消灭样板、Guava/Commons/Hutool 提供常用工具、Vavr 带来函数式风格。回头看第十二阶段：
+
+- **第 63 章 Maven/Gradle** —— 构建工具，把代码组织成工程。
+- **第 64 章 Git** —— 版本控制，让多人协作不乱。
+- **第 65 章 测试** —— JUnit + Mockito，质量保障。
+- **第 66 章 日志框架** —— SLF4J + Logback，生产黑匣子。
+- **第 67 章 Lombok 与工具库（本章）** —— 消灭样板，少写代码。
+
+这五章是工程化的基石——让你从"能写 Java"到"能工程化交付 Java"。下一阶段进入 Java 的"主战场"——**Java Web 与 Spring 生态**，从 HTTP 协议到 Spring Boot，让你能构建真实的 Web 应用。

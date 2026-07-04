@@ -1,0 +1,145 @@
+---
+import Sidebar from '../components/Sidebar.astro';
+import { type Lang, getLangFromUrl, getAlternateLangPath, homePath, getUiStrings } from '../i18n/ui';
+import '../styles/global.css';
+
+interface Props {
+  currentSlug?: string;
+  title?: string;
+  stage?: string;
+  stageName?: string;
+  description?: string;
+  lang?: Lang;
+}
+
+const { currentSlug, title, stage, stageName, description, lang } = Astro.props;
+
+// 从 URL 推断语言（如果未显式传入）
+const detectedLang: Lang = lang ?? getLangFromUrl(Astro.url);
+const ui = getUiStrings(detectedLang);
+
+// 语言切换目标路径
+const altLangPath = getAlternateLangPath(Astro.url);
+---
+
+<!DOCTYPE html>
+<html lang={detectedLang === 'en' ? 'en' : 'zh-CN'}>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{title ? `${title} · ${ui.siteTitle}` : `${ui.siteTitle} · ${ui.siteSubtitle}`}</title>
+  <meta name="description" content={description || ui.siteSubtitle} />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script is:inline>
+    // 主题初始化（防止闪烁）
+    (function() {
+      const saved = localStorage.getItem('theme');
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      if (saved === 'dark' || (!saved && prefersDark)) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+
+    // 语言自动检测与重定向（仅首次访问，手动切换后不再覆盖）
+    (function() {
+      const MANUAL_FLAG = 'lang-manual';
+      const DETECTED_FLAG = 'lang-detected';
+
+      // 如果用户已手动切换过语言，不再自动重定向
+      if (sessionStorage.getItem(MANUAL_FLAG) === '1') return;
+
+      const currentPath = window.location.pathname;
+      const isEnglish = currentPath.startsWith('/en/') || currentPath === '/en';
+      const hasDetected = sessionStorage.getItem(DETECTED_FLAG) === '1';
+
+      // 只在首次访问时检测
+      if (hasDetected) return;
+      sessionStorage.setItem(DETECTED_FLAG, '1');
+
+      // 检测浏览器/系统语言
+      const browserLangs = navigator.languages || [navigator.language];
+      const prefersEnglish = browserLangs.some(l => l.toLowerCase().startsWith('en'));
+
+      // 浏览器偏好英文，但当前在中文页 → 跳转到英文版
+      if (prefersEnglish && !isEnglish) {
+        const newPath = '/en' + currentPath;
+        window.location.replace(newPath);
+        return;
+      }
+
+      // 浏览器偏好中文，但当前在英文页 → 跳转到中文版
+      if (!prefersEnglish && isEnglish) {
+        const newPath = currentPath.replace(/^\/en/, '') || '/';
+        window.location.replace(newPath);
+        return;
+      }
+    })();
+  </script>
+</head>
+<body>
+  <div class="site-wrapper">
+    <Sidebar currentSlug={currentSlug} lang={detectedLang} />
+    <div class="main-area">
+      <div class="top-bar">
+        <button class="sidebar-toggle" id="sidebar-toggle">☰</button>
+        <div class="top-bar-search">
+          <input type="text" placeholder={ui.searchPlaceholder} id="search-input" />
+        </div>
+        <button class="lang-toggle" id="lang-toggle" title={ui.langToggleTitle} data-alt-lang-path={altLangPath}>{ui.langToggle}</button>
+        <button class="theme-toggle" id="theme-toggle">{ui.themeToggle}</button>
+      </div>
+      <div class="content-wrapper">
+        <slot />
+      </div>
+    </div>
+  </div>
+
+  <script is:inline define:vars={{ ui }}>
+    // 主题切换
+    const themeToggle = document.getElementById('theme-toggle');
+    themeToggle.addEventListener('click', () => {
+      const current = document.documentElement.getAttribute('data-theme');
+      if (current === 'dark') {
+        document.documentElement.removeAttribute('data-theme');
+        localStorage.setItem('theme', 'light');
+        themeToggle.textContent = '🌙';
+      } else {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        localStorage.setItem('theme', 'dark');
+        themeToggle.textContent = '☀️';
+      }
+    });
+
+    // 初始化主题按钮文字
+    if (document.documentElement.getAttribute('data-theme') === 'dark') {
+      themeToggle.textContent = '☀️';
+    }
+
+    // 移动端侧边栏
+    const sidebarToggle = document.getElementById('sidebar-toggle');
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+    sidebarToggle.addEventListener('click', () => {
+      sidebar.classList.toggle('open');
+      overlay.classList.toggle('show');
+    });
+    overlay.addEventListener('click', () => {
+      sidebar.classList.remove('open');
+      overlay.classList.remove('show');
+    });
+
+    // 语言切换：标记为手动切换，之后不再自动重定向
+    const langToggle = document.getElementById('lang-toggle');
+    langToggle.addEventListener('click', () => {
+      sessionStorage.setItem('lang-manual', '1');
+      const altPath = langToggle.getAttribute('data-alt-lang-path');
+      if (altPath) {
+        window.location.href = altPath;
+      }
+    });
+  </script>
+</body>
+</html>

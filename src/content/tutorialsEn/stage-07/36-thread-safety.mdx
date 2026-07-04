@@ -1,0 +1,424 @@
+---
+title: "Thread Safety"
+chapter: 36
+stage: "Stage 7"
+stageName: "Concurrent Programming"
+order: 3
+description: "Understand race conditions, critical sections, the three concurrency properties of atomicity, visibility, and ordering, recognize the thread safety of immutable objects, with a hands-on demo of a thread-unsafe counter"
+pubDate: 2026-07-03
+tags: ["Java", "Thread Safety", "Race Condition", "Atomicity", "Visibility", "Ordering"]
+---
+
+# Thread Safety
+
+In the previous chapter we learned how to "open threads." This chapter answers a sharper question — **what goes wrong when multiple threads run together?**
+
+If you have ever written a `count++`, had 10 threads each add 1000 times, expected `count == 10000` at the end, but instead saw 8734 or 9521 — congratulations, you have stepped into the first pit of concurrency: the **race condition**. This chapter thoroughly explains "why multi-threading computes the wrong answer" and gives a precise definition of "what is thread safety."
+
+## 1. Race Conditions and Critical Sections
+
+### 1.1 A Program That Computes the Wrong Answer
+
+First, look at some "looks-fine" code:
+
+```java
+class Counter {
+    int count = 0;
+    public void increment() {
+        count++;   // Looks like one line, but it is not atomic
+    }
+}
+```
+
+Have 10 threads each call `increment()` 1000 times, and the final `count` should be 10000, but in practice it may be only 8000+. Why?
+
+Because `count++` **is not a single CPU instruction** — it is equivalent to three steps:
+
+1. **Read** the value of `count` into a register
+2. **Add** 1
+3. **Write** back to `count`
+
+These three steps can be interrupted in between. Imagine:
+
+```
+Time   Thread A                    Thread B
+T1     read count = 5
+T2                                  read count = 5
+T3     add 1 → 6
+T4                                  add 1 → 6
+T5     write count = 6
+T6                                  write count = 6     ← two increments, but count only went up by 1
+```
+
+This is a **Race Condition** — the correctness of the program depends on **the order in which multiple threads access shared variables**. In a single thread it is always correct; in multi-threading it occasionally has bugs, and these bugs are **hard to reproduce and hard to debug** — you might run it 10000 times before it appears once, but in production it runs 10000 times a second.
+
+### 1.2 Critical Section
+
+A **Critical Section** is a code fragment that accesses shared resources — it must be executed **mutually exclusively**, otherwise races occur.
+
+```java
+public void increment() {
+    // ↓ this is the critical section
+    count++;
+    // ↑
+}
+```
+
+Methods to protect a critical section:
+
+- **Locking** (`synchronized`, `ReentrantLock`) — let only one thread enter at a time.
+- **CAS** (`AtomicInteger`) — turn "read-modify-write" into a single atomic instruction.
+- **Avoid sharing** (`ThreadLocal`, separate state) — no sharing means no protection needed.
+
+### 1.3 Two Typical Forms of Race Conditions
+
+1. **Check-Then-Act**: check first, then act, but the gap between is interrupted.
+   ```java
+   if (map.containsKey(key)) {     // check
+       // ← another thread deleted the key in this gap
+       map.get(key).process();     // NPE!
+   }
+   ```
+
+2. **Read-Modify-Write**: read the value, modify, write back — typically `count++`.
+
+## 2. What Is Thread Safety
+
+Brian Goetz gave a classic definition in *Java Concurrency in Practice*:
+
+> **Thread safety**: when multiple threads access a class, regardless of the scheduling approach used by the runtime environment or how these threads interleave, and without any additional synchronization or coordination in the calling code, the class still behaves correctly — then the class is said to be thread-safe.
+
+Reduced to one sentence: **no matter how many threads scramble, the result is correct**.
+
+### 2.1 Several Levels of Thread Safety
+
+| Level | Description | Example |
+| --- | --- | --- |
+| Immutable | State cannot change after creation, absolutely safe | `String`, `Integer`, `LocalDate`, `BigDecimal` |
+| Absolutely thread-safe | No external synchronization needed for any call | `ConcurrentHashMap`, `AtomicInteger` |
+| Conditionally thread-safe | Some operations are safe, some need external synchronization | Iteration of `Collections.synchronizedList` needs external synchronization |
+| Thread-compatible | Not thread-safe, but can be used with external synchronization | `ArrayList`, `HashMap` |
+| Thread-hostile | Cannot be used by multiple threads | `Thread.stop` (deprecated) |
+
+### 2.2 Common Misconceptions
+
+- **`Vector` and `Hashtable` are thread-safe, but rarely used** — they just `synchronized` every method; iteration can still throw `ConcurrentModificationException`.
+- **`Collections.synchronizedXxx` is not absolutely safe either** — iteration must be locked manually.
+- **`StringBuilder` is not thread-safe** — under multi-threading use `StringBuffer` (but slower) or a better approach: `ThreadLocal＜StringBuilder＞` or immutable concatenation.
+
+## 3. The Thread Safety of Immutable Objects
+
+**Immutable objects are the simplest thread-safety solution** — they cannot be modified at all, so there is no race.
+
+### 3.1 Conditions for Immutability
+
+For an object to be strictly immutable, the following must hold:
+
+1. **All fields are `final`** (the JMM gives `final` special guarantees, covered in Chapter 37).
+2. **The class is `final`** (prevent subclasses from breaking immutability).
+3. **When fields are reference types, the referenced object is also immutable** (otherwise it could be modified indirectly).
+4. **The `this` reference does not escape during construction**.
+5. **The state does not change after construction completes**.
+
+### 3.2 A Classic Immutable Class
+
+```java
+public final class Point {       // final class
+    private final int x;          // final fields
+    private final int y;
+
+    public Point(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    public int getX() { return x; }
+    public int getY() { return y; }
+
+    // "Modify" operations return a new object, do not change the original
+    public Point translate(int dx, int dy) {
+        return new Point(x + dx, y + dy);
+    }
+}
+```
+
+`String` follows this design — `substring`, `concat` all return new `String`s, the original `String` never changes. So `String` is absolutely safe in multi-threading.
+
+### 3.3 Benefits of Immutability
+
+- **Inherently thread-safe** — no synchronization needed at all.
+- **Can be freely shared** — multiple threads reference the same object, no copying needed.
+- **Can be used as Map keys and Set elements** — hashCode will not change.
+- **No "invalid intermediate states"** — all states are final states after construction.
+
+Immutability is the core idea of functional programming, and the direction modern Java embraces (`record`, `LocalDate`, `Optional` are all immutable).
+
+## 4. The Three Pillars of Concurrency: Atomicity, Visibility, Ordering
+
+These are the three pillars of concurrent correctness. If any one is broken, the program may go wrong under multi-threading.
+
+### 4.1 Atomicity
+
+**Atomicity**: an operation or a group of operations either all execute without interruption, or none execute at all.
+
+`count++` is not atomic — it is "read-modify-write" in three steps. In Java:
+
+- **Primitive type assignment is atomic** (except `long` and `double` on 32-bit JVMs, but on modern 64-bit JVMs they are generally atomic too).
+- **`volatile long/double` guarantees atomic read/write** — one use of `volatile`.
+- **`++`/`--` is not atomic** — even for `int`.
+- **Reference assignment is atomic** — the assignment of `Object obj = new Object();` is atomic (but the object's construction process is not).
+
+Means to guarantee atomicity: `synchronized`, `Lock`, atomic classes (`AtomicInteger`), `volatile` (only for single-variable read/write).
+
+### 4.2 Visibility
+
+**Visibility**: a thread's modification of a shared variable can be seen by other threads in time.
+
+This sounds obvious, but it is **not necessarily true**. Each CPU has its own cache (L1/L2/L3), and the JVM also lets threads read variables into working memory and modify them — a thread on another CPU may not see the modification.
+
+```java
+class FlagHolder {
+    boolean stop = false;   // no volatile
+
+    // Thread A
+    void stopThread() { stop = true; }
+
+    // Thread B
+    void worker() {
+        while (!stop) {
+            // may never stop!
+        }
+    }
+}
+```
+
+This is the classic "visibility" problem — thread A modified `stop`, but thread B reads `false` from its own CPU cache and loops forever. Adding `volatile` to `stop` fixes it.
+
+Means to guarantee visibility: `synchronized`, `volatile`, `final` (writes during construction are visible to other threads).
+
+### 4.3 Ordering
+
+**Ordering**: program execution order matches expectations.
+
+Here is a counterintuitive thing — **the compiler and CPU may reorder instructions** to improve performance. For example:
+
+```java
+int a = 1;
+int b = 2;
+int c = a + b;
+```
+
+There is no dependency between `a=1` and `b=2`, so the CPU may execute `b=2` first. Under single-threading, this reordering does not affect the result (the **as-if-serial** semantics). But **under multi-threading, reordering breaks correctness**:
+
+```java
+class InitExample {
+    int value = 0;
+    boolean ready = false;
+
+    // Thread A
+    void init() {
+        value = 42;          // (1)
+        ready = true;        // (2)
+    }
+
+    // Thread B
+    void use() {
+        if (ready) {         // (3)
+            System.out.println(value);   // (4) may print 0!
+        }
+    }
+}
+```
+
+If (1) and (2) are reordered into `ready=true; value=42;`, then when thread B sees ready=true, value may still be 0. This is the notorious reason "double-checked locking singleton" used to have bugs.
+
+Means to guarantee ordering: `synchronized`, `volatile` (forbids reordering), the `happens-before` relationship (detailed in Chapter 37).
+
+### 4.4 Comparison of the Three Pillars
+
+| Property | Meaning | Consequence of violation | Means to guarantee |
+| --- | --- | --- | --- |
+| **Atomicity** | Operations are not interrupted | Wrong computation (e.g. lost count) | `synchronized`, atomic classes, `Lock` |
+| **Visibility** | Modifications seen by other threads | Infinite loops, stale values | `synchronized`, `volatile`, `final` |
+| **Ordering** | Execution order matches expectations | Uninitialized object used | `synchronized`, `volatile`, `happens-before` |
+
+**`synchronized` is the "all-rounder"** — it guarantees all three properties. But the cost is significant performance overhead. `volatile` only guarantees visibility and ordering, **not atomicity** (detailed in Chapter 38). Atomic classes use CAS for atomicity, but visibility comes from the `volatile` field (`AtomicInteger.value` is `volatile`).
+
+## 5. Hands-On: A Thread-Unsafe Counter
+
+The example below ties "race conditions" and "fixing the three properties" together — first demonstrates the problem with unsafe `count++`, then fixes it with three approaches: `synchronized`, `AtomicInteger`, and `LongAdder`.
+
+<CodeRunner code={`import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.*;
+
+public class Main {
+    static final int THREADS = 10;
+    static final int PER_THREAD = 100_000;
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Thread Safety Experiment ===");
+        System.out.println("Threads: " + THREADS + ", increments per thread: " + PER_THREAD);
+        System.out.println("Expected: " + (THREADS * PER_THREAD));
+        System.out.println();
+
+        // === 1. Unsafe counter ===
+        UnsafeCounter unsafe = new UnsafeCounter();
+        runTest("1. Unsafe count++ (race)", unsafe::increment, unsafe::get);
+
+        // === 2. synchronized sync method ===
+        SyncCounter sync = new SyncCounter();
+        runTest("2. synchronized method", sync::increment, sync::get);
+
+        // === 3. AtomicInteger (CAS lock-free) ===
+        AtomicCounter atomic = new AtomicCounter();
+        runTest("3. AtomicInteger (CAS)", atomic::increment, atomic::get);
+
+        // === 4. LongAdder (high-concurrency sharding) ===
+        LongAdderCounter adder = new LongAdderCounter();
+        runTest("4. LongAdder (sharded)", adder::increment, adder::get);
+
+        // === 5. Demonstrate visibility (volatile) ===
+        System.out.println("\\n=== Visibility Experiment: volatile ===");
+        VisibilityTest visibilityTest = new VisibilityTest();
+        visibilityTest.run();
+
+        // === 6. Immutable object demo ===
+        System.out.println("\\n=== Immutable Object ===");
+        Point p = new Point(3, 4);
+        Point p2 = p.translate(1, 1);
+        System.out.println("Original: " + p);     // unchanged
+        System.out.println("New: " + p2);    // new object
+    }
+
+    static void runTest(String name, Runnable inc, java.util.function.LongSupplier get) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(THREADS);
+        long start = System.nanoTime();
+        CountDownLatch ready = new CountDownLatch(THREADS);
+        CountDownLatch go = new CountDownLatch(1);
+        for (int i = 0; i < THREADS; i++) {
+            pool.submit(() -> {
+                ready.countDown();
+                try { go.await(); } catch (InterruptedException e) { return; }
+                for (int j = 0; j < PER_THREAD; j++) inc.run();
+            });
+        }
+        ready.await();
+        go.countDown();   // all threads start at once, maximizing contention
+        pool.shutdown();
+        pool.awaitTermination(30, TimeUnit.SECONDS);
+        long time = System.nanoTime() - start;
+
+        long result = get.getAsLong();
+        long expected = (long) THREADS * PER_THREAD;
+        String status = (result == expected) ? "OK correct" : "WRONG (off by " + (expected - result) + ")";
+        System.out.printf("%-32s result=%-9d %-20s time=%d ms%n",
+            name, result, status, time / 1_000_000);
+    }
+}
+
+// === Unsafe ===
+class UnsafeCounter {
+    long count = 0;
+    void increment() { count++; }
+    long get() { return count; }
+}
+
+// === synchronized ===
+class SyncCounter {
+    long count = 0;
+    synchronized void increment() { count++; }
+    synchronized long get() { return count; }
+}
+
+// === AtomicInteger ===
+class AtomicCounter {
+    AtomicInteger count = new AtomicInteger(0);
+    void increment() { count.incrementAndGet(); }
+    long get() { return count.get(); }
+}
+
+// === LongAdder ===
+class LongAdderCounter {
+    LongAdder count = new LongAdder();
+    void increment() { count.increment(); }
+    long get() { return count.sum(); }
+}
+
+// === Visibility demo ===
+class VisibilityTest {
+    // Intentionally without volatile to demo the problem; with volatile it stops normally
+    // Note: on some JVM/OS combos it may stop even without volatile — this is unpredictable
+    private volatile boolean stop = false;
+
+    void run() throws Exception {
+        Thread worker = new Thread(() -> {
+            long count = 0;
+            while (!stop) {
+                count++;
+            }
+            System.out.println("worker exited, looped " + count + " times");
+        }, "visibility-worker");
+        worker.start();
+
+        Thread.sleep(100);
+        System.out.println("Main thread sets stop=true");
+        stop = true;
+        worker.join(1000);
+        System.out.println("worker final state: " + worker.getState());
+    }
+}
+
+// === Immutable object ===
+final class Point {
+    private final int x;
+    private final int y;
+    public Point(int x, int y) { this.x = x; this.y = y; }
+    public int getX() { return x; }
+    public int getY() { return y; }
+    public Point translate(int dx, int dy) { return new Point(x + dx, y + dy); }
+    @Override public String toString() { return "(" + x + "," + y + ")"; }
+}`} />
+
+> **Key observations**:
+> - **The unsafe counter is almost certainly wrong** — results differ each run, and are smaller than expected.
+> - **`synchronized` is correct but slowest** — high lock overhead, degrades noticeably under heavy contention.
+> - **`AtomicInteger` is correct and faster** — lock-free CAS, but still has retries under heavy contention.
+> - **`LongAdder` is fastest under high concurrency** — sharded accumulation, detailed in Chapter 41.
+> - **Visibility experiment**: without `volatile`, the worker may not exit (not guaranteed to reproduce — depends on JVM optimization); with `volatile`, it exits reliably.
+> - **The immutable `Point`**: `translate` returns a new object, the original is unchanged — inherently thread-safe.
+
+## 6. Chapter Summary
+
+| Concept | Key points |
+| --- | --- |
+| Race condition | Program correctness depends on thread execution order; occasional errors under multi-threading |
+| Critical section | Code fragment accessing shared resources; must be mutually exclusive |
+| Thread safety | No matter how many threads scramble, the result is correct |
+| Immutable object | `final` fields + `final` class + no exposure of mutable state — inherently safe |
+| Atomicity | Operations are not interrupted — `count++` is not atomic |
+| Visibility | Modifications seen by other threads — CPU caches cause problems |
+| Ordering | Execution order matches expectations — instruction reordering causes problems |
+| `synchronized` | Guarantees all three properties, but slow |
+| `volatile` | Guarantees visibility + ordering, **not atomicity** |
+| Atomic classes | CAS for atomicity + volatile field for visibility |
+
+**Mnemonics**:
+
+- **`count++` is not atomic** — it is "read-modify-write" in three steps; multi-threading loses updates.
+- **Immutable means lock-free** — make it immutable whenever possible; the simplest safety solution.
+- **Three properties: atomic, visible, ordered** — `synchronized` covers all; `volatile` only covers visible and ordered.
+- **Reproducible unsafe bugs are good bugs** — the truly terrifying ones are race conditions at one-in-a-million probability.
+
+## Conclusion: From "It Goes Wrong" to "Understanding Why It Goes Wrong"
+
+This chapter showed why concurrency goes wrong — race conditions, visibility, ordering. The root of all three problems lies in "shared mutable state." We also saw several solution approaches: locks, CAS, immutability, separate state.
+
+But a few questions remain unanswered:
+
+- Why can `synchronized` guarantee all three properties? What does it do under the hood?
+- How exactly does `volatile` "forbid instruction reordering"? What is a memory barrier?
+- Why are "final fields" guaranteed to be visible to other threads? How does the JMM guarantee it?
+- What is happens-before? Why does it make multi-threaded code "reason-able"?
+
+The answers to these questions all lie in the **Java Memory Model (JMM)** — the next chapter tackles this, the hardest and most crucial theoretical cornerstone of concurrency. Only by understanding the JMM can you upgrade from "knowing to use `volatile`" to "knowing why to use `volatile`."

@@ -1,0 +1,559 @@
+---
+title: "Lambda Expressions"
+chapter: 25
+stage: "Stage 5"
+stageName: "Functional Programming"
+order: 1
+description: "Understand functional programming concepts, Lambda syntax, comparison with anonymous inner classes, functional interfaces, type inference, and variable capture mechanisms"
+pubDate: 2026-07-03
+tags: ["Java", "Lambda", "函数式编程", "函数式接口", "FunctionalInterface", "变量捕获", "effectively final"]
+---
+
+# Lambda Expressions
+
+In mathematics, functions are first-class citizens — they can be assigned to variables, passed as arguments, and returned from other functions. But for a long time, Java functions could only "live inside" objects — to pass a "behavior," you had to write a class, instantiate it, and call its method. This "write a whole class just to pass one action" verbosity left Java playing catch-up in the wave of functional programming.
+
+Java 8's Lambda expressions finally freed "functions" from the constraints of objects. They are as concise as mathematical formulas — `(x) -> x * x` is the square function. In this chapter, we'll thoroughly explain Lambda — from concepts to syntax, from comparisons to pitfalls.
+
+## 1. Functional Programming Concepts
+
+### 1.1 Functions as "First-Class Citizens"
+
+In functional programming, functions — like integers and strings — are "first-class citizens":
+
+- They can be assigned to variables.
+- They can be passed as arguments.
+- They can be returned as values.
+- They can be stored in data structures.
+
+Java previously couldn't do this — "behavior" had to be encapsulated in objects. To pass a "comparator" to `Collections.sort`, you had to write an anonymous inner class:
+
+```java
+Collections.sort(list, new Comparator<Integer>() {
+    @Override
+    public int compare(Integer a, Integer b) {
+        return b - a;   // descending order
+    }
+});
+```
+
+To pass a single line of `b - a` logic, you wrote 5 lines of boilerplate — 4 of which were noise.
+
+### 1.2 Lambda to the Rescue
+
+Lambda lets you write "behavior" directly as an expression:
+
+```java
+Collections.sort(list, (a, b) -> b - a);
+```
+
+5 lines become 1, the noise disappears, and the logic is crystal clear. The essence of Lambda is: **treating functions as values to be passed around**.
+
+## 2. Lambda Syntax
+
+### 2.1 Basic Structure
+
+The basic syntax of a Lambda:
+
+```
+(parameter list) -> expression or statement block
+```
+
+`-＞` is the Lambda operator — the left side is parameters, the right side is the function body.
+
+Several forms:
+
+```java
+// 1. No parameters
+() -> System.out.println("hello")
+
+// 2. One parameter (parentheses optional)
+x -> x * x
+(x) -> x * x
+
+// 3. Multiple parameters
+(a, b) -> a + b
+
+// 4. Expression body (auto-returns, no semicolon)
+(x, y) -> x + y
+
+// 5. Statement block (requires return and semicolons)
+(x, y) -> {
+    int sum = x + y;
+    return sum;
+}
+```
+
+### 2.2 Types Can Be Omitted
+
+Parameter types can usually be omitted — the compiler infers them from the "target type":
+
+```java
+// Full version
+Comparator<Integer> c = (Integer a, Integer b) -> a - b;
+// Types omitted
+Comparator<Integer> c = (a, b) -> a - b;
+```
+
+### 2.3 Single Parameter Can Omit Parentheses
+
+When there's only one parameter, the parentheses can be dropped:
+
+```java
+Function<Integer, Integer> square = x -> x * x;
+// equivalent to
+Function<Integer, Integer> square = (x) -> x * x;
+```
+
+For zero or multiple parameters, the parentheses cannot be omitted.
+
+### 2.4 Expression vs Statement Block
+
+```java
+// Expression form: concise, auto-returns
+(x, y) -> x + y
+
+// Statement block form: multiple statements allowed, manual return needed
+(x, y) -> {
+    System.out.println("calculating...");
+    return x + y;
+}
+```
+
+Use the expression form whenever possible — it's more concise. Use the statement block form only when you need multiple statements or side effects.
+
+## 3. Lambda vs Anonymous Inner Classes
+
+### 3.1 Conciseness Comparison
+
+```java
+// Anonymous inner class
+Runnable r1 = new Runnable() {
+    @Override
+    public void run() {
+        System.out.println("hello");
+    }
+};
+
+// Lambda
+Runnable r2 = () -> System.out.println("hello");
+```
+
+6 lines become 1.
+
+### 3.2 Different `this` References
+
+This is the most easily overlooked difference:
+
+- **Anonymous inner class's `this`**: points to the anonymous class's own instance.
+- **Lambda's `this`**: points to the "enclosing class" instance (the class where the Lambda is defined).
+
+```java
+public class Outer {
+    String name = "Outer";
+
+    void test() {
+        // Anonymous inner class
+        Runnable r1 = new Runnable() {
+            @Override
+            public void run() {
+                System.out.println(this.getClass());   // Outer$1 (anonymous class)
+                System.out.println(this);              // anonymous class instance
+            }
+        };
+
+        // Lambda
+        Runnable r2 = () -> {
+            System.out.println(this.getClass());       // Outer
+            System.out.println(this);                  // Outer instance
+            System.out.println(name);                  // "Outer" (directly accesses enclosing field)
+        };
+    }
+}
+```
+
+Lambda does not introduce a new `this` scope — it "transparently" uses the enclosing `this`. This makes accessing enclosing fields more natural in a Lambda.
+
+### 3.3 Different Implementation Mechanisms
+
+- **Anonymous inner class**: At compile time, generates a `.class` file (e.g., `Outer$1.class`), and instantiates it at runtime.
+- **Lambda**: Java 8 uses the `invokedynamic` instruction to generate it dynamically — no extra `.class` file is produced, saving memory.
+
+You can verify this with `javap`: anonymous inner classes have separate class files after compilation, Lambdas do not.
+
+## 4. Functional Interfaces
+
+### 4.1 What Is a Functional Interface
+
+A Lambda cannot exist in a vacuum — it needs a "target type." That target is a **functional interface**:
+
+> An interface with exactly one abstract method (default and static methods don't count).
+
+```java
+@FunctionalInterface
+public interface Runnable {
+    void run();   // the only abstract method
+}
+
+@FunctionalInterface
+public interface Comparator<T> {
+    int compare(T o1, T o2);   // the only abstract method
+    // equals comes from Object, doesn't count
+    // multiple default methods don't count
+}
+```
+
+The `@FunctionalInterface` annotation is optional — when added, the compiler checks "whether there's exactly one abstract method," preventing accidental breakage. **Strongly recommended to add** — it's like a "contract stamp" for your interface.
+
+### 4.2 Correspondence Between Lambda and Functional Interfaces
+
+The Lambda's signature (parameter count, types, return value) must match the target interface's single abstract method:
+
+```java
+// Runnable.run() takes no params, returns nothing
+Runnable r = () -> System.out.println("hi");
+
+// Comparator.compare(T, T) takes two params, returns int
+Comparator<Integer> c = (a, b) -> a - b;
+
+// Callable<V>.call() takes no params, returns V
+Callable<String> call = () -> "result";
+```
+
+The compiler infers the Lambda's parameter types and return type from the "target type" (the interface declared on the left) — this is "target typing."
+
+### 4.3 Custom Functional Interfaces
+
+Writing your own functional interface is simple:
+
+```java
+@FunctionalInterface
+interface StringProcessor {
+    String process(String input);
+}
+
+StringProcessor toUpper = s -> s.toUpperCase();
+StringProcessor reverse = s -> new StringBuilder(s).reverse().toString();
+
+System.out.println(toUpper.process("hello"));    // HELLO
+System.out.println(reverse.process("hello"));    // olleh
+```
+
+However, Java already ships with a set of common functional interfaces (`Function`, `Predicate`, `Consumer`, `Supplier`, etc.), detailed in the next chapter. **Before writing your own, check whether the built-ins suffice** — avoid reinventing the wheel.
+
+## 5. Type Inference
+
+### 5.1 Target Typing
+
+The compiler infers the Lambda's type from the context:
+
+```java
+// Same (x, y) -> x + y, different targets, different types
+Comparator<Integer> c = (x, y) -> x - y;        // x, y are Integer, returns int
+IntBinaryOperator op = (x, y) -> x + y;          // x, y are int, returns int
+BiFunction<String, String, String> f = (x, y) -> x + y;  // x, y are String
+```
+
+### 5.2 Parameter Types Can Be Omitted
+
+```java
+// Explicit types
+BinaryOperator<Integer> add = (Integer a, Integer b) -> a + b;
+// Inferred types
+BinaryOperator<Integer> add = (a, b) -> a + b;
+```
+
+Mixed style (one declared, one not) doesn't work: `(Integer a, b) -＞ ...` is a compile error — either declare all or none.
+
+### 5.3 Return Type Inference
+
+The return type is inferred from the function body's "return expression":
+
+```java
+// Infers return type String
+Supplier<String> s = () -> "hello";
+
+// Infers return type int
+IntSupplier is = () -> 42;
+```
+
+If the function body has multiple returns, the types must be consistent.
+
+## 6. Variable Capture
+
+### 6.1 Lambdas Can Access Enclosing Variables
+
+A Lambda can access local variables of its enclosing method, fields of the enclosing class, and method parameters:
+
+```java
+public class Example {
+    int field = 10;   // enclosing field
+
+    void method(int param) {
+        int local = 20;   // local variable
+
+        Runnable r = () -> {
+            System.out.println(field);     // ✅ access field
+            System.out.println(param);     // ✅ access parameter
+            System.out.println(local);     // ✅ access local variable
+        };
+    }
+}
+```
+
+### 6.2 The effectively final Restriction
+
+**Key rule**: Local variables captured by a Lambda must be effectively final — meaning they are not modified after declaration.
+
+```java
+int x = 10;
+Runnable r = () -> System.out.println(x);   // ✅ x not modified, effectively final
+
+int y = 10;
+y = 20;   // modified!
+Runnable r2 = () -> System.out.println(y);  // ❌ compile error
+```
+
+### 6.3 Why This Restriction Exists
+
+This restriction isn't Java being deliberately difficult — it's based on **concurrency safety** and **semantic clarity**:
+
+1. **Concurrency issues**: A Lambda may execute in another thread. If it could modify captured local variables, concurrent modifications across threads would cause data races. Java doesn't have C#'s `ref` parameter mechanism, so it can't safely "pass by reference."
+
+2. **Consistency**: Local variables live on the method stack, and the stack frame is destroyed when the method returns. If the Lambda executes after the method returns (e.g., an async callback), the "local variable" it accesses is actually a **copy**. If modification were allowed, inconsistency between the copy and the original would be confusing.
+
+3. **State management**: Functional programming favors "no side effects." Allowing modification of captured variables introduces implicit state, violating this principle.
+
+Note: **Fields don't have this restriction** — fields are object state, stored on the heap, and the Lambda accesses them by reference, not by copy. But you still need to ensure thread safety yourself when modifying fields across threads.
+
+### 6.4 Workarounds for the Restriction
+
+If you need to "accumulate" a value inside a Lambda, use an array or an Atomic class to "wrap" it:
+
+```java
+// ❌ Doesn't work
+int sum = 0;
+list.forEach(x -> sum += x);   // compile error
+
+// ✅ Use an array
+int[] sum = {0};
+list.forEach(x -> sum[0] += x);
+
+// ✅ Use Atomic (thread-safe)
+AtomicInteger sum = new AtomicInteger();
+list.forEach(x -> sum.addAndGet(x));
+
+// ✅ Better approach: use Stream
+int sum = list.stream().mapToInt(Integer::intValue).sum();
+```
+
+The last approach is most recommended — it has no side effects and is true functional style.
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.function.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 基本语法
+        Runnable r = () -> System.out.println("Hello Lambda!");
+        r.run();
+
+        // 2. 各种形式
+        Supplier<String> supplier = () -> "供应一个字符串";
+        Consumer<String> consumer = s -> System.out.println("消费: " + s);
+        Function<String, Integer> length = s -> s.length();
+        Predicate<Integer> isEven = n -> n % 2 == 0;
+
+        System.out.println("\\n--- 基础函数式接口 ---");
+        System.out.println(supplier.get());
+        consumer.accept("数据");
+        System.out.println("length(abc): " + length.apply("abc"));
+        System.out.println("isEven(4): " + isEven.test(4));
+
+        // 3. 类型推断：同样的 Lambda 不同目标
+        System.out.println("\\n--- 类型推断 ---");
+        Comparator<Integer> intComp = (a, b) -> a - b;
+        Comparator<String> strComp = (a, b) -> a.length() - b.length();
+        System.out.println("compare(3,5): " + intComp.compare(3, 5));
+        System.out.println("compare(ab,abc): " + strComp.compare("ab", "abc"));
+
+        // 4. 与匿名内部类对比 this
+        System.out.println("\\n--- this 指向对比 ---");
+        Outer outer = new Outer();
+        outer.test();
+
+        // 5. 变量捕获
+        System.out.println("\\n--- 变量捕获 ---");
+        String prefix = "前缀: ";   // effectively final
+        Consumer<String> printer = s -> System.out.println(prefix + s);
+        printer.accept("数据1");
+        printer.accept("数据2");
+        // prefix = "新前缀";   // ❌ 这会破坏 effectively final
+
+        // 6. 绕过限制：用数组
+        System.out.println("\\n--- 累加（数组绕过） ---");
+        List<Integer> nums = List.of(1, 2, 3, 4, 5);
+        int[] sum = {0};
+        nums.forEach(n -> sum[0] += n);
+        System.out.println("数组绕过累加: " + sum[0]);
+
+        // 7. 推荐方式：Stream
+        int streamSum = nums.stream().mapToInt(Integer::intValue).sum();
+        System.out.println("Stream 求和: " + streamSum);
+
+        // 8. 自定义函数式接口
+        System.out.println("\\n--- 自定义函数式接口 ---");
+        StringProcessor toUpper = s -> s.toUpperCase();
+        StringProcessor reverse = s -> new StringBuilder(s).reverse().toString();
+        StringProcessor andThen = toUpper.andThen(reverse);
+        System.out.println(toUpper.process("hello"));
+        System.out.println(reverse.process("hello"));
+        System.out.println(andThen.process("hello"));   // OLLEH
+
+        // 9. Lambda 作为方法参数
+        System.out.println("\\n--- Lambda 作为方法参数 ---");
+        List<String> names = new ArrayList<>(List.of("Charlie", "Alice", "Bob"));
+        names.sort((a, b) -> a.compareTo(b));   // Lambda
+        System.out.println("升序: " + names);
+        names.sort((a, b) -> b.compareTo(a));   // 降序
+        System.out.println("降序: " + names);
+        names.removeIf(s -> s.length() <= 3);
+        System.out.println("过滤短名: " + names);
+
+        // 10. 返回 Lambda
+        System.out.println("\\n--- 方法返回 Lambda ---");
+        Function<Integer, Integer> doubler = makeMultiplier(2);
+        Function<Integer, Integer> tripler = makeMultiplier(3);
+        System.out.println("5 * 2 = " + doubler.apply(5));
+        System.out.println("5 * 3 = " + tripler.apply(5));
+    }
+
+    static Function<Integer, Integer> makeMultiplier(int factor) {
+        // factor 被 Lambda 捕获，effectively final
+        return x -> x * factor;
+    }
+}
+
+class Outer {
+    String name = "外围类";
+
+    void test() {
+        // 匿名内部类的 this 指向匿名类
+        Runnable r1 = new Runnable() {
+            String name = "匿名类";
+            @Override
+            public void run() {
+                System.out.println("匿名内部类 this.name: " + this.name);
+            }
+        };
+
+        // Lambda 的 this 指向外围类
+        Runnable r2 = () -> {
+            System.out.println("Lambda this.name: " + this.name);
+        };
+
+        r1.run();
+        r2.run();
+    }
+}
+
+@FunctionalInterface
+interface StringProcessor {
+    String process(String input);
+
+    default StringProcessor andThen(StringProcessor after) {
+        return s -> after.process(this.process(s));
+    }
+}`} />
+
+## 7. Common Lambda Use Cases
+
+### 7.1 Collection Sorting
+
+```java
+list.sort((a, b) -> a.length() - b.length());   // sort by length ascending
+list.sort(Comparator.comparingInt(String::length));   // more idiomatic
+```
+
+### 7.2 Collection Iteration
+
+```java
+list.forEach(s -> System.out.println(s));
+list.forEach(System.out::println);   // method reference is more concise
+```
+
+### 7.3 Collection Removal
+
+```java
+list.removeIf(s -> s.isEmpty());   // remove empty strings
+```
+
+### 7.4 Stream Operations
+
+```java
+list.stream()
+    .filter(s -> s.length() > 3)
+    .map(String::toUpperCase)
+    .forEach(System.out::println);
+```
+
+### 7.5 Thread Creation
+
+```java
+new Thread(() -> {
+    System.out.println("running in a child thread");
+}).start();
+```
+
+### 7.6 Event Listeners (GUI, Callbacks)
+
+```java
+button.addActionListener(e -> handleClick(e));
+```
+
+## 8. Lambda Limitations
+
+Lambda isn't a silver bullet — it has several limitations:
+
+1. **Only works with functional interfaces**: To pass to an interface with "multiple abstract methods" (like `List`), you still need anonymous inner classes.
+2. **Cannot have state fields**: A Lambda can't define fields like an anonymous inner class can. Use anonymous inner classes if you need to hold state.
+3. **Cannot recurse itself**: A Lambda has no name, so it can't call itself directly (you'd need method references or assign it to a variable for indirect recursion).
+4. **Cannot throw checked exceptions**: Unless the functional interface's abstract method declares that exception.
+
+```java
+// ❌ Cannot throw checked exception (Runnable.run doesn't declare exceptions)
+Runnable r = () -> { throw new IOException(); };
+
+// ✅ Throwing runtime exceptions is fine
+Runnable r2 = () -> { throw new RuntimeException(); };
+
+// ✅ Works only if the interface method declares the checked exception
+interface Task { void run() throws IOException; }
+Task t = () -> { throw new IOException(); };
+```
+
+## 9. Chapter Summary
+
+| Topic | Key Points |
+| --- | --- |
+| Functions as first-class citizens | Can be assigned, passed as arguments, returned, stored |
+| Lambda syntax | `(params) -＞ expression` or `(params) -＞ { statements; }` |
+| Type inference | Parameter types can be omitted, inferred from target interface |
+| Functional interface | An interface with exactly one abstract method |
+| `@FunctionalInterface` | Annotation that lets the compiler check |
+| vs anonymous inner classes | More concise, but `this` behaves differently |
+| `this` reference | Lambda's `this` is the enclosing class; anonymous inner class's `this` is itself |
+| Implementation mechanism | Lambda uses invokedynamic, no .class generated |
+| Variable capture | Can access enclosing variables |
+| effectively final | Captured local variables must not be modified |
+| Limitations | Only functional interfaces, no fields, can't throw checked exceptions |
+
+## Conclusion: Freedom of Functions
+
+Lambda expressions are Java's first — and most important — step toward functional programming. They free "behavior" from the heavy shell of "objects," letting code return to "logic" itself — a single line of `(a, b) -＞ a + b` is far cleaner than an anonymous inner class.
+
+But behind Lambda's simplicity lie rules: it needs a functional interface as its target type, and captured local variables must be effectively final. Understanding these rules lets you write Lambdas that are both elegant and correct.
+
+In the next chapter, we'll look at Java's built-in functional interfaces — `Function`, `Predicate`, `Consumer`, `Supplier`, and more. They are the "stage" for Lambdas and the cornerstone of the Stream API.

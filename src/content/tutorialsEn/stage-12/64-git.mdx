@@ -1,0 +1,557 @@
+---
+title: "Git Version Control"
+chapter: 64
+stage: "Stage 12"
+stageName: "Engineering and Ecosystem"
+order: 2
+description: "Master Git basics (init/add/commit/push/pull/clone), branch management (branch/checkout/merge/rebase), remote collaboration (remote/PR/Code Review), .gitignore, and GitHub/Gitee hands-on practice"
+pubDate: 2026-07-03
+tags: ["Java", "Git", "Version Control", "GitHub", "Branch Management"]
+---
+
+# Git Version Control
+
+What is the most painful moment in coding? "It worked yesterday, why is it broken today?" — you forgot what you changed. Or worse — during collaboration, A edits `UserService.java`, B also edits `UserService.java`, and they overwrite each other into a mess. The **Version Control System (VCS)** was born to solve exactly this — it records every change, letting you roll back at any time, develop in parallel, and merge code.
+
+Git is a distributed VCS created by Linus Torvalds (the father of Linux) in 2005 and is now the de facto standard. This chapter covers how to use Git and how to collaborate with it.
+
+## 1. Why You Need Git
+
+Picture a team without version control:
+
+- **Backups via copy-paste** — `UserService.java.bak`, `UserService.java.bak2`, `UserService_final.java`, `UserService_really_final.java`… file explosion.
+- **Merging by hand** — A sends the file to B, B manually diffs and merges, an absolute chore.
+- **Rollback by memory** — "What lines did I change last Wednesday?" — nobody remembers.
+- **Collaboration by shouting** — "Don't touch this file, I'm working on it!" — one missed shout and you get a conflict.
+
+Git solves all of these:
+
+1. **Complete history** — every commit is a snapshot; you can return to any historical version.
+2. **Parallel branches** — opening a new branch doesn't affect the main one; everyone develops independently.
+3. **Automatic merging** — changes in different parts of the same file are merged automatically; only conflicts need manual intervention.
+4. **Remote collaboration** — push/pull syncs to a remote repository so the team can share.
+
+## 2. Git Basics
+
+### 2.1 Three Areas and Three States
+
+Git has three core areas:
+
+- **Working Directory** — the directory files you see.
+- **Staging Area (Index)** — the snapshot prepared for committing.
+- **Repository** — the commit history.
+
+Corresponding to three states:
+
+```
+Working Directory --git add--> Staging Area --git commit--> Repository
+       (modified)                 (staged)                   (committed)
+```
+
+### 2.2 Basic Workflow
+
+```bash
+# 1. Initialize a repository
+git init                        # Create .git/ in the current directory
+git clone https://github.com/user/repo.git   # Clone a remote repository
+
+# 2. Configuration (one-time)
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+
+# 3. Daily workflow
+git status                      # View status
+git add Main.java               # Add to staging area
+git add .                       # Add all changes
+git commit -m "Fix login bug"   # Commit to repository
+git log --oneline -5            # View the last 5 commits
+
+# 4. Sync with remote
+git push origin main            # Push to the remote main branch
+git pull origin main            # Pull remote updates
+git fetch                       # Pull but don't merge
+```
+
+**Good habits for commit messages**:
+
+- Use the imperative mood: `Fix login bug`, not `Fixed login bug`.
+- Keep the first line short (＜50 chars), leave a blank line, then write details.
+- Describe "why" rather than "what" — the diff already shows what you did.
+- Categorize with prefixes: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`.
+
+```
+fix: Fix NPE when password is null during user login
+
+UserService.verify called equals directly when password was null,
+causing an NPE. Add an early null check returning false.
+```
+
+### 2.3 .gitignore
+
+Some files should never enter the repository — build output, IDE configs, secret keys. The `.gitignore` file specifies ignore rules:
+
+```gitignore
+# Build output
+target/
+build/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Secrets (NEVER commit these!)
+.env
+application-local.yml
+*.pem
+*.key
+
+# Dependencies
+node_modules/
+```
+
+`github.com/github/gitignore` provides ready-made templates for many languages. **Never commit secret key files** — once pushed to a public GitHub repo, crawlers will scrape them in seconds and you must revoke them immediately.
+
+## 3. Branch Management
+
+Branches are the soul of Git — they make "parallel development" possible. Each branch is an independent timeline that doesn't interfere with others.
+
+### 3.1 Basic Branch Operations
+
+```bash
+git branch                      # List local branches
+git branch -a                   # List all branches (including remote)
+git branch feature-login        # Create a branch
+git checkout feature-login      # Switch branch
+git checkout -b feature-login   # Create and switch (commonly used)
+git switch feature-login        # Switch branch (newer command, clearer semantics than checkout)
+git switch -c feature-login     # Create and switch
+
+git branch -d feature-login     # Delete branch (only if merged)
+git branch -D feature-login     # Force delete
+git push origin --delete feature-login  # Delete remote branch
+```
+
+### 3.2 Branching Strategies
+
+Common branch models:
+
+- **`main` / `master`** — production branch, always deployable.
+- **`develop`** — main development line, integrates feature branches.
+- **`feature/*`** — new feature branches, split off from develop and merged back when done.
+- **`hotfix/*`** — emergency fixes, split off from main and merged back to both main and develop.
+- **`release/*`** — release preparation.
+
+GitHub Flow (simplified):
+
+- `main` is the production branch.
+- Any change starts from a new branch off `main` (`feature/xxx`).
+- After finishing, open a PR; once Code Review passes, merge back to `main`.
+- No `develop`/`release` — simple enough for small teams.
+
+### 3.3 Merge vs Rebase
+
+There are two ways to merge a branch back into the main line:
+
+**Merge** — preserves branch history and creates a merge commit:
+
+```bash
+git checkout main
+git merge feature-login
+# Generates a merge commit; history has a fork-and-merge shape
+```
+
+```
+*   merge commit (main)
+|\
+| * feature commit 3 (feature-login)
+| * feature commit 2
+| * feature commit 1
+|/
+*   previous main commit
+```
+
+**Rebase** — "moves" the branch's commits on top of the main line, producing a linear history:
+
+```bash
+git checkout feature-login
+git rebase main      # "Replay" feature's commits on top of main
+git checkout main
+git merge feature-login   # fast-forward, linear history
+```
+
+```
+* feature commit 3 (main)
+* feature commit 2
+* feature commit 1
+* previous main commit
+```
+
+| Method | History | Pros | Cons |
+| --- | --- | --- | --- |
+| Merge | Fork + merge | Preserves full context | Messy history |
+| Rebase | Linear | Clean history | Rewrites commit hashes |
+
+**Rules of thumb**:
+
+- Use **merge** for team main branches (preserves context).
+- Use **rebase** when updating an individual feature branch off main (avoids pointless merge commits).
+- **Never rebase commits already pushed to a public branch** — it rewrites history and causes conflicts to explode when others pull.
+
+### 3.4 Resolving Conflicts
+
+When two branches change the same line, merging produces a conflict:
+
+```
+git merge feature-login
+# Auto-merging UserService.java
+# CONFLICT (content): Merge conflict in UserService.java
+```
+
+Open the file and you'll see conflict markers:
+
+```java
+public void login(String name) {
+<<<<<<< HEAD
+    System.out.println("main branch version");
+=======
+    System.out.println("feature branch version");
+>>>>>>> feature-login
+}
+```
+
+Manually choose which to keep (or merge both), delete the conflict markers, then `git add` + `git commit`.
+
+```bash
+git mergetool        # Resolve conflicts with a graphical tool
+git add UserService.java
+git commit           # Complete the merge
+git merge --abort    # Abort the merge, return to pre-merge state
+```
+
+The strategy for reducing conflicts — **sync frequently** + **commit in small steps** + **short-lived branches**. A branch that lives two weeks inevitably produces big conflicts; one that lives two days produces small ones.
+
+## 4. Remote Collaboration
+
+### 4.1 Remote Repositories
+
+```bash
+git remote -v                   # View remote repositories
+git remote add origin https://github.com/user/repo.git   # Add a remote
+git remote remove origin        # Remove
+git remote set-url origin URL   # Change URL
+
+git push origin main            # Push
+git push -u origin feature      # Push and set upstream (subsequent git push needs no target)
+git pull                        # Pull and merge (equivalent to fetch + merge)
+git fetch                       # Pull but don't merge; use git log origin/main to inspect remote state
+```
+
+### 4.2 SSH vs HTTPS
+
+```bash
+# HTTPS: prompts for password every time (use a token instead; GitHub enforces this since 2021)
+git clone https://github.com/user/repo.git
+
+# SSH: password-free once the key is set up; recommended
+git clone git@github.com:user/repo.git
+```
+
+Set up an SSH key:
+
+```bash
+ssh-keygen -t ed25519 -C "you@example.com"
+# Press Enter all the way; generates ~/.ssh/id_ed25519 (private key) and .pub (public key)
+# Paste the .pub contents into GitHub -> Settings -> SSH and GPG keys
+```
+
+### 4.3 Pull Request (PR) Workflow
+
+The core collaboration mechanism of GitHub/Gitee — the PR (Pull Request):
+
+1. **Fork** the main repository into your own account (for open-source contributions).
+2. **Clone** your fork locally.
+3. **Create a branch** `feature/xxx` and develop.
+4. **Push** to your fork.
+5. Open a **Pull Request** on GitHub to the main repository.
+6. Maintainers do a **Code Review**, leave comments, you revise.
+7. After approval, **Merge** into the main branch.
+
+Code Review is the heart of the PR — colleagues read your code, suggest improvements, find bugs, and unify style. This is a key safeguard for team code quality.
+
+```bash
+# Sync updates from upstream (the main repo) to your fork
+git remote add upstream https://github.com/original/repo.git
+git fetch upstream
+git checkout main
+git merge upstream/main
+git push origin main
+```
+
+## 5. Hands-On: Common Commands Cheat Sheet
+
+Since Git is a command-line tool and can't run in Piston, below we use Java to simulate a **mini commit history** — illustrating the concepts of commit/branch/merge.
+
+<CodeRunner code={`import java.util.*;
+import java.util.stream.*;
+
+// 模拟 Git 提交
+class Commit {
+    final String id;            // 哈希 (模拟)
+    final String message;
+    final List<Commit> parents; // 父提交 (1 个普通, 2 个 merge)
+    Commit(String id, String msg, Commit... parents) {
+        this.id = id; this.message = msg; this.parents = Arrays.asList(parents);
+    }
+    @Override public String toString() { return id + ":" + message; }
+}
+
+// 模拟 Git 仓库
+class MiniGit {
+    private final Map<String, Commit> branches = new LinkedHashMap<>();
+    private String current;
+    private int seq = 0;
+
+    public MiniGit(String initialBranch) {
+        branches.put(initialBranch, null);
+        current = initialBranch;
+    }
+
+    public void checkout(String branch) {
+        if (!branches.containsKey(branch)) {
+            System.out.println("[Git] 创建并切换到分支 " + branch);
+            branches.put(branch, branches.get(current));   // 从当前分支拉
+        } else {
+            System.out.println("[Git] 切换到分支 " + branch);
+        }
+        current = branch;
+    }
+
+    public Commit commit(String msg) {
+        Commit c = new Commit("c" + (++seq), msg,
+            branches.get(current) == null ? new Commit[0] : new Commit[]{branches.get(current)});
+        branches.put(current, c);
+        System.out.println("[Git] (" + current + ") " + c);
+        return c;
+    }
+
+    public void merge(String fromBranch) {
+        Commit fromHead = branches.get(fromBranch);
+        Commit curHead = branches.get(current);
+        if (fromHead == null) {
+            System.out.println("[Git] " + fromBranch + " 是空分支, 无需合并");
+            return;
+        }
+        if (curHead == null) {
+            branches.put(current, fromHead);
+            System.out.println("[Git] fast-forward 合并 " + fromBranch + " -> " + current);
+            return;
+        }
+        // 模拟 merge commit
+        Commit merge = new Commit("c" + (++seq),
+            "Merge branch '" + fromBranch + "' into " + current, curHead, fromHead);
+        branches.put(current, merge);
+        System.out.println("[Git] 创建 merge commit: " + merge);
+    }
+
+    public void log() {
+        System.out.println("[Git] === " + current + " 提交历史 (逆序) ===");
+        Commit c = branches.get(current);
+        Set<String> visited = new HashSet<>();
+        Deque<Commit> stack = new ArrayDeque<>();
+        stack.push(c);
+        while (!stack.isEmpty()) {
+            Commit cur = stack.pop();
+            if (cur == null || !visited.add(cur.id)) continue;
+            System.out.println("    " + cur);
+            for (Commit p : cur.parents) stack.push(p);
+        }
+    }
+
+    public void branchList() {
+        System.out.println("[Git] 分支列表:");
+        branches.forEach((b, head) ->
+            System.out.println("    " + (b.equals(current) ? "* " : "  ") + b
+                + " -> " + (head == null ? "(空)" : head.id)));
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== Git 工作流模拟 ===\\n");
+
+        MiniGit git = new MiniGit("main");
+
+        // 1. 在 main 上提交初始代码
+        System.out.println("--- 1. main 分支初始提交 ---");
+        git.commit("初始化项目");
+        git.commit("添加用户实体");
+
+        // 2. 拉新分支开发登录功能
+        System.out.println("\\n--- 2. 新建 feature/login 分支开发 ---");
+        git.checkout("feature/login");
+        git.commit("实现登录方法");
+        git.commit("添加密码校验");
+
+        // 3. 同时 main 修了个 bug
+        System.out.println("\\n--- 3. main 分支修 bug ---");
+        git.checkout("main");
+        git.commit("修复空指针 bug");
+
+        // 4. 看分支状态
+        System.out.println("\\n--- 4. 分支列表 ---");
+        git.branchList();
+
+        // 5. 合并 feature/login 到 main
+        System.out.println("\\n--- 5. 合并 feature/login 到 main ---");
+        git.merge("feature/login");
+
+        // 6. 查看 main 的历史
+        System.out.println("\\n--- 6. main 提交历史 ---");
+        git.log();
+
+        // 7. 删除已合并分支
+        System.out.println("\\n--- 7. 删除已合并的 feature/login ---");
+        System.out.println("[Git] 删除分支 feature/login (已合并)");
+
+        System.out.println("\\n=== Git 常用命令速查 ===");
+        System.out.println("基础: init/clone/add/commit/status/log");
+        System.out.println("分支: branch/checkout/switch/merge");
+        System.out.println("远程: remote/push/pull/fetch");
+        System.out.println("撤销: reset/revert/checkout --");
+        System.out.println("高级: rebase/cherry-pick/stash/tag");
+        System.out.println("协作: PR/Code Review/Issue");
+
+        System.out.println("\\n=== 最佳实践 ===");
+        System.out.println("1. 小步提交, message 写清\"为什么\"");
+        System.out.println("2. .gitignore 排除编译产物和密钥");
+        System.out.println("3. 频繁 pull, 减少冲突");
+        System.out.println("4. 公共分支用 merge, 个人分支用 rebase");
+        System.out.println("5. 永远不 rebase 已推送的公共提交");
+        System.out.println("6. 密钥绝不提交 (用 .env + .gitignore)");
+    }
+}`} />
+
+> **Key observations**:
+> - **`main` and `feature/login` are two independent timelines** — switching branches doesn't affect the other's history.
+> - **`merge` creates a merge commit** — it has two parents, marking the intersection of two branches.
+> - **`log` traverses in reverse** — chasing parent commits from the newest one backward.
+> - **Conflicts aren't simulated here** — real Git only conflicts on same-line changes, which must be resolved manually.
+
+## 6. Undoing Changes
+
+Undo is Git's most-used "regret button":
+
+```bash
+# Undo working-directory changes (not yet added)
+git restore Main.java              # Newer command
+git checkout -- Main.java          # Older command
+
+# Unstage (added, not committed)
+git restore --staged Main.java
+git reset HEAD Main.java
+
+# Undo the most recent commit (keep changes)
+git reset --soft HEAD~1            # Changes stay in staging area
+git reset HEAD~1                   # Changes stay in working directory (default --mixed)
+git reset --hard HEAD~1            # Discard changes entirely (dangerous!)
+
+# Undo an old commit with a new commit (doesn't rewrite history, safe)
+git revert HEAD                    # Creates a "reverse" commit
+
+# Stash current changes (don't commit, save for later)
+git stash                          # Save current working directory
+git stash list                     # List
+git stash pop                      # Restore the most recent one
+```
+
+**`reset` vs `revert`**:
+
+- `reset` rewrites history — moves HEAD to a specified commit. **Only for local unpushed commits**.
+- `revert` creates a new commit — adds a "reverse" commit to history while keeping the original. **For already-pushed public commits**.
+
+Iron rule: **For commits already pushed to a public branch, always use `revert`, never `reset`** — rewriting history makes everyone else's pull explode.
+
+## 7. Advanced Tips
+
+### 7.1 cherry-pick
+
+Pick just one commit from another branch and apply it:
+
+```bash
+git cherry-pick abc1234   # Apply commit abc1234 to the current branch
+```
+
+Scenario: a bug was fixed on the `hotfix` branch and you want to sync it to `develop` without merging the whole branch — just cherry-pick that fix commit.
+
+### 7.2 stash
+
+Temporarily switch tasks when you have uncommitted changes you don't want to lose:
+
+```bash
+git stash                # Save current changes to a stack
+git checkout other-branch
+# Do other work...
+git checkout original-branch
+git stash pop            # Restore
+```
+
+### 7.3 tag
+
+Tag a release version:
+
+```bash
+git tag v1.0.0                    # Lightweight tag
+git tag -a v1.0.0 -m "Release"    # Annotated tag (recommended)
+git push origin v1.0.0            # Push the tag
+git tag                           # List tags
+```
+
+### 7.4 reflog
+
+Git's "regret button for the regret button" — records every HEAD movement; even commits deleted by `reset` can be recovered:
+
+```bash
+git reflog                # View HEAD history
+git reset --hard HEAD@{5} # Return to the state 5 steps ago
+```
+
+Accidentally deleted a branch or `reset` wrong? This is your lifesaver.
+
+## 8. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| Three areas | Working directory / staging area / repository |
+| Basic flow | add → commit → push |
+| Branches | Independent timelines, parallel development |
+| merge | Preserves branch history, creates a merge commit |
+| rebase | Linear history, don't use on public commits |
+| Conflicts | Same-line changes need manual resolution |
+| `.gitignore` | Exclude files from the repository |
+| PR | Pull Request collaboration workflow |
+| `reset` | Rewrites history, local only |
+| `revert` | Reverse commit, for public branches |
+
+**Mnemonic**:
+
+- **Three-area flow** — working directory → add → staging area → commit → repository → push → remote.
+- **A branch is a timeline** — switching branches is mutually isolated.
+- **Use merge on public branches** — preserves history.
+- **Don't rebase public commits** — rewrites hashes.
+- **Use reset locally, revert publicly** for undo.
+- **Put secrets in .gitignore** — never commit them.
+
+## Conclusion: From Solo to Collaborative
+
+This chapter covered Git — from local version control to remote collaboration, from parallel branches to PR reviews. Git is an essential tool for every programmer; the earlier you master it, the more you benefit. Next up is another engineering weapon — **testing**, using JUnit + Mockito to make code quality measurable and regression-proof.

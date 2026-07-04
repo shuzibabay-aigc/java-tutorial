@@ -1,0 +1,401 @@
+---
+title: "并发集合"
+chapter: 42
+stage: "第七阶段"
+stageName: "并发编程"
+order: 9
+description: "深入 ConcurrentHashMap（CAS+synchronized 锁桶）、CopyOnWriteArrayList、ConcurrentLinkedQueue、BlockingQueue 系列、跳表 ConcurrentSkipListMap"
+pubDate: 2026-07-03
+tags: ["Java", "ConcurrentHashMap", "CopyOnWriteArrayList", "BlockingQueue", "ConcurrentLinkedQueue", "ConcurrentSkipListMap"]
+---
+
+# 并发集合
+
+前面几章我们用锁、CAS、原子类保护共享变量。但如果你用一个普通 `HashMap` 在多线程下读写——加锁就太重了，每个操作都 `synchronized(map)` 性能很差，但完全不加锁又会出问题（结构性破坏、死循环、丢失更新）。
+
+JUC 提供了一套**并发集合（Concurrent Collections）**——它们内部已经做好了线程安全设计，你可以直接用，不用自己加锁。`ConcurrentHashMap` 是其中最璀璨的明珠——分段锁/CAS 让它在不牺牲性能的前提下保证线程安全。`CopyOnWriteArrayList` 用"写时复制"解决读多写少场景。`BlockingQueue` 是生产者-消费者的标准实现。这一章把它们讲透。
+
+## 一、为什么不用 Collections.synchronizedXxx
+
+老 Java 提供 `Collections.synchronizedList(new ArrayList<>())` 这种"包装同步"——把每个方法都 `synchronized`。它的问题：
+
+- **粒度太粗**——所有操作锁同一把锁，所有读写都互斥。
+- **迭代需要外部同步**——`synchronizedList` 的迭代器不是线程安全的，迭代时必须手动 `synchronized(list)`，否则抛 `ConcurrentModificationException`。
+- **复合操作不安全**——`if(!list.isEmpty()) list.get(0)` 这种"检查再操作"中间有竞态。
+
+并发集合（JUC 包）就是为解决这些问题而生：
+
+| 集合 | 同步包装 | 并发集合 |
+| --- | --- | --- |
+| List | `synchronizedList` | `CopyOnWriteArrayList` |
+| Map | `synchronizedMap`/`Hashtable` | `ConcurrentHashMap` |
+| Set | `synchronizedSet` | `CopyOnWriteArraySet`/`ConcurrentSkipListSet` |
+| Queue | — | `ConcurrentLinkedQueue` |
+| 排序 Map | `synchronizedSortedMap`/`TreeMap` | `ConcurrentSkipListMap` |
+
+## 二、ConcurrentHashMap 详解
+
+`ConcurrentHashMap` 是并发 Map 的标准答案。它的演进分两个阶段：
+
+### 2.1 Java 7：分段锁（Segment）
+
+Java 7 的 `ConcurrentHashMap` 内部是 **Segment[]**——每个 Segment 是一个独立的小 HashMap，自带锁。默认 16 个 Segment，理论上支持 16 线程并发写。
+
+```
+ConcurrentHashMap
+  ├── Segment[0] (lock) → HashEntry[]
+  ├── Segment[1] (lock) → HashEntry[]
+  ├── ...
+  └── Segment[15] (lock) → HashEntry[]
+```
+
+写操作只锁对应 Segment，不影响其他 Segment——并发度 = Segment 数。读操作完全无锁（用 `volatile` 字段保证可见性）。
+
+### 2.2 Java 8+：CAS + synchronized 锁桶
+
+Java 8 把设计推倒重来——去掉 Segment，回到"数组 + 链表/红黑树"，但锁粒度细化到**每个桶的头节点**：
+
+```
+ConcurrentHashMap
+  └── Node[] table
+        ├── table[0] → null
+        ├── table[1] → Node → Node → Node   （链表）
+        ├── table[2] → TreeBin               （红黑树，链表长度 ≥8）
+        ├── ...
+        └── table[n] → Node
+```
+
+**写操作（put）流程**：
+
+1. 计算 hash 找到桶。
+2. 桶为空 → **CAS 插入**（无锁）。
+3. 桶非空 → **`synchronized(头节点)`** 锁住这个桶，插入链表/红黑树。
+4. 链表长度 ≥8 且数组长度 ≥64 → 转红黑树（避免哈希冲突退化成 O(n)）。
+
+**关键改进**：
+
+- 锁粒度从 Segment（默认 16 个）变成桶（默认 16 个，可扩容到 thousands）——并发度大幅提升。
+- 用 CAS 处理"空桶插入"——大多数写是无锁的。
+- 红黑树优化哈希冲突——最坏查询从 O(n) 降到 O(log n)。
+
+**读操作（get）完全无锁**——`Node.val` 和 `Node.next` 是 `volatile`，保证可见性。
+
+### 2.3 ConcurrentHashMap 的限制
+
+- **不允许 null key/value**——`HashMap` 允许，但 `ConcurrentHashMap` 不允许。原因是"get 返回 null 时无法判断是 key 不存在还是 value 就是 null"——单线程可用 `containsKey` 区分，但并发下两次调用之间可能变化，导致歧义。
+- **size/迭代弱一致**——迭代期间发生的修改不一定能看到，但不会抛 `ConcurrentModificationException`。
+- **putIfAbsent/compute 等原子复合操作**——这是 `ConcurrentHashMap` 相对 `HashMap` 的额外优势。
+
+### 2.4 原子复合操作
+
+```java
+ConcurrentHashMap<String, Integer> map = new ConcurrentHashMap<>();
+
+// 等价于 "if(!map.containsKey(k)) map.put(k,v)"，但原子
+map.putIfAbsent("k", 1);
+
+// compute：原子的"读-改-写"
+map.compute("k", (k, v) -> v == null ? 1 : v + 1);   // 原子自增
+
+// merge：合并值
+map.merge("k", 1, Integer::sum);   // 如果有就加 1，没有就设为 1
+
+// computeIfAbsent：缓存模式
+Integer v = map.computeIfAbsent("expensive", k -> expensiveCompute(k));
+```
+
+这些方法**在桶的 synchronized 块内执行**——保证原子，是 `ConcurrentHashMap` 的杀手锏。
+
+## 三、CopyOnWriteArrayList：写时复制
+
+**`CopyOnWriteArrayList`** 的策略——写时复制一份新数组，读完全无锁。
+
+```
+读：直接读底层数组（无锁，volatile 读）
+写：复制出新数组 → 修改新数组 → 把引用指向新数组（用 ReentrantLock 保护）
+```
+
+```java
+CopyOnWriteArrayList<String> list = new CopyOnWriteArrayList<>();
+list.add("a");   // 复制 + 写
+list.get(0);     // 直接读
+```
+
+**特点**：
+
+- **读极快**——完全无锁，连 volatile 读都不用等。
+- **写慢**——每次都复制 O(n)。
+- **最终一致**——读到的可能是"快照"，写之后的读看到新数组。
+- **迭代器快照**——迭代时拿到当时的数组快照，迭代期间修改不影响迭代器。
+
+**适用场景**：
+
+- **读多写极少**：监听器列表、配置列表、白名单。
+- **写不频繁但要求读性能极致**。
+
+**不适合**：写频繁的场景——复制成本高，GC 压力大。
+
+`CopyOnWriteArraySet` 是基于 `CopyOnWriteArrayList` 的 Set 实现。
+
+## 四、ConcurrentLinkedQueue：无锁队列
+
+**`ConcurrentLinkedQueue`** 是无界非阻塞队列——基于 CAS 的 Michael-Scott 算法，无锁实现。
+
+```java
+ConcurrentLinkedQueue<Task> queue = new ConcurrentLinkedQueue<>();
+queue.offer(new Task());   // 入队，CAS
+Task t = queue.poll();     // 出队，CAS
+Task peek = queue.peek();  // 看队头不出队
+```
+
+**特点**：
+
+- **无锁**——纯 CAS，无 `synchronized`/`Lock`。
+- **无界**——没有容量限制，可能 OOM。
+- **非阻塞**——`offer`/`poll` 立即返回，不等待。
+- **size() 是 O(n)**——遍历整个链表，不要频繁调用。
+
+**适用**：生产者速度大于消费者时容易 OOM；如果生产消费基本均衡且需要"满了就等"，用 `BlockingQueue`。
+
+## 五、BlockingQueue 系列
+
+**`BlockingQueue`** 是阻塞队列——满了 `put` 等待，空了 `take` 等待。它是**生产者-消费者模型**的标准实现。
+
+```java
+BlockingQueue<Task> queue = new ArrayBlockingQueue<>(100);
+
+// 生产者
+queue.put(new Task());   // 满了阻塞
+
+// 消费者
+Task t = queue.take();   // 空了阻塞
+```
+
+### 5.1 七种 BlockingQueue 实现
+
+| 队列 | 底层 | 特点 |
+| --- | --- | --- |
+| **`ArrayBlockingQueue`** | 数组 | 有界，FIFO，一把 ReentrantLock |
+| **`LinkedBlockingQueue`** | 链表 | 可选有界（默认 Integer.MAX_VALUE），两把锁（读锁/写锁分离） |
+| **`SynchronousQueue`** | 无存储 | 每个 put 必须等一个 take，直接交付 |
+| **`PriorityBlockingQueue`** | 堆 | 无界，元素按优先级出队 |
+| **`DelayQueue`** | 堆 | 元素到期才能出队，元素实现 `Delayed` |
+| **`LinkedBlockingDeque`** | 链表 | 双端阻塞队列 |
+| **`LinkedTransferQueue`** | 链表 | `transfer` 直接交付给消费者 |
+
+### 5.2 四组操作
+
+`BlockingQueue` 有四组方法，对应不同行为：
+
+| 操作 | 抛异常 | 返回特殊值 | 阻塞 | 超时 |
+| --- | --- | --- | --- | --- |
+| 入队 | `add(e)` | `offer(e)` | `put(e)` | `offer(e, time, unit)` |
+| 出队 | `remove()` | `poll()` | `take()` | `poll(time, unit)` |
+| 查看 | `element()` | `peek()` | — | — |
+
+- **抛异常**：满了/空了抛 `IllegalStateException`/`NoSuchElementException`。
+- **返回特殊值**：失败返回 `false`/`null`。
+- **阻塞**：满了/空了死等。
+- **超时**：等待一段时间，超时返回。
+
+### 5.3 典型应用
+
+- **`ArrayBlockingQueue`**——固定大小线程池的默认队列（`Executors.newFixedThreadPool`）。
+- **`LinkedBlockingQueue`**——可选无界，慎用（OOM 风险）。
+- **`SynchronousQueue`**——`Executors.newCachedThreadPool` 用它，直接交付，无缓冲。
+- **`DelayQueue`**——定时任务调度（`ScheduledThreadPoolExecutor` 内部用）。
+- **`PriorityBlockingQueue`**——优先级任务调度。
+
+## 六、ConcurrentSkipListMap/ConcurrentSkipListSet：跳表
+
+`ConcurrentSkipListMap` 是 **跳表（Skip List）** 实现——一种用空间换时间的有序数据结构，支持 O(log n) 查找/插入/删除，且**无锁**（基于 CAS）。
+
+### 6.1 跳表是什么
+
+跳表是"概率平衡"的多层链表——底层是完整链表，上层是"索引层"（每隔几个节点抽一个），用空间换查找速度。
+
+```
+Level 3:   1 ───────────────────────────► 9
+Level 2:   1 ──────────► 5 ─────────────► 9
+Level 1:   1 ────► 3 ──► 5 ────► 7 ──────► 9
+Level 0:   1 ► 2 ► 3 ► 4 ► 5 ► 6 ► 7 ► 8 ► 9
+```
+
+查找 6：从最高层开始，1→9 太远，下一层 1→5→9，5→9 太远，下一层 5→7，5→7 太远，下一层 5→6 找到。O(log n)。
+
+### 6.2 对比 TreeMap
+
+| 维度 | `TreeMap` | `ConcurrentSkipListMap` |
+| --- | --- | --- |
+| 实现 | 红黑树 | 跳表 |
+| 线程安全 | ❌ | ✓（CAS 无锁） |
+| 查找/插入 | O(log n) | O(log n) |
+| 并发性能 | 必须外部加锁 | 内置无锁 |
+
+需要并发有序 Map 时，`ConcurrentSkipListMap` 是唯一选择——`TreeMap` 加 `synchronized` 性能太差。
+
+`ConcurrentSkipListSet` 是对应的 Set 实现。
+
+## 七、实战：综合演示
+
+下面这个例子演示 `ConcurrentHashMap` 的原子操作、`CopyOnWriteArrayList`、`BlockingQueue` 实现生产者-消费者、`ConcurrentSkipListMap`。
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // === 1. ConcurrentHashMap 原子操作 ===
+        System.out.println("=== ConcurrentHashMap ===");
+        ConcurrentHashMap<String, AtomicInteger> wordCount = new ConcurrentHashMap<>();
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        int tasks = 1000;
+        CountDownLatch latch = new CountDownLatch(tasks);
+        for (int i = 0; i < tasks; i++) {
+            final String word = "word-" + (i % 10);
+            pool.submit(() -> {
+                // 原子的"如果不存在就放 1，存在就加 1"
+                wordCount.compute(word, (k, v) ->
+                    v == null ? new AtomicInteger(1) : v).incrementAndGet();
+                // 等价更简洁写法：merge
+                // wordCount.merge(word, 1, Integer::sum);  // 但值是 Integer
+                latch.countDown();
+            });
+        }
+        latch.await();
+        pool.shutdown();
+        System.out.println("词频统计 (前5个): ");
+        wordCount.entrySet().stream()
+            .sorted(Map.Entry.<String, AtomicInteger>comparingByValue(Comparator.comparingInt(AtomicInteger::get)).reversed())
+            .limit(5)
+            .forEach(e -> System.out.println("  " + e.getKey() + ": " + e.getValue().get()));
+
+        // === 2. CopyOnWriteArrayList ===
+        System.out.println("\\n=== CopyOnWriteArrayList ===");
+        CopyOnWriteArrayList<String> listeners = new CopyOnWriteArrayList<>();
+        listeners.addAll(List.of("L1", "L2", "L3"));
+
+        // 读无锁，迭代时是快照
+        for (String l : listeners) {
+            System.out.println("  通知 " + l);
+            if (l.equals("L2")) {
+                listeners.add("L4");   // 迭代时加新元素，不影响当前迭代
+            }
+        }
+        System.out.println("最终列表: " + listeners);
+
+        // === 3. ArrayBlockingQueue 生产者-消费者 ===
+        System.out.println("\\n=== ArrayBlockingQueue ===");
+        BlockingQueue<Integer> queue = new ArrayBlockingQueue<>(3);
+        ExecutorService pcPool = Executors.newFixedThreadPool(2);
+        AtomicInteger produced = new AtomicInteger();
+        AtomicInteger consumed = new AtomicInteger();
+
+        pcPool.submit(() -> {
+            try {
+                for (int i = 1; i <= 10; i++) {
+                    queue.put(i);   // 满了阻塞
+                    produced.incrementAndGet();
+                    System.out.println("  生产 " + i + " (队列=" + queue.size() + ")");
+                    Thread.sleep(20);
+                }
+                queue.put(-1);   // 结束信号
+            } catch (InterruptedException e) {}
+        });
+        pcPool.submit(() -> {
+            try {
+                while (true) {
+                    int v = queue.take();   // 空了阻塞
+                    if (v == -1) break;
+                    consumed.incrementAndGet();
+                    System.out.println("    消费 " + v + " (队列=" + queue.size() + ")");
+                    Thread.sleep(40);
+                }
+            } catch (InterruptedException e) {}
+        });
+        pcPool.shutdown();
+        pcPool.awaitTermination(2, TimeUnit.SECONDS);
+        System.out.println("总生产: " + produced.get() + ", 总消费: " + consumed.get());
+
+        // === 4. SynchronousQueue 直接交付 ===
+        System.out.println("\\n=== SynchronousQueue ===");
+        SynchronousQueue<String> direct = new SynchronousQueue<>();
+        ExecutorService syncPool = Executors.newFixedThreadPool(2);
+        syncPool.submit(() -> {
+            try {
+                System.out.println("  生产者准备交付...");
+                direct.put("hello");   // 必须有消费者在等
+                System.out.println("  生产者交付完成");
+            } catch (InterruptedException e) {}
+        });
+        Thread.sleep(100);
+        syncPool.submit(() -> {
+            try {
+                System.out.println("    消费者收到: " + direct.take());
+            } catch (InterruptedException e) {}
+        });
+        syncPool.shutdown();
+        syncPool.awaitTermination(1, TimeUnit.SECONDS);
+
+        // === 5. ConcurrentSkipListMap 有序并发 Map ===
+        System.out.println("\\n=== ConcurrentSkipListMap ===");
+        ConcurrentSkipListMap<Integer, String> sorted = new ConcurrentSkipListMap<>();
+        for (int i = 10; i > 0; i--) {
+            sorted.put(i, "val-" + i);
+        }
+        System.out.println("按键升序遍历:");
+        sorted.forEach((k, v) -> System.out.println("  " + k + " -> " + v));
+        System.out.println("firstKey: " + sorted.firstKey());
+        System.out.println("lastKey: " + sorted.lastKey());
+        System.out.println("subMap(3, 7): " + sorted.subMap(3, 7));
+    }
+}`} />
+
+> **观察重点**：
+> - **`ConcurrentHashMap.compute`**：原子地"读-改-写"，无需手动加锁。1000 个任务并发统计词频，结果精确。
+> - **`CopyOnWriteArrayList`**：迭代是快照——迭代期间 add 不影响当前迭代，L4 在下一轮迭代才看到。
+> - **`ArrayBlockingQueue`**：队列满时 `put` 阻塞、空时 `take` 阻塞，自动协调生产消费。
+> - **`SynchronousQueue`**：没有存储——`put` 必须等到一个 `take` 才能返回，直接交付。
+> - **`ConcurrentSkipListMap`**：按 key 升序遍历，支持 `firstKey`/`lastKey`/`subMap` 等有序操作。
+
+## 八、本章小结
+
+| 集合 | 实现 | 适用场景 |
+| --- | --- | --- |
+| `ConcurrentHashMap` | 数组+链表/红黑树，CAS+synchronized 锁桶 | 通用并发 Map |
+| `CopyOnWriteArrayList` | 写时复制数组 | 读多写极少（监听器列表） |
+| `CopyOnWriteArraySet` | 基于 COWArrayList | 读多写极少的 Set |
+| `ConcurrentLinkedQueue` | 无锁 CAS 链表 | 无界非阻塞队列 |
+| `ArrayBlockingQueue` | 数组+ReentrantLock | 有界阻塞队列 |
+| `LinkedBlockingQueue` | 链表+两把锁 | 可选有界阻塞队列 |
+| `SynchronousQueue` | 无存储 | 直接交付 |
+| `PriorityBlockingQueue` | 堆 | 优先级队列 |
+| `DelayQueue` | 堆 | 延迟任务 |
+| `ConcurrentSkipListMap` | 跳表，CAS | 并发有序 Map |
+| `ConcurrentSkipListSet` | 基于 SkipListMap | 并发有序 Set |
+
+| 概念 | 核心要点 |
+| --- | --- |
+| ConcurrentHashMap (Java 8+) | CAS 空桶插入 + synchronized 锁桶头节点，读完全无锁 |
+| 不允许 null | `ConcurrentHashMap` 不允许 null key/value，避免歧义 |
+| `compute`/`merge` | 原子复合操作，在桶锁内执行 |
+| COW 思想 | 读无锁，写复制——读多写少最优 |
+| `BlockingQueue` 四组方法 | 抛异常/返回值/阻塞/超时 |
+| `SynchronousQueue` | 容量为 0，必须直接交付，`newCachedThreadPool` 用它 |
+| 跳表 | 概率平衡多层链表，O(log n)，无锁实现 |
+
+**记忆口诀**：
+
+- **并发 Map 用 `ConcurrentHashMap`**——别用 `Hashtable`/`synchronizedMap`。
+- **`ConcurrentHashMap` 不允许 null**——歧义风险。
+- **读多写少用 COW**——写时复制，读极快但写慢。
+- **生产者-消费者用 `BlockingQueue`**——别手写 `wait`/`notify`。
+- **需要有序用 `ConcurrentSkipListMap`**——别给 `TreeMap` 加锁。
+- **`SynchronousQueue` 容量 0**——直接交付，线程池用。
+
+## 结语：并发集合是日常利器
+
+并发集合是日常并发编程最常用的工具——它们封装了复杂的同步逻辑，开箱即用。`ConcurrentHashMap` 让并发 Map 安全高效，`BlockingQueue` 让生产者-消费者简化为一行代码，`CopyOnWriteArrayList` 让监听器列表零锁读，`ConcurrentSkipListMap` 让并发有序 Map 成为可能。
+
+但所有并发集合解决的是"数据结构"问题——线程的**生命周期管理**（创建、复用、销毁）和**任务调度**还需要别的工具。下一章我们讲 **线程池**——`ThreadPoolExecutor` 七参数、四种拒绝策略、`Executors` 工厂方法的陷阱、`ForkJoinPool` 工作窃取——这是把"开线程"变成"工程化并发"的关键一跃。

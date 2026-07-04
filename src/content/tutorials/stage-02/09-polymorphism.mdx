@@ -1,0 +1,439 @@
+---
+title: "多态"
+chapter: 9
+stage: "第二阶段"
+stageName: "面向对象编程"
+order: 4
+description: "理解多态的本质、向上/向下转型、instanceof 模式匹配、动态绑定原理，并实战策略模式与支付系统"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "多态", "instanceof", "策略模式"]
+---
+
+# 多态
+
+想象一个咖啡店店长，她对店员说"出杯！"。如果是咖啡师，会做一杯拿铁；如果是调酒师，会调一杯鸡尾酒；如果是茶艺师，会泡一壶龙井。同一句指令，不同的人有不同的执行方式——这就是现实生活中的**多态**（Polymorphism）。
+
+在 Java 中，多态是面向对象三大特性中最深邃、也最强大的一种。它让代码变得灵活、可扩展——新增一种"店员"，无需改店长的指令，只需新增一个子类即可。本章我们将深入多态的原理与应用，最后用一个支付系统实战演练。
+
+## 一、多态的定义与意义
+
+### 1.1 什么是多态
+
+**多态**指同一接口或方法调用，因对象类型不同而表现出不同行为。它有三种表现形式：
+
+1. **编译时多态**：方法重载（Overload）。编译器根据参数类型决定调用哪个方法。
+2. **运行时多态**：方法重写（Override）+ 向上转型。运行时根据对象的**实际类型**决定执行哪个版本。
+3. **泛型多态**：参数化类型（后续章节）。
+
+本章重点讨论**运行时多态**，它是最常见、也最有价值的形式。
+
+### 1.2 多态的三个前提
+
+要发生多态，必须同时满足：
+
+1. **继承**：子类继承父类（或实现接口）。
+2. **重写**：子类重写了父类的方法。
+3. **父类引用指向子类对象**：`父类 变量 = new 子类();`（向上转型）。
+
+```java
+Animal a = new Dog();   // 父类引用指向子类对象
+a.speak();              // 调用的是 Dog 的 speak，不是 Animal 的
+```
+
+### 1.3 多态的意义
+
+多态最大的价值是**解耦**和**可扩展**。看一个对比例子：
+
+**不使用多态**：
+
+```java
+void feed(Dog d) { d.eat(); }
+void feed(Cat c) { c.eat(); }
+void feed(Pig p) { p.eat(); }
+// 每新增一种动物，就要加一个方法
+```
+
+**使用多态**：
+
+```java
+void feed(Animal a) {     // 接收所有 Animal 子类
+    a.eat();              // 自动调用对应子类的 eat
+}
+// 新增 Tiger？无需改 feed 方法，只要 Tiger extends Animal
+```
+
+多态让我们**面向抽象编程**，调用方不关心具体类型，只关心"它能做什么"。这正是开闭原则（对扩展开放，对修改关闭）的体现。
+
+## 二、向上转型：子类变父类
+
+### 2.1 自动转换
+
+把子类对象赋值给父类引用，叫**向上转型**（Upcasting），是**自动**完成的：
+
+```java
+Animal a = new Dog();       // 向上转型，自动
+Coffee c = new Latte();     // 拿铁是咖啡，自动转型
+Object o = "hello";         // 任何对象都是 Object，自动转型
+```
+
+> "is-a" 关系是向上转型的逻辑基础——拿铁"是一种"咖啡，狗"是一种"动物，所以可以安全转型。
+
+### 2.2 向上转型后能调用什么
+
+**重要规则**：向上转型后，只能调用父类中**声明过**的方法，不能调用子类**独有**的方法。
+
+```java
+class Animal {
+    public void eat() { System.out.println("吃"); }
+}
+
+class Dog extends Animal {
+    @Override
+    public void eat() { System.out.println("狗吃骨头"); }
+    public void bark() { System.out.println("汪汪"); }   // Dog 独有
+}
+
+Animal a = new Dog();
+a.eat();     // ✅ 输出"狗吃骨头"（多态，调用子类版本）
+// a.bark(); // ❌ 编译错误！父类引用看不到子类独有方法
+```
+
+为什么？因为编译器只看**引用类型**（Animal），不看**实际对象类型**（Dog）。编译器检查"Animal 有没有 bark 方法"——没有，所以报错。至于运行时实际调用谁的 `eat`，那是动态绑定的事。
+
+### 2.3 多态的字段陷阱
+
+**字段不参与多态**——字段访问看**引用类型**，不是对象类型：
+
+```java
+class Parent { int x = 1; }
+class Child extends Parent { int x = 2; }
+
+Parent p = new Child();
+System.out.println(p.x);   // 1（看引用类型 Parent，不是 2）
+```
+
+这是因为字段是**静态绑定**的，编译时就确定了。方法才是动态绑定的。这也是为什么不推荐父子类使用同名字段的原因。
+
+## 三、向下转型：父类变子类
+
+### 3.1 强制转换
+
+把父类引用转回子类类型，叫**向下转型**（Downcasting），需要**强制**：
+
+```java
+Animal a = new Dog();
+Dog d = (Dog) a;        // 向下转型，强制
+d.bark();               // 现在可以调用 Dog 独有方法
+```
+
+### 3.2 转型失败的陷阱
+
+向下转型有风险——如果实际对象不是目标类型，会抛出 `ClassCastException`：
+
+```java
+Animal a = new Cat();
+Dog d = (Dog) a;        // 运行时异常！Cat 不能转成 Dog
+```
+
+这就像把一只猫硬塞进狗笼——它根本不是狗。为了避免这种异常，转型前应该先用 `instanceof` 检查。
+
+## 四、instanceof：安全转型的守护神
+
+### 4.1 基本用法
+
+`instanceof` 运算符判断对象是否属于某类型（或其子类）：
+
+```java
+Animal a = new Dog();
+if (a instanceof Dog) {
+    Dog d = (Dog) a;
+    d.bark();
+}
+```
+
+`a instanceof Dog` 返回 `true` 才转型，安全无虞。
+
+### 4.2 Java 16+ 模式匹配
+
+Java 16 起，`instanceof` 支持**模式匹配**（Pattern Matching），转型一步到位：
+
+```java
+// 传统写法：判断 + 强转
+if (a instanceof Dog) {
+    Dog d = (Dog) a;
+    d.bark();
+}
+
+// Java 16+ 模式匹配：判断的同时绑定变量
+if (a instanceof Dog d) {
+    d.bark();    // d 已自动声明并转型
+}
+```
+
+变量 `d` 的作用域是 `if` 内部。这种写法更简洁，避免了重复的类型名。
+
+> ⚠️ 注意：模式匹配 `instanceof` 在 Java 14-15 是预览特性，Java 16 才正式发布。本教程基于 JDK 21，可以直接使用。如果使用更早的 JDK，请用传统写法。
+
+### 4.3 instanceof 的注意事项
+
+- `null instanceof 任何类型` 都是 `false`，所以无需先判空。
+- `instanceof` 会考虑继承关系：`new Dog() instanceof Animal` 为 `true`。
+- 不要滥用 `instanceof` + 强转——如果代码里到处都是 `if (obj instanceof X) {...}`，往往说明设计有问题，应该用多态代替。
+
+## 五、动态绑定原理：多态的底层奥秘
+
+### 5.1 静态绑定 vs 动态绑定
+
+- **静态绑定**（Static Binding）：编译时确定调用哪个方法。`private`、`static`、`final` 方法以及字段访问都是静态绑定。
+- **动态绑定**（Dynamic Binding）：运行时根据对象实际类型决定调用哪个方法。**重写的实例方法**走动态绑定。
+
+```java
+Animal a = new Dog();
+a.eat();   // 编译时：检查 Animal 有 eat()。运行时：调用 Dog.eat()
+```
+
+### 5.2 虚方法表（vtable）
+
+JVM 为每个类维护一张**虚方法表**（Virtual Method Table，简称 vtable），记录该类所有可被重写的方法的实际入口。调用方法时，JVM 通过对象的实际类型找到对应的 vtable，再查表确定调用哪个方法。
+
+```
+Animal 的 vtable：
+  eat → Animal.eat
+
+Dog 的 v表（继承自 Animal，重写了 eat）：
+  eat → Dog.eat    ← 重写后指向自己的实现
+
+Cat 的 vtable：
+  eat → Cat.eat
+
+调用 a.eat() 时：
+  1. 看 a 的实际对象类型（Dog）
+  2. 查 Dog 的 vtable
+  3. 找到 eat → Dog.eat
+  4. 调用 Dog.eat()
+```
+
+这就是为什么"调用时实际执行的是子类版本"——vtable 在对象创建时就根据实际类型填好了。
+
+### 5.3 为什么 static/private/final 不参与多态
+
+- **static 方法**：属于类，不依赖对象，没有"动态"可言。
+- **private 方法**：子类看不到，无法重写（即使写了同名方法也不是重写）。
+- **final 方法**：明确禁止重写，编译器可以内联优化。
+
+这三类方法都是**静态绑定**的，编译时就确定了调用目标。
+
+## 六、策略模式初探
+
+**策略模式（Strategy Pattern）**是多态的经典应用：把一组算法封装成独立的策略对象，调用方根据需要切换策略。
+
+### 6.1 场景
+
+假设咖啡店有三种折扣策略：不打折、打九折、满 100 减 20。如果用 `if-else`：
+
+```java
+double calc(double price, String type) {
+    if ("none".equals(type)) return price;
+    else if ("nine".equals(type)) return price * 0.9;
+    else if ("minus".equals(type)) return price >= 100 ? price - 20 : price;
+    // 新增策略就要改这里，违反开闭原则
+}
+```
+
+用策略模式：
+
+```java
+interface DiscountStrategy {
+    double apply(double price);
+}
+
+class NoDiscount implements DiscountStrategy {
+    public double apply(double price) { return price; }
+}
+
+class NineDiscount implements DiscountStrategy {
+    public double apply(double price) { return price * 0.9; }
+}
+
+class MinusDiscount implements DiscountStrategy {
+    public double apply(double price) {
+        return price >= 100 ? price - 20 : price;
+    }
+}
+```
+
+调用方：
+
+```java
+double calc(double price, DiscountStrategy strategy) {
+    return strategy.apply(price);   // 多态：不同策略不同行为
+}
+```
+
+新增策略？只需再写一个类实现 `DiscountStrategy`，**调用方代码一行不用改**。这就是策略模式的力量。
+
+## 七、实战：用多态设计一个支付系统
+
+让我们把多态的所有知识融会贯通，设计一个支持多种支付方式的系统。
+
+### 7.1 设计
+
+- **父类/接口**：`PaymentMethod`，定义 `pay(double amount)` 方法。
+- **子类**：`WeChatPay`、`AliPay`、`CreditCardPay`，各自实现支付逻辑。
+- **调用方**：`PaymentProcessor`，接收任意支付方式，无需关心具体实现。
+
+### 7.2 完整实现
+
+<CodeRunner code={`public class Main {
+    // 支付方式接口
+    interface PaymentMethod {
+        boolean pay(double amount);
+        String getName();
+    }
+
+    // 微信支付
+    static class WeChatPay implements PaymentMethod {
+        private double balance;
+
+        public WeChatPay(double balance) {
+            this.balance = balance;
+        }
+
+        @Override
+        public boolean pay(double amount) {
+            if (balance >= amount) {
+                balance -= amount;
+                System.out.println("✅ 微信支付成功：扣款 " + amount + " 元，余额 " + balance);
+                return true;
+            }
+            System.out.println("❌ 微信支付失败：余额不足");
+            return false;
+        }
+
+        @Override
+        public String getName() { return "微信支付"; }
+    }
+
+    // 支付宝
+    static class AliPay implements PaymentMethod {
+        private double balance;
+
+        public AliPay(double balance) {
+            this.balance = balance;
+        }
+
+        @Override
+        public boolean pay(double amount) {
+            // 支付宝：满 100 减 5
+            double actual = amount >= 100 ? amount - 5 : amount;
+            if (balance >= actual) {
+                balance -= actual;
+                System.out.println("✅ 支付宝支付成功：原价 " + amount + "，优惠后扣款 " + actual + " 元");
+                return true;
+            }
+            System.out.println("❌ 支付宝支付失败：余额不足");
+            return false;
+        }
+
+        @Override
+        public String getName() { return "支付宝"; }
+    }
+
+    // 信用卡
+    static class CreditCardPay implements PaymentMethod {
+        private double creditLimit;
+
+        public CreditCardPay(double creditLimit) {
+            this.creditLimit = creditLimit;
+        }
+
+        @Override
+        public boolean pay(double amount) {
+            if (creditLimit >= amount) {
+                creditLimit -= amount;
+                System.out.println("✅ 信用卡支付成功：扣款 " + amount + " 元，可用额度 " + creditLimit);
+                return true;
+            }
+            System.out.println("❌ 信用卡支付失败：额度不足");
+            return false;
+        }
+
+        @Override
+        public String getName() { return "信用卡"; }
+    }
+
+    // 支付处理器：面向接口编程，不关心具体支付方式
+    static class PaymentProcessor {
+        public void processPayment(double amount, PaymentMethod method) {
+            System.out.println("\\n--- 使用 " + method.getName() + " 支付 " + amount + " 元 ---");
+            boolean success = method.pay(amount);   // 多态调用
+            if (success) {
+                System.out.println("支付流程完成");
+            } else {
+                System.out.println("支付流程终止");
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        PaymentProcessor processor = new PaymentProcessor();
+
+        PaymentMethod wechat = new WeChatPay(500);
+        PaymentMethod alipay = new AliPay(200);
+        PaymentMethod card = new CreditCardPay(1000);
+
+        // 同一个方法，不同支付方式表现不同——多态
+        processor.processPayment(80, wechat);
+        processor.processPayment(120, alipay);
+        processor.processPayment(1500, card);    // 额度不足
+
+        // 向上转型 + instanceof 模式匹配演示
+        System.out.println("\\n=== 转型演示 ===");
+        Object obj = alipay;
+        if (obj instanceof PaymentMethod pm) {     // Java 16+ 模式匹配
+            System.out.println("obj 是支付方式：" + pm.getName());
+        }
+    }
+}`} />
+
+### 7.3 多态的体现
+
+- `processPayment` 方法接收 `PaymentMethod` 接口，**不关心**是微信、支付宝还是信用卡——只要实现了这个接口，就能传进来。
+- 调用 `method.pay(amount)` 时，**运行时**根据实际对象类型调用对应的 `pay` 实现——这就是动态绑定。
+- 新增"Apple Pay"？只需写 `class ApplePay implements PaymentMethod`，`PaymentProcessor` 一行不用改。**系统对扩展开放，对修改关闭**。
+
+### 7.4 多态的设计价值
+
+这个支付系统如果不用多态，会变成什么样？
+
+```java
+void processPayment(double amount, String type) {
+    if ("wechat".equals(type)) { ... }
+    else if ("alipay".equals(type)) { ... }
+    else if ("card".equals(type)) { ... }
+    else if ("apple".equals(type)) { ... }   // 新增要改这里
+    // 每次新增支付方式都要修改这个方法，违反开闭原则
+}
+```
+
+多态让我们把"变化的"（具体支付方式）和"不变的"（支付流程）分离——这正是**依赖倒置原则**的体现：高层模块（PaymentProcessor）不依赖低层模块（具体支付类），两者都依赖抽象（PaymentMethod 接口）。
+
+## 八、本章小结
+
+| 概念 | 要点 |
+| --- | --- |
+| 多态 | 同一接口，不同实现；编译时看引用类型，运行时看对象类型 |
+| 向上转型 | 子类→父类，自动；只能调用父类声明的方法 |
+| 向下转型 | 父类→子类，强制；可能抛 ClassCastException |
+| `instanceof` | 安全转型前的检查；Java 16+ 支持模式匹配 `obj instanceof X x` |
+| 动态绑定 | 重写方法运行时根据实际类型决定调用版本 |
+| 虚方法表 | JVM 维护的方法入口表，实现动态绑定 |
+| 策略模式 | 把算法封装成对象，通过多态切换策略 |
+
+## 结语
+
+多态是面向对象的"灵魂"。它让代码具备弹性——新增类型无需修改调用方，新增行为无需改写现有逻辑。多态让程序从"硬编码的分支"走向"对象间的协作"，从"过程式思维"走向"抽象思维"。
+
+但要真正发挥多态的威力，我们需要更强大的抽象工具——**接口**和**抽象类**。它们是多态的"舞台"，定义了"能做什么"的契约，而把"怎么做"留给实现类。下一章，我们将深入抽象类与接口的世界，理解 `default` 方法、`@FunctionalInterface` 等现代 Java 的精华，并在"是 vs 能"的辩证中，学会选择正确的抽象工具。
+
+抽象的世界，等待你的探索。

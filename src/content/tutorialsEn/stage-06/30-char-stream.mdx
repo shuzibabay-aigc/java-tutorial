@@ -1,0 +1,324 @@
+---
+title: "Character Streams"
+chapter: 30
+stage: "Stage 6"
+stageName: "I/O and NIO"
+order: 3
+description: "Master the Reader/Writer abstract classes, the InputStreamReader/OutputStreamWriter bridge, BufferedReader/PrintWriter, and gain a deep understanding of character encoding from ASCII to UTF-8"
+pubDate: 2026-07-03
+tags: ["Java", "IO", "字符流", "Reader", "Writer", "字符编码", "UTF-8", "Charset"]
+---
+
+# Character Streams
+
+Byte streams can read and write anything, but they stumble in one corner — text. A single Chinese character takes 3 bytes in UTF-8 and 2 bytes in GBK; if you read with a byte stream, you have to figure out yourself whether "these 3 bytes are one Chinese character or 3 English letters." That kind of thing gives people headaches.
+
+Character streams were born for exactly this. They encapsulate the "byte-to-character" conversion — you just `read` a `char` or `write` a line of string, and leave the encoding to the stream. In this chapter we go from the `Reader`/`Writer` abstract classes to bridge streams, buffered streams, and `PrintWriter`, and then thoroughly explain the history of character encoding — how ASCII, GBK, Unicode, and UTF-8 relate to each other.
+
+## 1. The Reader and Writer Abstract Classes
+
+The top-level abstractions of character streams are `Reader` (reading) and `Writer` (writing), mirroring `InputStream`/`OutputStream` in the byte-stream world.
+
+```java
+public abstract class Reader implements Readable, Closeable {
+    public int read() throws IOException;                    // read 1 character (0~65535, or -1 at end)
+    public int read(char[] cbuf) throws IOException;         // bulk read
+    public abstract int read(char[] cbuf, int off, int len);
+    public long transferTo(Writer out);                      // Java 10+
+    public abstract void close();
+}
+
+public abstract class Writer implements Appendable, Closeable, Flushable {
+    public void write(int c) throws IOException;             // write 1 character
+    public void write(char[] cbuf) throws IOException;
+    public abstract void write(char[] cbuf, int off, int len);
+    public void write(String str) throws IOException;        // write a string directly
+    public Writer append(CharSequence csq);                  // append (from Appendable)
+    public abstract void flush();
+    public abstract void close();
+}
+```
+
+Note: the unit of a character stream is `char` (a 16-bit Unicode code unit), not `byte`. `read()` returns an `int` — 0 to 65535 for valid characters, and `-1` for end of stream, the same `-1` convention as byte streams.
+
+## 2. InputStreamReader / OutputStreamWriter: The Byte-to-Character Bridge
+
+Character streams can't read characters out of thin air — the underlying data source is ultimately bytes (files and networks are all bytes). `InputStreamReader` is the "byte stream to character stream" bridge: it holds an `InputStream` and decodes bytes into characters according to a specified `Charset`.
+
+```java
+import java.io.*;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+
+// Read with UTF-8 encoding
+Reader r = new InputStreamReader(
+    new FileInputStream("poem.txt"),
+    StandardCharsets.UTF_8);
+
+// Write with GBK
+Writer w = new OutputStreamWriter(
+    new FileOutputStream("out.txt"),
+    Charset.forName("GBK"));
+```
+
+`InputStreamReader`/`OutputStreamWriter` are the **only** character-stream classes that touch bytes directly. All other character streams (`FileReader`, `BufferedReader`, etc.) rely on them internally.
+
+### 2.1 Always Specify the Encoding Explicitly
+
+If you don't pass a `Charset`, the JDK uses the **platform default encoding** — which varies from machine to machine:
+
+- Windows (Chinese edition) defaults to GBK
+- Linux/macOS defaults to UTF-8
+- A Docker container might default to ASCII
+
+This kind of "same code, different garbled output on different machines" bug is extremely hard to track down. **The rule: always specify the encoding explicitly**, never rely on the default. `StandardCharsets` provides four constants — `UTF_8`, `UTF_16`, `ISO_8859_1`, `US_ASCII` — saving you from typing the strings yourself.
+
+## 3. FileReader / FileWriter: Convenience Classes
+
+`FileReader`/`FileWriter` are convenience wrappers around `InputStreamReader`/`OutputStreamWriter` — you pass a file path directly, saving one layer of nesting.
+
+```java
+// Java 11+ supports specifying the encoding explicitly
+Reader r = new FileReader("poem.txt", StandardCharsets.UTF_8);
+Writer w = new FileWriter("out.txt", StandardCharsets.UTF_8, true);  // true = append
+```
+
+**Pitfall warning**: before Java 11, `FileReader` had no constructor that accepted a `Charset` — it could only use the platform default, a legacy "convenience class trap." In new code: either use Java 11+'s `FileReader(path, charset)`, or compose `InputStreamReader` + `FileInputStream` explicitly.
+
+## 4. BufferedReader / BufferedWriter: Line-by-Line Reading and Writing
+
+A raw `Reader.read()` reads one character at a time, invoking the decoder once per call — slow. `BufferedReader` adds a buffer and provides **line-by-line reading** via `readLine()` — the most commonly used method for processing text files.
+
+```java
+import java.io.*;
+
+try (BufferedReader br = new BufferedReader(
+        new InputStreamReader(
+            new FileInputStream("poem.txt"), StandardCharsets.UTF_8))) {
+    String line;
+    while ((line = br.readLine()) != null) {   // returns null at end of stream
+        System.out.println(line);
+    }
+}
+```
+
+The string returned by `readLine()` **does not include** the line terminator — `\n`, `\r`, and `\r\n` are all recognized and stripped. If you need to preserve them exactly, use `read()`.
+
+`BufferedWriter` offers the corresponding `newLine()` — writing a platform-specific line separator:
+
+```java
+try (BufferedWriter bw = new BufferedWriter(
+        new OutputStreamWriter(
+            new FileOutputStream("out.txt"), StandardCharsets.UTF_8))) {
+    bw.write("第一行");
+    bw.newLine();          // platform line separator (Linux \n, Windows \r\n)
+    bw.write("第二行");
+}
+```
+
+## 5. PrintWriter: Formatted Output
+
+`PrintWriter` provides `print`, `println`, and `printf` — the same family of methods as `System.out`. Its most notable feature is that it **does not throw `IOException`** — on error it only sets a `checkError()` flag, so that "log printing" scenarios aren't interrupted by exceptions.
+
+```java
+import java.io.*;
+
+try (PrintWriter pw = new PrintWriter(
+        new OutputStreamWriter(
+            new FileOutputStream("log.txt"), StandardCharsets.UTF_8),
+        true)) {   // second arg true = auto flush
+    pw.println("开始处理");
+    pw.printf("用户 %s, 年龄 %d%n", "Alice", 30);
+    pw.printf("Pi = %.4f%n", Math.PI);
+}
+```
+
+**Auto flush**: `PrintWriter` can enable "flush on println" mode — useful when writing logs or interacting with users. The underlying `BufferedWriter` doesn't flush by default; it only flushes when the stream is closed.
+
+`PrintWriter`'s "no exceptions" design is a double-edged sword — convenient, but it can also mask errors. If you care whether the write actually succeeded, call `pw.checkError()`.
+
+## 6. Character Encoding in Depth: From ASCII to UTF-8
+
+You can't understand character streams without understanding "encoding." We'll dedicate this section to explaining the whole story.
+
+### 6.1 ASCII: 128 Characters for English
+
+In 1963, ASCII (American Standard Code for Information Interchange) used 7 bits to represent 128 characters — the 26 English letters (upper and lower case), digits, punctuation, and control characters. `'A'` is 65, `'a'` is 97, `'0'` is 48. This is the origin of character encoding.
+
+### 6.2 ISO-8859-1: Filling Up a Byte
+
+ASCII used only 7 bits, leaving the 8th bit unused. ISO-8859-1 (also called Latin-1) put that 8th bit to work, extending the set to 256 characters — adding letters from Western European languages (é, ü, ñ, etc.). One byte per character — simple, but only capable of representing Western European languages.
+
+### 6.3 GBK: The Chinese Solution
+
+Chinese has tens of thousands of characters; 256 characters in one byte is nowhere near enough. GB2312 (1980) and its extension GBK (1995) used **variable-length encoding** — ASCII characters take 1 byte, Chinese characters take 2 bytes. In a GBK file, `'A'` occupies 1 byte and `'中'` occupies 2 bytes. Windows (Chinese edition) still defaults to GBK to this day.
+
+### 6.4 Unicode: Unifying the World
+
+Every country had its own encoding (GBK for Chinese, Shift-JIS for Japanese, EUC-KR for Korean), and none of them interoperated — the same document would show garbled text on different machines. Unicode (1991) set out with one goal: **give every character in the world a unique number.**
+
+Unicode is a **character set** (character set), not an encoding scheme. It assigns each character a code point — `U+0041` is `A`, `U+4E2D` is `中`, `U+1F600` is `😀`. Unicode now includes over 140,000 characters and keeps growing.
+
+But Unicode only specifies "which code point maps to which character" — it doesn't specify "how code points are stored in a file."
+
+### 6.5 UTF-8: Unicode's Best Implementation
+
+UTF-8 is one of Unicode's **encoding forms**, storing code points as byte sequences. It's variable-length:
+
+| Character range | Bytes | Example |
+| --- | --- | --- |
+| ASCII (U+0000–U+007F) | 1 byte | `'A'` → `41` |
+| Latin extension (U+0080–U+07FF) | 2 bytes | `'é'` → `C3 A9` |
+| BMP Basic Multilingual Plane (U+0800–U+FFFF) | 3 bytes | `'中'` → `E4 B8 AD` |
+| Supplementary planes (U+10000+, including emoji) | 4 bytes | `'😀'` → `F0 9F 98 80` |
+
+The brilliance of UTF-8:
+
+- **Fully ASCII-compatible** — a pure English UTF-8 file is identical to an ASCII file.
+- **Variable-length but self-synchronizing** — landing on a middle byte, you can tell "this is the N-th byte of some character," so you never lose alignment.
+- **Space-efficient** — English 1 byte, Chinese 3 bytes, more economical than UTF-16/UTF-32.
+
+This is why UTF-8 has become the de facto standard of the internet — HTML, JSON, and source code all default to UTF-8.
+
+### 6.6 One-Line Distinctions
+
+| Term | What it is |
+| --- | --- |
+| ASCII | A 128-character English character set + encoding |
+| ISO-8859-1 | A 256-character Western European extension, 1 byte per character |
+| GBK | A Chinese encoding, variable-length (1 or 2 bytes) |
+| Unicode | A global character set, assigning each character a code point |
+| UTF-8 | A Unicode encoding form, variable-length (1–4 bytes) |
+| UTF-16 | A Unicode encoding form, 2 or 4 bytes |
+| `Charset` | The Java class representing an encoding scheme |
+
+Remember: **Unicode answers "who is who," UTF-8 answers "how to store it."**
+
+## 7. In Practice: Reading a UTF-8 Text File and Counting Lines
+
+The following example uses `BufferedReader` to read a UTF-8 text file, counting lines, words, and characters:
+
+<CodeRunner code={`import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+
+public class Main {
+    public static void main(String[] args) throws IOException {
+        // 准备一个 UTF-8 测试文件（含中文和 emoji）
+        Path poem = Paths.get("poem.txt");
+        String content = "静夜思\\n李白\\n\\n床前明月光，\\n疑是地上霜。\\n举头望明月，\\n低头思故乡。\\n😀 The End.";
+        Files.writeString(poem, content, StandardCharsets.UTF_8);
+
+        // 用 BufferedReader 按行读取
+        int lineCount = 0;
+        int wordCount = 0;
+        long charCount = 0;
+
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(
+                    new FileInputStream(poem.toFile()),
+                    StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                lineCount++;
+                charCount += line.length();
+                // 简单分词：按空格、标点切
+                String[] words = line.split("[\\\\s，。！？.,!?:;]+");
+                for (String w : words) if (!w.isEmpty()) wordCount++;
+                System.out.println("第 " + lineCount + " 行: " + line);
+            }
+        }
+
+        System.out.println("\\n--- 统计 ---");
+        System.out.println("行数: " + lineCount);
+        System.out.println("词数（粗略）: " + wordCount);
+        System.out.println("字符数（不含换行）: " + charCount);
+        System.out.println("文件字节数: " + Files.size(poem));
+
+        // 对比：用 Files.readAllLines 一行搞定
+        System.out.println("\\n--- 用 Files.readAllLines 一行读取 ---");
+        long lines = Files.readAllLines(poem, StandardCharsets.UTF_8).size();
+        System.out.println("Files.readAllLines 统计行数: " + lines);
+
+        // 对比：用 Files.lines 流式读取（适合大文件）
+        System.out.println("\\n--- 用 Files.lines 流式读取 ---");
+        try (var stream = Files.lines(poem, StandardCharsets.UTF_8)) {
+            stream.filter(l -> !l.isEmpty())
+                  .forEach(l -> System.out.println("  非空行: " + l));
+        }
+
+        // 清理
+        Files.deleteIfExists(poem);
+        System.out.println("\\n清理完毕");
+    }
+}`} />
+
+> **Comparing the three reading approaches**:
+> - `BufferedReader.readLine()`: the classic approach, offering the most control.
+> - `Files.readAllLines`: reads all lines at once into a `List＜String＞` — simple, but memory-heavy for large files.
+> - `Files.lines`: returns a `Stream＜String＞`, reading lazily — ideal for large files and stream-style processing (covered in detail in the next chapter).
+
+## 8. Character Streams vs Byte Streams: When to Use Which
+
+| Scenario | Use byte stream | Use character stream |
+| --- | --- | --- |
+| Text files (txt/csv/json/html) | ❌ | ✅ |
+| Binary files (images/video/zip) | ✅ | ❌ |
+| Serialized objects | ✅ | ❌ |
+| Raw network bytes | ✅ | ❌ |
+| HTTP text response | Workable | ✅ (safer with explicit encoding) |
+
+**Iron rule**: **text goes through character streams, binary goes through byte streams.** Mixing them guarantees trouble — for example, reading a PNG file with a `Reader` decodes bytes into characters incorrectly, and writing them back inevitably corrupts the file.
+
+## 9. Common Encoding Pitfalls
+
+### 9.1 Sources of Garbled Text
+
+Garbled text comes in two flavors:
+
+1. **Wrong decoding**: decoding a UTF-8 file as GBK — the 3-byte Chinese characters of UTF-8 are misread as 1.5 GBK characters.
+2. **Missing encoding**: a character doesn't exist in the target encoding — for instance, the emoji `😀` has no code point in GBK, so it becomes `?` when written.
+
+### 9.2 Converting Between String and Bytes
+
+```java
+String s = "你好";
+byte[] utf8 = s.getBytes(StandardCharsets.UTF_8);       // 6 bytes
+byte[] gbk  = s.getBytes(Charset.forName("GBK"));        // 4 bytes
+
+String back = new String(utf8, StandardCharsets.UTF_8);  // correctly restored
+String wrong = new String(utf8, Charset.forName("GBK")); // garbled
+```
+
+**Always pass the `Charset` argument** — `getBytes()` without an argument uses the platform default encoding, a common source of cross-platform bugs.
+
+### 9.3 Detecting a File's Encoding
+
+Java has no built-in "guess the encoding" method. Common approaches:
+
+- Trust metadata first (HTTP header `Content-Type: text/html; charset=utf-8`, the `＜meta charset＞` in HTML).
+- When there's no metadata, use a third-party library like `juniversalchardet`.
+- As a last resort, try UTF-8 (and fall back to GBK on failure) — UTF-8 has a strict byte pattern, so malformed bytes will throw a `MalformedInputException`.
+
+## 10. Quick Reference Table
+
+| Class | Purpose | Key methods |
+| --- | --- | --- |
+| `Reader` / `Writer` | Character stream abstract base classes | `read` / `write` / `append` |
+| `InputStreamReader` / `OutputStreamWriter` | Byte↔character bridge (specify encoding) | Constructor takes a `Charset` |
+| `FileReader` / `FileWriter` | File convenience classes (Java 11+ supports encoding) | Constructor |
+| `BufferedReader` / `BufferedWriter` | Add buffering, read/write line by line | `readLine` / `newLine` |
+| `PrintWriter` | Formatted output, no exceptions | `print` / `println` / `printf` |
+| `StringReader` / `StringWriter` | String as source/destination | In-memory read/write |
+
+## Conclusion: Making Text Processing Elegant
+
+Character streams are a "semantic layer" above byte streams — they encapsulate the tedious business of "decoding bytes into characters according to an encoding" so you can focus on the text itself. The keys to mastering them are threefold:
+
+- **Bridge streams are the core**: `InputStreamReader`/`OutputStreamWriter` are the only place character streams touch bytes; the encoding is specified here.
+- **Always specify the encoding explicitly**: `StandardCharsets.UTF_8` is your best friend. Not specifying it and relying on the default is the source of garbled-text bugs.
+- **BufferedReader.readLine is a powerhouse**: it covers 90% of text-file processing needs — `readLine` + try-with-resources is all you need.
+
+Once you understand the evolution of character encoding from ASCII to UTF-8, you gain a kind of x-ray vision into "why garbled text happens" — it's not black magic, it's the result of a mismatch between bytes and characters.
+
+In the next chapter we look at serialization — "freezing" an in-memory object into a byte stream, to be stored in a file or sent over the network. It's another kind of "object ↔ bytes" transformation art.

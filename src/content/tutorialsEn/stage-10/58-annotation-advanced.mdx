@@ -1,0 +1,446 @@
+---
+title: "Annotation Advanced"
+chapter: 58
+stage: "Stage 10"
+stageName: "Reflection and Annotations: Advanced"
+order: 3
+description: "Master meta-annotations (@Target/@Retention/@Inherited/@Repeatable/@Documented), the three Retention values, custom annotations, runtime reflective annotation reading, an annotation processor overview, and implement an @Autowired-style dependency injection"
+pubDate: 2026-07-03
+tags: ["Java", "注解", "Annotation", "依赖注入", "Annotation Processor"]
+---
+
+# Annotation Advanced
+
+Back in Stage 12 we first met annotations — `@Override`, `@Deprecated`, `@SuppressWarnings` — that was annotation "usage." This chapter drills into the "principle" of annotations: how do you define a custom annotation? How do you make it readable at runtime? How do you read it with reflection? Finally, a `@Autowired`-style dependency injection hands-on ties the whole mechanism together.
+
+The essence of an Annotation is **metadata attached to code**. It executes no logic on its own — logic is implemented by "the code that reads the annotation." Frameworks scan annotations, read them via reflection, and then decide what to do — this is the unifying pattern behind Spring's `@Component`, JUnit's `@Test`, and Lombok's `@Data`.
+
+## 1. Meta-Annotations: Annotations on Annotations
+
+When defining an annotation, you use "meta-annotations" to describe the annotation itself — where can it be placed? How long is it retained? Can it be inherited? Java provides 5 meta-annotations, all in the `java.lang.annotation` package.
+
+### 1.1 @Target: Where It Can Be Placed
+
+`@Target` specifies where an annotation can be used — class, field, method, parameter, and so on. Its value is `ElementType[]`:
+
+| ElementType | Placement |
+| --- | --- |
+| `TYPE` | Class, interface, annotation, enum |
+| `FIELD` | Field (including enum constants) |
+| `METHOD` | Method |
+| `PARAMETER` | Method parameter |
+| `CONSTRUCTOR` | Constructor |
+| `LOCAL_VARIABLE` | Local variable |
+| `ANNOTATION_TYPE` | Annotation type itself |
+| `PACKAGE` | Package (package-info.java) |
+| `TYPE_PARAMETER` (Java 8+) | Type parameter `<T>` |
+| `TYPE_USE` (Java 8+) | Type use site `String@NonNull s` |
+| `MODULE` (Java 9+) | Module |
+| `RECORD_COMPONENT` (Java 16+) | record component |
+
+```java
+@Target(ElementType.METHOD)   // only on methods
+@interface MyMethod {}
+
+@Target({ElementType.TYPE, ElementType.FIELD})   // class or field
+@interface ClassOrField {}
+```
+
+### 1.2 @Retention: How Long It Lives
+
+`@Retention` decides how long an annotation lives — this is the **most critical** meta-annotation. Three values:
+
+| RetentionPolicy | Retained Until | Reflectively Readable |
+| --- | --- | --- |
+| `SOURCE` | Source only, discarded after compilation | ❌ |
+| `CLASS` | Compiled into `.class`, but not loaded into the JVM | ❌ (the default, but almost never used) |
+| `RUNTIME` | Retained at runtime, reflectively readable | ✅ |
+
+```java
+@Retention(RetentionPolicy.SOURCE)   // vanishes after compilation, like @Override
+@interface OverrideLike {}
+
+@Retention(RetentionPolicy.RUNTIME)  // readable at runtime, like Spring's @Component
+@interface ComponentLike {}
+```
+
+**Important**: Only `RUNTIME`-level annotations can be read via reflection! `@Override` is `SOURCE` level — after compilation it's gone from the bytecode, so you can't read `@Override` when reflecting on methods. Spring's `@Component`/`@Autowired`/`@RequestMapping` are all `RUNTIME` level, which is why the framework can scan them at runtime.
+
+### 1.3 @Inherited: Whether Subclasses Inherit It
+
+`@Inherited` marks whether an annotation is inherited by subclasses — **only effective on class annotations** (not interfaces, fields, or methods).
+
+```java
+@Inherited
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@interface InheritedAnnotation {}
+
+@InheritedAnnotation
+class Parent {}
+class Child extends Parent {}
+
+Child.class.isAnnotationPresent(InheritedAnnotation.class);   // true
+```
+
+Without `@Inherited`, `Child` would not have `@InheritedAnnotation` readable on it.
+
+### 1.4 @Repeatable: Repeatable Placement
+
+Introduced in Java 8, allows the same annotation to be placed multiple times at the same location.
+
+```java
+@Repeatable(Schedules.class)
+@Retention(RetentionPolicy.RUNTIME)
+@interface Schedule {
+    String day();
+    int hour();
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+@interface Schedules {
+    Schedule[] value();   // container annotation
+}
+
+// usage: multiple @Schedule on the same method
+@Schedule(day = "周一", hour = 9)
+@Schedule(day = "周三", hour = 14)
+void remind() {}
+```
+
+Under the hood, multiple `@Schedule` are automatically wrapped into a `@Schedules` container. When reading reflectively, `getAnnotationsByType(Schedule.class)` returns all of them directly.
+
+### 1.5 @Documented: Appears in Javadoc
+
+`@Documented` indicates that this annotation will appear in the documentation generated by Javadoc. Purely a documentation feature, no runtime effect.
+
+```java
+@Documented
+@interface MyApi {}
+```
+
+## 2. Custom Annotations
+
+Define an annotation with the `@interface` keyword (note it's `@interface`, not `interface`).
+
+```java
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Controller {
+    String value() default "";        // attribute, use default to give a default value
+    String[] path() default {};
+}
+
+@Controller("/user")
+class UserController {}
+```
+
+An annotation's "attributes" are declared in method form — `String value()` means there's a String attribute named `value`. Attribute types can only be:
+
+- Primitive types (int/long/boolean/...)
+- String
+- Class
+- Enum
+- Annotation
+- Arrays of the above
+
+**Note**: Annotation attributes cannot be `null`! This differs from ordinary fields.
+
+### 2.1 The Special Status of value()
+
+If an annotation has only one attribute named `value`, the attribute name can be omitted when used:
+
+```java
+@interface Table { String value(); }
+
+@Table("t_user")          // equivalent to @Table(value = "t_user")
+class User {}
+
+@interface Column { String name(); int length() default 255; }
+
+@Column(name = "user_name")   // with multiple attributes, you must write the attribute name
+```
+
+## 3. Reading Annotations via Runtime Reflection
+
+`RUNTIME`-level annotations can be read via reflection. Core methods (on `Class`/`Field`/`Method`/`Constructor`, etc.):
+
+| Method | Purpose |
+| --- | --- |
+| `isAnnotationPresent(Class)` | Whether an annotation is present |
+| `getAnnotation(Class)` | Get a single annotation (including inherited, for classes) |
+| `getAnnotationsByType(Class)` | Get multiple (for `@Repeatable`) |
+| `getAnnotations()` | Get all annotations |
+| `getDeclaredAnnotation(Class)` | Get annotations declared directly on this class (excluding inherited) |
+
+```java
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Service { String value() default ""; }
+
+@Service("userService")
+class UserService {}
+
+// read reflectively
+Service s = UserService.class.getAnnotation(Service.class);
+if (s != null) {
+    System.out.println(s.value());   // userService
+}
+```
+
+Reading annotations on methods and fields works the same way — `method.getAnnotation(...)` and `field.getAnnotation(...)`.
+
+## 4. Annotation Processor Overview
+
+`RUNTIME` annotations are read via reflection — but that incurs overhead only at runtime. There's another way to handle annotations: the **Annotation Processor**, which processes annotations at **compile time**, generating code or modifying bytecode.
+
+- **Lombok** — processes `@Data`/`@Getter` at compile time, inserting getter/setter into bytecode.
+- **MapStruct** — generates Mapper implementation classes at compile time.
+- **Dagger / Hilt** — generates dependency-injection code at compile time.
+- **Butter Knife (Android)** — generates view-binding code at compile time.
+
+The core of an annotation processor is the `javax.annotation.processing.Processor` interface — the compiler calls its `process` method at compile time, where you can get all elements annotated with a given annotation and use `Filer` to generate Java files.
+
+```java
+// Simplified illustration (in practice you must register via META-INF/services)
+@SupportedAnnotationTypes("com.example.MyAnnotation")
+@SupportedSourceVersion(SourceVersion.RELEASE_17)
+public class MyProcessor extends AbstractProcessor {
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations,
+                           RoundEnvironment roundEnv) {
+        for (Element e : roundEnv.getElementsAnnotatedWith(MyAnnotation.class)) {
+            // generate a new Java file...
+        }
+        return true;
+    }
+}
+```
+
+Annotation processors outperform reflection (one-time compile-time processing, zero runtime overhead), but are more complex to develop and harder to debug. Lombok goes even further — it directly modifies the AST (Abstract Syntax Tree), a non-standard API, which is why Lombok is called "black magic."
+
+## 5. Hands-On: An @Autowired-Style Dependency Injection
+
+Theory is enough — let's get hands-on. We'll define a custom `@Inject` annotation that mimics Spring's `@Autowired` — auto-injecting dependencies into fields, zero configuration.
+
+The plan:
+
+1. **`@Inject` annotation** — placed on a field, meaning "please inject this dependency for me."
+2. **A container class** — manages all Bean instances, registering and looking them up by type.
+3. **Injection logic** — reflectively scans fields, and whenever it encounters `@Inject`, finds the dependency in the container and assigns it.
+
+<CodeRunner code={`import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+
+// 1. 依赖注入注解
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+@interface Inject {}
+
+// 2. 标记为 Bean
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Component {}
+
+// 3. 简易 IoC 容器
+class Container {
+    private final Map<Class<?>, Object> beans = new HashMap<>();
+
+    // 注册一个 Bean (实例)
+    public <T> void register(Class<T> type, T instance) {
+        beans.put(type, instance);
+    }
+
+    // 注册一个 Bean (按类型创建)
+    public <T> void register(Class<T> type) throws Exception {
+        T instance = type.getDeclaredConstructor().newInstance();
+        beans.put(type, instance);
+    }
+
+    // 按类型查找
+    @SuppressWarnings("unchecked")
+    public <T> T get(Class<T> type) {
+        return (T) beans.get(type);
+    }
+
+    // 自动注入: 扫描对象的所有 @Inject 字段
+    public void injectDependencies(Object obj) throws Exception {
+        Class<?> clazz = obj.getClass();
+        for (Field f : clazz.getDeclaredFields()) {
+            if (f.isAnnotationPresent(Inject.class)) {
+                Object dep = beans.get(f.getType());
+                if (dep == null) {
+                    throw new RuntimeException("找不到依赖: " + f.getType().getName());
+                }
+                f.setAccessible(true);
+                f.set(obj, dep);
+                System.out.println("  [注入] " + clazz.getSimpleName()
+                    + "." + f.getName() + " <- " + dep.getClass().getSimpleName());
+            }
+        }
+    }
+
+    // 全量初始化: 创建所有 @Component Bean, 并互相注入
+    public void initialize(Class<?>... componentClasses) throws Exception {
+        System.out.println("--- 第 1 步: 创建所有 Bean ---");
+        for (Class<?> c : componentClasses) {
+            if (c.isAnnotationPresent(Component.class)) {
+                Object bean = c.getDeclaredConstructor().newInstance();
+                beans.put(c, bean);
+                System.out.println("  [创建] " + c.getSimpleName());
+            }
+        }
+        System.out.println("--- 第 2 步: 注入依赖 ---");
+        for (Object bean : beans.values()) {
+            injectDependencies(bean);
+        }
+    }
+}
+
+// === 业务代码 ===
+@Component
+class UserRepository {
+    public String findById(int id) { return "User#" + id; }
+}
+
+@Component
+class EmailService {
+    public void send(String to, String msg) {
+        System.out.println("    [发邮件] " + to + ": " + msg);
+    }
+}
+
+@Component
+class UserService {
+    @Inject
+    private UserRepository userRepo;     // 依赖注入
+
+    @Inject
+    private EmailService emailService;   // 依赖注入
+
+    public void notifyUser(int userId, String message) {
+        String user = userRepo.findById(userId);
+        System.out.println("  [业务] 查到用户: " + user);
+        emailService.send(user + "@example.com", message);
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 仿 @Autowired 依赖注入演示 ===\\n");
+
+        // 1. 初始化容器
+        Container container = new Container();
+        container.initialize(UserRepository.class, EmailService.class, UserService.class);
+
+        // 2. 从容器取出 UserService, 直接用
+        System.out.println("\\n--- 调用 UserService (依赖已自动注入) ---");
+        UserService userService = container.get(UserService.class);
+        userService.notifyUser(42, "您的订单已发货");
+
+        // 3. 演示注解的元信息读取
+        System.out.println("\\n--- 注解的元信息 (反射读) ---");
+        Class<?> c = UserService.class;
+        Component comp = c.getAnnotation(Component.class);
+        System.out.println("UserService 上的 @Component: " + (comp != null));
+        System.out.println("@Component 的 Retention: RUNTIME (所以能反射读)");
+        System.out.println("@Override 的 Retention: SOURCE (反射读不到)");
+
+        // 4. 演示 @Inherited
+        System.out.println("\\n--- @Inherited 测试 ---");
+        // @Inherited 注解: 子类能继承
+        // 非 @Inherited: 子类读不到
+        InheritedMarker im = Parent.class.getAnnotation(InheritedMarker.class);
+        InheritedMarker imChild = Child.class.getAnnotation(InheritedMarker.class);
+        System.out.println("Parent 上有 @InheritedMarker: " + (im != null));
+        System.out.println("Child  上有 @InheritedMarker: " + (imChild != null) + " (子类继承到了)");
+
+        // 5. @Repeatable 测试
+        System.out.println("\\n--- @Repeatable 可重复注解 ---");
+        Task task = Worker.class.getAnnotation(Task.class);
+        Task[] tasks = Worker.class.getAnnotationsByType(Task.class);
+        System.out.println("getAnnotation 单个: " + task);
+        System.out.println("getAnnotationsByType 数量: " + tasks.length);
+        for (Task t : tasks) {
+            System.out.println("  - " + t.name() + " @ " + t.priority());
+        }
+    }
+
+    @Inherited
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    @interface InheritedMarker {}
+
+    @InheritedMarker
+    static class Parent {}
+    static class Child extends Parent {}
+
+    @Repeatable(Tasks.class)
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    @interface Task {
+        String name();
+        int priority() default 0;
+    }
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    @interface Tasks {
+        Task[] value();
+    }
+
+    @Task(name = "编码", priority = 1)
+    @Task(name = "测试", priority = 2)
+    @Task(name = "部署", priority = 3)
+    static class Worker {}
+}`} />
+
+> **Key observations**:
+> - **`UserService` doesn't `new` any dependency itself** — `UserRepository` and `EmailService` are auto-injected by the container into `@Inject` fields. This is the essence of IoC: dependencies are managed by the container; objects only declare "what I need."
+> - **The container works in two steps** — first create all Beans, then inject dependencies (to avoid injecting before a Bean is fully created in a circular-dependency case).
+> - **`@Inherited` lets `Child` inherit `@InheritedMarker`** — without `@Inherited`, subclasses couldn't read it.
+> - **`getAnnotationsByType(Task.class)` returns 3** — `@Repeatable` allows repeat placement at the same location, wrapped by the container annotation `Tasks`.
+> - **`@Override` can't be read via reflection** — it's `SOURCE` level, gone from the bytecode after compilation.
+
+## 6. Annotation Best Practices
+
+1. **Use `RUNTIME` only when needed** — what can be handled at compile time should use `SOURCE` (like Lombok), reducing runtime reflection overhead.
+2. **Give annotations semantic names** — `@Service`/`@Controller`/`@Repository` beats `@MyAnnotation1`.
+3. **Few and focused** — don't annotate for the sake of annotating; every annotation only has meaning if there's "code that reads it."
+4. **Pair with documentation** — `@Documented` makes the annotation appear in Javadoc, helping users.
+5. **Avoid annotation explosion** — five annotations on one field makes code hard to read.
+
+## 7. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| `@Target` | Where the annotation can be placed |
+| `@Retention` | SOURCE / CLASS / RUNTIME; only RUNTIME is reflectively readable |
+| `@Inherited` | Subclasses inherit class annotations (class only) |
+| `@Repeatable` | Multiple placements at the same location, paired with a container annotation |
+| `@Documented` | Appears in Javadoc |
+| `@interface` | The keyword to define an annotation |
+| Attribute types | Primitive/String/Class/enum/annotation/array |
+| Reflective reading | `getAnnotation`/`getAnnotationsByType` |
+| Annotation processor | Compile-time processing (Lombok/MapStruct) |
+
+**Mnemonic**:
+
+- **5 meta-annotations** — Target (where), Retention (how long), Inherited (inherit), Repeatable (repeat), Documented (docs).
+- **Three Retention tiers** — SOURCE dropped at compile, CLASS in class but unreadable, RUNTIME reflectively readable.
+- **`@Override` can't be read via reflection** — it's SOURCE level.
+- **Annotation attributes can't be null** — this differs from ordinary fields.
+- **Single `value()` attribute allows omitting the name** — `@Table("t_user")` equals `@Table(value="t_user")`.
+- **Annotations themselves don't execute** — logic is all implemented by "the code that reads them."
+
+## Closing: Stage 10 Wrap-Up
+
+This chapter walked annotations from principle to practice. Looking back at Stage 10:
+
+- **Chapter 56 Reflection** — the Class object, operating on fields/methods/constructors, `setAccessible`, generics and Array, performance cost, a simple ORM.
+- **Chapter 57 Dynamic Proxy** — static proxy, JDK dynamic proxy, CGLIB, AOP thinking.
+- **Chapter 58 Annotation Advanced (this chapter)** — meta-annotations, custom annotations, reflective annotation reading, annotation processors, an `@Autowired`-style dependency injection.
+
+These three chapters form a set — **reflection is the tool, annotations are the markers, dynamic proxy is the mechanism**. A framework's "magic" is basically a combination of these three: annotations mark "where to do what," reflection "reads annotations + operates on classes" at runtime, and dynamic proxy "adds logic without touching the original code." The entire Spring family's IoC, AOP, transactions, and caching all rest on this mechanism.
+
+The next stage leaves "language mechanisms" behind and enters "data and networking" — JDBC, connection pools, Socket, HttpClient — letting you talk to databases and the internet.

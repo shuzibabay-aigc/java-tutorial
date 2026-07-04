@@ -1,0 +1,446 @@
+---
+title: "注解进阶"
+chapter: 58
+stage: "第十阶段"
+stageName: "反射与注解进阶"
+order: 3
+description: "掌握元注解（@Target/@Retention/@Inherited/@Repeatable/@Documented）、Retention 的三个值、自定义注解、运行时反射读注解、注解处理器简介，并实现仿 @Autowired 的依赖注入"
+pubDate: 2026-07-03
+tags: ["Java", "注解", "Annotation", "依赖注入", "Annotation Processor"]
+---
+
+# 注解进阶
+
+第十二阶段我们第一次接触注解——`@Override`、`@Deprecated`、`@SuppressWarnings`——那是注解的"用法"。这一章我们要钻进注解的"原理"：怎么自定义注解？怎么让它在运行时可读？怎么用反射读出来？最后用一个仿 `@Autowired` 的依赖注入实战把这套机制串起来。
+
+注解（Annotation）的本质是**附加在代码上的元数据**。它本身不执行任何逻辑——逻辑要靠"读取注解的代码"来实现。框架扫描注解、反射读注解、再决定做什么——这就是 Spring `@Component`、JUnit `@Test`、Lombok `@Data` 背后的统一模式。
+
+## 一、元注解：注解的注解
+
+定义注解时，需要用"元注解（Meta-Annotation）"来描述这个注解本身——它能标注在哪里？保留到什么时候？能不能继承？Java 提供了 5 个元注解，全在 `java.lang.annotation` 包。
+
+### 1.1 @Target：能标注在哪里
+
+`@Target` 指定注解能用的位置——类、字段、方法、参数等等。取值是 `ElementType[]`：
+
+| ElementType | 能标注的位置 |
+| --- | --- |
+| `TYPE` | 类、接口、注解、枚举 |
+| `FIELD` | 字段（含枚举常量） |
+| `METHOD` | 方法 |
+| `PARAMETER` | 方法参数 |
+| `CONSTRUCTOR` | 构造器 |
+| `LOCAL_VARIABLE` | 局部变量 |
+| `ANNOTATION_TYPE` | 注解类型本身 |
+| `PACKAGE` | 包（package-info.java） |
+| `TYPE_PARAMETER`（Java 8+） | 类型参数 `<T>` |
+| `TYPE_USE`（Java 8+） | 类型使用处 `String@NonNull s` |
+| `MODULE`（Java 9+） | 模块 |
+| `RECORD_COMPONENT`（Java 16+） | record 组件 |
+
+```java
+@Target(ElementType.METHOD)   // 只能标在方法上
+@interface MyMethod {}
+
+@Target({ElementType.TYPE, ElementType.FIELD})   // 类或字段
+@interface ClassOrField {}
+```
+
+### 1.2 @Retention：保留到什么时候
+
+`@Retention` 决定注解活多久——这是**最关键**的元注解。三个值：
+
+| RetentionPolicy | 保留到 | 能否反射读 |
+| --- | --- | --- |
+| `SOURCE` | 只在源码，编译后丢弃 | ❌ |
+| `CLASS` | 编译进 `.class`，但不加载到 JVM | ❌（默认值，但几乎不用） |
+| `RUNTIME` | 运行时保留，能反射读 | ✅ |
+
+```java
+@Retention(RetentionPolicy.SOURCE)   // 编译后消失, 如 @Override
+@interface OverrideLike {}
+
+@Retention(RetentionPolicy.RUNTIME)  // 运行时可读, 如 Spring @Component
+@interface ComponentLike {}
+```
+
+**重要**：只有 `RUNTIME` 级别的注解才能用反射读！`@Override` 是 `SOURCE` 级，编译后字节码里就没了——所以你反射方法时读不到 `@Override`。Spring 的 `@Component`/`@Autowired`/`@RequestMapping` 全是 `RUNTIME` 级，框架才能在运行时扫描到。
+
+### 1.3 @Inherited：子类能否继承
+
+`@Inherited` 标记注解是否被子类继承——**只对类注解有效**（接口、字段、方法都不行）。
+
+```java
+@Inherited
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@interface InheritedAnnotation {}
+
+@InheritedAnnotation
+class Parent {}
+class Child extends Parent {}
+
+Child.class.isAnnotationPresent(InheritedAnnotation.class);   // true
+```
+
+不加 `@Inherited` 的话，`Child` 上读不到 `@InheritedAnnotation`。
+
+### 1.4 @Repeatable：可重复标注
+
+Java 8 引入，允许同一个注解在同一位置标多次。
+
+```java
+@Repeatable(Schedules.class)
+@Retention(RetentionPolicy.RUNTIME)
+@interface Schedule {
+    String day();
+    int hour();
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+@interface Schedules {
+    Schedule[] value();   // 容器注解
+}
+
+// 使用: 同一个方法标多个 @Schedule
+@Schedule(day = "周一", hour = 9)
+@Schedule(day = "周三", hour = 14)
+void remind() {}
+```
+
+底层会自动把多个 `@Schedule` 包进一个 `@Schedules` 容器里。反射读时用 `getAnnotationsByType(Schedule.class)` 能直接拿到所有。
+
+### 1.5 @Documented：出现在 Javadoc 里
+
+`@Documented` 表示这个注解会出现在 Javadoc 生成的文档里。纯文档功能，不影响运行。
+
+```java
+@Documented
+@interface MyApi {}
+```
+
+## 二、自定义注解
+
+定义注解用 `@interface` 关键字（注意是 `@interface`，不是 `interface`）。
+
+```java
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Controller {
+    String value() default "";        // 属性, 用 default 给默认值
+    String[] path() default {};
+}
+
+@Controller("/user")
+class UserController {}
+```
+
+注解的"属性"用方法形式声明——`String value()` 表示有个名为 `value` 的 String 属性。属性类型只能是：
+
+- 基本类型（int/long/boolean/...）
+- String
+- Class
+- 枚举
+- 注解
+- 以上类型的数组
+
+**注意**：注解属性不能是 `null`！这和普通字段不同。
+
+### 2.1 value() 的特殊地位
+
+如果注解只有一个属性且名为 `value`，使用时可以省略属性名：
+
+```java
+@interface Table { String value(); }
+
+@Table("t_user")          // 等价于 @Table(value = "t_user")
+class User {}
+
+@interface Column { String name(); int length() default 255; }
+
+@Column(name = "user_name")   // 多属性时必须写属性名
+```
+
+## 三、运行时反射读注解
+
+`RUNTIME` 级别的注解能用反射读出来。核心方法（在 `Class`/`Field`/`Method`/`Constructor` 等上）：
+
+| 方法 | 作用 |
+| --- | --- |
+| `isAnnotationPresent(Class)` | 是否存在某注解 |
+| `getAnnotation(Class)` | 获取单个注解（含继承的，对类） |
+| `getAnnotationsByType(Class)` | 获取多个（`@Repeatable` 时用） |
+| `getAnnotations()` | 获取所有注解 |
+| `getDeclaredAnnotation(Class)` | 获取本类直接声明的注解（不含继承） |
+
+```java
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Service { String value() default ""; }
+
+@Service("userService")
+class UserService {}
+
+// 反射读
+Service s = UserService.class.getAnnotation(Service.class);
+if (s != null) {
+    System.out.println(s.value());   // userService
+}
+```
+
+读方法上的注解、字段上的注解同理——`method.getAnnotation(...)`、`field.getAnnotation(...)`。
+
+## 四、注解处理器（Annotation Processor）简介
+
+`RUNTIME` 注解靠反射读——但要等到运行时才有开销。还有另一种处理注解的方式：**注解处理器（Annotation Processor）**，在**编译期**处理注解，生成代码或修改字节码。
+
+- **Lombok** —— 编译期处理 `@Data`/`@Getter`，往字节码里插 getter/setter。
+- **MapStruct** —— 编译期生成 Mapper 实现类。
+- **Dagger / Hilt** —— 编译期生成依赖注入代码。
+- **Butter Knife（Android）** —— 编译期生成视图绑定代码。
+
+注解处理器的核心是 `javax.annotation.processing.Processor` 接口——编译器在编译时调它的 `process` 方法，你能拿到所有标注了某注解的元素，用 `Filer` 生成 Java 文件。
+
+```java
+// 简化示意 (实际要写 META-INF/services 注册)
+@SupportedAnnotationTypes("com.example.MyAnnotation")
+@SupportedSourceVersion(SourceVersion.RELEASE_17)
+public class MyProcessor extends AbstractProcessor {
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations,
+                           RoundEnvironment roundEnv) {
+        for (Element e : roundEnv.getElementsAnnotatedWith(MyAnnotation.class)) {
+            // 生成新的 Java 文件...
+        }
+        return true;
+    }
+}
+```
+
+注解处理器比反射性能好（编译期一次性处理，运行时零开销），但开发复杂、调试困难。Lombok 走得更远——它直接修改 AST（抽象语法树），这是非标准 API，所以 Lombok 被叫做"黑魔法"。
+
+## 五、实战：仿 @Autowired 依赖注入
+
+理论够了，来实战。我们自定义一个 `@Inject` 注解，模拟 Spring 的 `@Autowired`——给字段自动注入依赖，零配置。
+
+思路：
+
+1. **`@Inject` 注解**——标在字段上，表示"请给我注入这个依赖"。
+2. **容器类**——管理所有 Bean 实例，能按类型注册和查找。
+3. **注入逻辑**——反射扫描字段，遇到 `@Inject` 就从容器里找依赖并赋值。
+
+<CodeRunner code={`import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+
+// 1. 依赖注入注解
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+@interface Inject {}
+
+// 2. 标记为 Bean
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Component {}
+
+// 3. 简易 IoC 容器
+class Container {
+    private final Map<Class<?>, Object> beans = new HashMap<>();
+
+    // 注册一个 Bean (实例)
+    public <T> void register(Class<T> type, T instance) {
+        beans.put(type, instance);
+    }
+
+    // 注册一个 Bean (按类型创建)
+    public <T> void register(Class<T> type) throws Exception {
+        T instance = type.getDeclaredConstructor().newInstance();
+        beans.put(type, instance);
+    }
+
+    // 按类型查找
+    @SuppressWarnings("unchecked")
+    public <T> T get(Class<T> type) {
+        return (T) beans.get(type);
+    }
+
+    // 自动注入: 扫描对象的所有 @Inject 字段
+    public void injectDependencies(Object obj) throws Exception {
+        Class<?> clazz = obj.getClass();
+        for (Field f : clazz.getDeclaredFields()) {
+            if (f.isAnnotationPresent(Inject.class)) {
+                Object dep = beans.get(f.getType());
+                if (dep == null) {
+                    throw new RuntimeException("找不到依赖: " + f.getType().getName());
+                }
+                f.setAccessible(true);
+                f.set(obj, dep);
+                System.out.println("  [注入] " + clazz.getSimpleName()
+                    + "." + f.getName() + " <- " + dep.getClass().getSimpleName());
+            }
+        }
+    }
+
+    // 全量初始化: 创建所有 @Component Bean, 并互相注入
+    public void initialize(Class<?>... componentClasses) throws Exception {
+        System.out.println("--- 第 1 步: 创建所有 Bean ---");
+        for (Class<?> c : componentClasses) {
+            if (c.isAnnotationPresent(Component.class)) {
+                Object bean = c.getDeclaredConstructor().newInstance();
+                beans.put(c, bean);
+                System.out.println("  [创建] " + c.getSimpleName());
+            }
+        }
+        System.out.println("--- 第 2 步: 注入依赖 ---");
+        for (Object bean : beans.values()) {
+            injectDependencies(bean);
+        }
+    }
+}
+
+// === 业务代码 ===
+@Component
+class UserRepository {
+    public String findById(int id) { return "User#" + id; }
+}
+
+@Component
+class EmailService {
+    public void send(String to, String msg) {
+        System.out.println("    [发邮件] " + to + ": " + msg);
+    }
+}
+
+@Component
+class UserService {
+    @Inject
+    private UserRepository userRepo;     // 依赖注入
+
+    @Inject
+    private EmailService emailService;   // 依赖注入
+
+    public void notifyUser(int userId, String message) {
+        String user = userRepo.findById(userId);
+        System.out.println("  [业务] 查到用户: " + user);
+        emailService.send(user + "@example.com", message);
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 仿 @Autowired 依赖注入演示 ===\\n");
+
+        // 1. 初始化容器
+        Container container = new Container();
+        container.initialize(UserRepository.class, EmailService.class, UserService.class);
+
+        // 2. 从容器取出 UserService, 直接用
+        System.out.println("\\n--- 调用 UserService (依赖已自动注入) ---");
+        UserService userService = container.get(UserService.class);
+        userService.notifyUser(42, "您的订单已发货");
+
+        // 3. 演示注解的元信息读取
+        System.out.println("\\n--- 注解的元信息 (反射读) ---");
+        Class<?> c = UserService.class;
+        Component comp = c.getAnnotation(Component.class);
+        System.out.println("UserService 上的 @Component: " + (comp != null));
+        System.out.println("@Component 的 Retention: RUNTIME (所以能反射读)");
+        System.out.println("@Override 的 Retention: SOURCE (反射读不到)");
+
+        // 4. 演示 @Inherited
+        System.out.println("\\n--- @Inherited 测试 ---");
+        // @Inherited 注解: 子类能继承
+        // 非 @Inherited: 子类读不到
+        InheritedMarker im = Parent.class.getAnnotation(InheritedMarker.class);
+        InheritedMarker imChild = Child.class.getAnnotation(InheritedMarker.class);
+        System.out.println("Parent 上有 @InheritedMarker: " + (im != null));
+        System.out.println("Child  上有 @InheritedMarker: " + (imChild != null) + " (子类继承到了)");
+
+        // 5. @Repeatable 测试
+        System.out.println("\\n--- @Repeatable 可重复注解 ---");
+        Task task = Worker.class.getAnnotation(Task.class);
+        Task[] tasks = Worker.class.getAnnotationsByType(Task.class);
+        System.out.println("getAnnotation 单个: " + task);
+        System.out.println("getAnnotationsByType 数量: " + tasks.length);
+        for (Task t : tasks) {
+            System.out.println("  - " + t.name() + " @ " + t.priority());
+        }
+    }
+
+    @Inherited
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    @interface InheritedMarker {}
+
+    @InheritedMarker
+    static class Parent {}
+    static class Child extends Parent {}
+
+    @Repeatable(Tasks.class)
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    @interface Task {
+        String name();
+        int priority() default 0;
+    }
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    @interface Tasks {
+        Task[] value();
+    }
+
+    @Task(name = "编码", priority = 1)
+    @Task(name = "测试", priority = 2)
+    @Task(name = "部署", priority = 3)
+    static class Worker {}
+}`} />
+
+> **观察重点**：
+> - **`UserService` 自己没 `new` 任何依赖**——`UserRepository` 和 `EmailService` 被容器自动注入进 `@Inject` 字段。这就是 IoC 的本质：依赖由容器管理，对象只负责声明"我要什么"。
+> - **容器分两步走**——先创建所有 Bean，再注入依赖（避免循环依赖时还没创建完就注入）。
+> - **`@Inherited` 让 `Child` 继承到 `@InheritedMarker`**——不加 `@Inherited` 的话子类读不到。
+> - **`getAnnotationsByType(Task.class)` 返回 3 个**——`@Repeatable` 让同一位置可重复标注，用容器注解 `Tasks` 包装。
+> - **`@Override` 反射读不到**——它是 `SOURCE` 级，编译后字节码里就没了。
+
+## 六、注解的最佳实践
+
+1. **该用 `RUNTIME` 才用 `RUNTIME`**——能编译期处理的用 `SOURCE`（如 Lombok），减少运行时反射开销。
+2. **注解名要语义化**——`@Service`/`@Controller`/`@Repository` 比 `@MyAnnotation1` 好。
+3. **少而精**——不要为了注解而注解，每个注解都要有"读取它的代码"才有意义。
+4. **配合文档**——`@Documented` 让注解出现在 Javadoc 里，方便使用者。
+5. **避免注解爆炸**——一个字段标 5 个注解会让代码难以阅读。
+
+## 七、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| `@Target` | 注解能标的位置 |
+| `@Retention` | SOURCE / CLASS / RUNTIME，只有 RUNTIME 能反射读 |
+| `@Inherited` | 子类继承类注解（只对类有效） |
+| `@Repeatable` | 同一位置标多次，配容器注解 |
+| `@Documented` | 出现在 Javadoc |
+| `@interface` | 定义注解的关键字 |
+| 属性类型 | 基本类型/String/Class/枚举/注解/数组 |
+| 反射读注解 | `getAnnotation`/`getAnnotationsByType` |
+| 注解处理器 | 编译期处理（Lombok/MapStruct） |
+
+**记忆口诀**：
+
+- **5 个元注解**——Target（在哪）、Retention（活多久）、Inherited（继承）、Repeatable（重复）、Documented（文档）。
+- **Retention 三档**——SOURCE 编译丢、CLASS 进 class 但读不到、RUNTIME 反射能读。
+- **`@Override` 反射读不到**——它是 SOURCE 级。
+- **注解属性不能是 null**——这是和普通字段的区别。
+- **`value()` 单属性可省名**——`@Table("t_user")` 等价 `@Table(value="t_user")`。
+- **注解本身不执行**——逻辑全靠"读它的代码"实现。
+
+## 结语：第十阶段完结
+
+这一章我们把注解从原理到实战过了一遍。回头看第十阶段：
+
+- **第 56 章 反射机制** —— Class 对象、操作字段/方法/构造器、`setAccessible`、泛型与 Array、性能代价、简易 ORM。
+- **第 57 章 动态代理** —— 静态代理、JDK 动态代理、CGLIB、AOP 思想。
+- **第 58 章 注解进阶（本章）** —— 元注解、自定义注解、反射读注解、注解处理器、仿 `@Autowired` 依赖注入。
+
+这三章是一组——**反射是工具，注解是标记，动态代理是机制**。框架的"魔法"基本都是这三者的组合：注解标记"在哪做什么"，反射在运行时"读注解 + 操作类"，动态代理"在不改原代码的前提下加逻辑"。Spring 全家桶的 IoC、AOP、事务、缓存，全靠这套机制撑起来。
+
+下一阶段我们离开"语言机制"，进入"数据与网络"——JDBC、连接池、Socket、HttpClient，让你能和数据库、和互联网打交道。

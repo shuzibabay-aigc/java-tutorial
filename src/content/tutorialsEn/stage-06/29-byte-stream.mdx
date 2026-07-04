@@ -1,0 +1,343 @@
+---
+title: "Byte Streams"
+chapter: 29
+stage: "Stage 6"
+stageName: "I/O and NIO"
+order: 2
+description: "Master the InputStream/OutputStream abstract classes, file streams, buffered streams, and data streams, and understand the Decorator pattern in IO and try-with-resources resource management"
+pubDate: 2026-07-03
+tags: ["Java", "IO", "字节流", "InputStream", "OutputStream", "装饰器模式", "try-with-resources"]
+---
+
+# Byte Streams
+
+If files are where data comes to rest, then byte streams are the "pipes" through which data flows. Everything in a computer — text, images, video, executables — boils down to a sequence of bytes. Java's byte stream abstraction unifies the act of "reading and writing bytes": no matter whether the data comes from disk, network, or memory, the same API applies.
+
+In this chapter, we start from the most fundamental `InputStream`/`OutputStream` abstract classes, work our way through buffered streams and data streams, and finally reveal a beauty of design that many overlook — how the **Decorator pattern** gives Java IO a "Lego-style" power of composition.
+
+## 1. Why We Need "Streams"
+
+Imagine you have a 10 GB log file to process. If you "read it all into memory and then process it," memory simply blows up. But with a streaming approach — read 1 KB at a time, process it, read another 1 KB — even 10 GB can be crunched on a machine with 512 MB of RAM.
+
+The essence of a stream is: **treat data as a "continuous flow of water," not as "a bucket of water."** You don't need to know the total volume; just ladle it out one scoop at a time. This "process as you read" model is the foundation of big-data handling and network communication.
+
+Java's byte streams use `byte` (8 bits) as the smallest unit, corresponding to the abstract classes `InputStream` (reading) and `OutputStream` (writing).
+
+## 2. InputStream: The Pipe for Reading Bytes
+
+`InputStream` is the abstract base class of all byte input streams, defining the contract for "reading bytes."
+
+### 2.1 Core Methods
+
+```java
+public abstract class InputStream implements Closeable {
+    public abstract int read() throws IOException;          // read 1 byte (returns 0~255, or -1 at end)
+    public int read(byte[] b) throws IOException;           // bulk read up to b.length bytes
+    public int read(byte[] b, int off, int len);            // read up to len bytes into b[off..]
+    public int available() throws IOException;              // estimate how many bytes are still available (non-blocking)
+    public long transferTo(OutputStream out);               // transfer all remaining data to out (Java 9+)
+    public void close() throws IOException;                 // close the stream
+}
+```
+
+**Key detail**: `read()` returns `int` rather than `byte` — because `-1` is needed to signal "end of stream." A `byte` is signed (-128 to 127) and can't distinguish `-1` from a normal byte value; using `int`, the range 0–255 represents byte values and `-1` signals the end.
+
+### 2.2 The Classic Read Loop
+
+```java
+InputStream in = ...;
+byte[] buffer = new byte[1024];
+int n;
+while ((n = in.read(buffer)) != -1) {
+    // process the first n bytes of buffer
+    // Note: it's n, not buffer.length! The last chunk is usually not full
+}
+in.close();
+```
+
+This `while ((n = in.read(buffer)) != -1)` pattern is the "hello world" of byte streams — memorize it, because it will accompany you through a lifetime of IO code.
+
+## 3. OutputStream: The Pipe for Writing Bytes
+
+`OutputStream` is the mirror of `InputStream`, defining the contract for "writing bytes":
+
+```java
+public abstract class OutputStream implements Closeable, Flushable {
+    public abstract void write(int b) throws IOException;        // write 1 byte (uses the low 8 bits)
+    public void write(byte[] b) throws IOException;              // write the entire array
+    public void write(byte[] b, int off, int len);               // write b[off..off+len]
+    public void flush() throws IOException;                      // force buffered data to be written out
+    public void close() throws IOException;
+}
+```
+
+**The meaning of flush**: many output streams maintain an internal buffer (accumulating a batch before writing to disk for better performance). `flush()` forces the buffer's contents to be actually written out — if you don't call flush before the program exits, data sitting in the buffer may be lost.
+
+## 4. FileInputStream / FileOutputStream: File Byte Streams
+
+The most commonly used byte streams — they connect directly to files.
+
+```java
+import java.io.*;
+
+// Write
+try (OutputStream out = new FileOutputStream("data.bin")) {
+    out.write(new byte[]{1, 2, 3, 4, 5});
+}
+
+// Read
+try (InputStream in = new FileInputStream("data.bin")) {
+    byte[] buf = new byte[16];
+    int n = in.read(buf);
+    System.out.println("读到 " + n + " 字节");
+    for (int i = 0; i < n; i++) System.out.print(buf[i] + " ");
+}
+// Output: 读到 5 字节
+//      1 2 3 4 5
+```
+
+`FileOutputStream` overwrites by default — an existing file is truncated. To "append," use the two-argument constructor:
+
+```java
+new FileOutputStream("log.txt", true)   // true = append
+```
+
+## 5. BufferedInputStream / BufferedOutputStream: Buffered Streams
+
+Using `FileInputStream` directly triggers a system call on every single byte read — astonishingly slow. Buffered streams maintain an in-memory array (default 8 KB); they read a large chunk from disk at once, and subsequent `read()` calls pull from the in-memory array, boosting performance by orders of magnitude.
+
+```java
+// Slow: every read triggers a system call
+InputStream slow = new FileInputStream("big.dat");
+
+// Fast: wrap in a BufferedInputStream with an internal 8 KB buffer
+InputStream fast = new BufferedInputStream(new FileInputStream("big.dat"));
+```
+
+Note the form — `new BufferedInputStream(new FileInputStream(...))`. This "stream wrapping stream" idiom is the hallmark of Java IO; the next section reveals the design philosophy behind it.
+
+## 6. The Decorator Pattern: IO's Lego Bricks
+
+The class hierarchy of Java IO has a curious property — `BufferedInputStream` is not a subclass of `FileInputStream`, but rather of `InputStream`, and it **internally holds an `InputStream` field**:
+
+```java
+public class BufferedInputStream extends FilterInputStream {
+    protected volatile InputStream in;   // the wrapped underlying stream
+    ...
+}
+```
+
+This is the classic **Decorator pattern**: the decorator and the decorated implement the same interface; the decorator internally delegates to the decorated object and adds new behavior before or after.
+
+### 6.1 Pattern Structure
+
+```
+InputStream (abstract component)
+   ├── FileInputStream (concrete component: reads from a file)
+   ├── ByteArrayInputStream (concrete component: reads from memory)
+   └── FilterInputStream (abstract decorator)
+          ├── BufferedInputStream (decorator: adds buffering)
+          ├── DataInputStream (decorator: reads primitive types)
+          └── PushbackInputStream (decorator: supports pushback)
+```
+
+`FilterInputStream` is the base class of all decorators. It holds an `in` field and, by default, forwards every method to `in`. Subclasses override only the methods that need "enhancement."
+
+### 6.2 Compose Like Lego
+
+The Decorator pattern lets you **stack capabilities at will**:
+
+```java
+// File stream → add buffering → add data read/write
+DataInputStream in = new DataInputStream(
+    new BufferedInputStream(
+        new FileInputStream("data.bin")));
+
+// Read an int (4 bytes, big-endian)
+int n = in.readInt();
+```
+
+Three layers of nesting, each adding one capability: the bottom reads the file, the middle adds speed, the top reads primitive types. You can add or remove layers as needed — want only buffering, wrap twice; want data read/write, add another layer. This "composition over inheritance" design is a textbook example of object-oriented design.
+
+## 7. DataInputStream / DataOutputStream: Reading and Writing Primitives
+
+The `DataInput`/`DataOutput` interfaces define methods for reading and writing primitive types: `readInt/writeInt`, `readLong/writeLong`, `readDouble/writeDouble`, `readUTF/writeUTF` (modified UTF-8), and so on.
+
+```java
+import java.io.*;
+
+// Write
+try (DataOutputStream out = new DataOutputStream(
+        new BufferedOutputStream(
+            new FileOutputStream("record.bin")))) {
+    out.writeInt(42);
+    out.writeDouble(3.14159);
+    out.writeUTF("你好，世界");
+    out.writeBoolean(true);
+}
+
+// Read (order must match the write order!)
+try (DataInputStream in = new DataInputStream(
+        new BufferedInputStream(
+            new FileInputStream("record.bin")))) {
+    int n = in.readInt();           // 42
+    double d = in.readDouble();     // 3.14159
+    String s = in.readUTF();        // 你好，世界
+    boolean b = in.readBoolean();   // true
+    System.out.printf("n=%d d=%f s=%s b=%b%n", n, d, s, b);
+}
+```
+
+**Important**: the order in which `DataInputStream` reads must **exactly match** the order in which `DataOutputStream` wrote — it has no knowledge of field boundaries; it can only interpret bytes in the order you give it. This is how "binary protocols" typically work.
+
+**Byte order**: Java uses big-endian (most significant byte first) — `writeInt(1)` produces the 4 bytes `00 00 00 01`. This matches network byte order but is the opposite of the little-endian layout used internally by x86 machines. Both sides of a conversation must use DataStream; you can't have one side use DataStream and the other use something else.
+
+## 8. try-with-resources: Automatic Stream Closing
+
+Streams hold operating-system resources (file handles, network connections) and must be closed after use. Java 7's try-with-resources automates this:
+
+```java
+// Old style: verbose and error-prone
+InputStream in = null;
+try {
+    in = new FileInputStream("a.txt");
+    // use in
+} catch (IOException e) {
+    // ...
+} finally {
+    if (in != null) {
+        try { in.close(); } catch (IOException e) { /* swallow */ }
+    }
+}
+
+// New style: try-with-resources
+try (InputStream in = new FileInputStream("a.txt")) {
+    // use in
+}   // in.close() is called automatically here, even if an exception is thrown
+```
+
+**How it works**: try-with-resources requires resources to implement the `AutoCloseable` interface (`Closeable` is a sub-interface). When the try block exits (whether normally or via exception), the JVM automatically calls `close()`. Multiple resources are separated by semicolons:
+
+```java
+try (InputStream in = new FileInputStream("src");
+     OutputStream out = new FileOutputStream("dst")) {
+    in.transferTo(out);
+}   // out is closed first, then in (reverse order)
+```
+
+**Reverse-order closing** is a subtle detail — the resource opened last is closed first, matching the LIFO (last-in, first-out) semantics of a stack and avoiding dependency issues.
+
+**Java 9+ improvement**: you can reference an existing final variable from the outer scope without redeclaring it inside the try:
+
+```java
+InputStream in = new FileInputStream("a.txt");
+try (in) {   // Java 9+
+    in.transferTo(out);
+}
+```
+
+## 9. In Practice: File Copy (Comparing Approaches for Performance)
+
+Below we copy a file three different ways and compare performance — a manual loop, `transferTo`, and `Files.copy`:
+
+<CodeRunner code={`import java.io.*;
+import java.nio.file.*;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class Main {
+    public static void main(String[] args) throws IOException {
+        // 准备一个 5MB 的测试文件
+        Path src = Paths.get("src.bin");
+        try (OutputStream out = new BufferedOutputStream(
+                new FileOutputStream(src.toFile()))) {
+            byte[] block = new byte[8192];
+            for (int i = 0; i < block.length; i++) block[i] = (byte) (i & 0xFF);
+            for (int i = 0; i < 640; i++) out.write(block);   // ~5MB
+        }
+        System.out.println("源文件大小: " + Files.size(src) + " 字节\\n");
+
+        // 方式 1：裸字节流 + 手写循环（慢）
+        Path dst1 = Paths.get("dst1.bin");
+        long t1 = System.currentTimeMillis();
+        try (InputStream in = new FileInputStream(src.toFile());
+             OutputStream out = new FileOutputStream(dst1.toFile())) {
+            byte[] buf = new byte[1024];
+            int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+        }
+        long time1 = System.currentTimeMillis() - t1;
+        System.out.println("方式 1（裸流 + 1KB 缓冲）: " + time1 + " ms, 大小=" + Files.size(dst1));
+
+        // 方式 2：缓冲流 + transferTo（Java 9+）
+        Path dst2 = Paths.get("dst2.bin");
+        long t2 = System.currentTimeMillis();
+        try (InputStream in = new BufferedInputStream(new FileInputStream(src.toFile()));
+             OutputStream out = new BufferedOutputStream(new FileOutputStream(dst2.toFile()))) {
+            in.transferTo(out);
+        }
+        long time2 = System.currentTimeMillis() - t2;
+        System.out.println("方式 2（缓冲流 + transferTo）: " + time2 + " ms, 大小=" + Files.size(dst2));
+
+        // 方式 3：Files.copy（最简洁）
+        Path dst3 = Paths.get("dst3.bin");
+        long t3 = System.currentTimeMillis();
+        Files.copy(src, dst3, StandardCopyOption.REPLACE_EXISTING);
+        long time3 = System.currentTimeMillis() - t3;
+        System.out.println("方式 3（Files.copy）: " + time3 + " ms, 大小=" + Files.size(dst3));
+
+        // 校验三份复制结果一致
+        System.out.println("\\n--- 校验 ---");
+        long h1 = Files.size(dst1), h2 = Files.size(dst2), h3 = Files.size(dst3);
+        System.out.println("三份文件大小一致: " + (h1 == h2 && h2 == h3 && h1 == Files.size(src)));
+
+        // 清理
+        Files.deleteIfExists(src);
+        Files.deleteIfExists(dst1);
+        Files.deleteIfExists(dst2);
+        Files.deleteIfExists(dst3);
+        System.out.println("\\n清理完毕");
+    }
+}`} />
+
+> **Key takeaways on performance**:
+> - The raw stream (Approach 1) triggers a system call on every read/write — slow but steady.
+> - The buffered stream (Approach 2) reads and writes in batches, typically an order of magnitude faster.
+> - `Files.copy` (Approach 3) uses NIO channels internally, often the fastest and with the simplest code.
+>
+> In real projects: if you can write a single line of `Files.copy`, don't write ten lines of stream loops — simplicity usually means correctness.
+
+## 10. The Limits of Byte Streams
+
+Byte streams are great for "raw bytes," but awkward for **text** — you have to worry about encoding yourself, split lines yourself, and handle Chinese characters yourself. For example, reading UTF-8 Chinese text:
+
+```java
+// Awkward: reading Chinese with a byte stream easily truncates multi-byte characters into garbage
+try (InputStream in = new FileInputStream("poem.txt")) {
+    byte[] buf = new byte[16];
+    int n = in.read(buf);   // 16 bytes might cut right through a Chinese character
+    String s = new String(buf, 0, n);   // risk of garbled text
+}
+```
+
+Text should be left to "character streams" — `Reader`/`Writer`, which is the topic of the next chapter. The rule of thumb is simple: **byte streams handle binary data (images, video, serialized data); character streams handle text.**
+
+## 11. Quick Reference Table
+
+| Stream type | Purpose | Key methods |
+| --- | --- | --- |
+| `FileInputStream` / `FileOutputStream` | File read/write | `read` / `write` |
+| `BufferedInputStream` / `BufferedOutputStream` | Add buffering for speed | Maintains an internal buffer |
+| `DataInputStream` / `DataOutputStream` | Read/write primitive types | `readInt` / `writeInt` / `readUTF` |
+| `ByteArrayInputStream` / `ByteArrayOutputStream` | Read/write in memory | Byte array as source/destination |
+| `ObjectInputStream` / `ObjectOutputStream` | Object serialization | `readObject` / `writeObject` (covered in the next chapter) |
+
+## Conclusion: The Beauty of Stream Design
+
+Java's byte stream abstraction has two layers of beauty:
+
+- **Unified abstraction**: `InputStream`/`OutputStream` encapsulate "where data comes from and where it goes" behind the same interface — files, networks, and memory all use the same `read`/`write`. The processing logic you write can switch data sources seamlessly.
+- **Decorator composition**: `Buffered`, `Data`, `Pushback` and other decorators are like Lego bricks, stacked as needed. **You never need a specialized class like "BufferedFileDataInputStream"** — `new DataInputStream(new BufferedInputStream(new FileInputStream(...)))` assembles it from three general-purpose bricks.
+
+This "small classes, much composition" design is the essence of object-oriented design. And try-with-resources automates the most bug-prone part — resource closing — working in concert with decorators so that multiple resources are closed in reverse order, cleanly and crisply.
+
+Byte streams are the foundation of IO. In the next chapter we turn to character streams — built on top of byte streams, they solve the "byte-to-character" encoding problem and make text processing elegant.

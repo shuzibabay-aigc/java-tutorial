@@ -1,0 +1,620 @@
+---
+title: "Docker 与部署"
+chapter: 78
+stage: "第十四阶段"
+stageName: "高级专题与分布式"
+order: 6
+description: "掌握容器 vs 虚拟机的差异、Docker 镜像与容器、Dockerfile 编写、多阶段构建、Docker Compose 编排、Kubernetes 基础、CI/CD 流水线"
+pubDate: 2026-07-03
+tags: ["Java", "Docker", "容器化", "Dockerfile", "Docker Compose", "Kubernetes", "CI/CD"]
+---
+
+# Docker 与部署
+
+"在我机器上能跑啊！"——这是开发对运维最经典的甩锅台词。你的机器装了 JDK 21、MySQL 8、Redis 7、一堆环境变量，到了服务器全没有，程序当然跑不起来。
+
+**Docker** 把这锅彻底砸了——它把你的程序和它依赖的一切（OS 库、运行时、配置）打包成一个**容器**，这个容器在任何装了 Docker 的机器上跑都一样。"在我机器上能跑"从此等于"在哪都能跑"。
+
+这一章我们看 Docker 是什么、怎么用 Docker 打包 Java 应用、Docker Compose 怎么编排多服务、以及 Kubernetes 怎么管理一大群容器。
+
+## 一、容器 vs 虚拟机
+
+容器化不是新概念——Linux 的 LXC、Solaris 的 Zones 早就有了。Docker 把它做简单了。
+
+### 1.1 虚拟机
+
+虚拟机（VM）——用 Hypervisor 在物理机上模拟出多个完整操作系统。每个 VM 有自己的内核、系统库、应用。
+
+```
+物理机
+ └ Hypervisor
+   ├ VM1: 完整 OS (内核 + 库 + 应用)
+   ├ VM2: 完整 OS (内核 + 库 + 应用)
+   └ VM3: 完整 OS (内核 + 库 + 应用)
+```
+
+优点——隔离彻底。缺点——每个 VM 跑一个完整 OS，几 GB 内存就没了，启动慢。
+
+### 1.2 容器
+
+容器——所有容器**共享主机内核**，只是隔离进程、文件系统、网络。没有自己的内核。
+
+```
+物理机
+ └ 主机内核 (Linux)
+   ├ 容器1: 库 + 应用
+   ├ 容器2: 库 + 应用
+   └ 容器3: 库 + 应用
+```
+
+- **轻量**——容器只有几十 MB，不像 VM 几 GB。
+- **启动快**——秒级启动（VM 要分钟级）。
+- **密度高**——一台机器跑几百个容器没问题。
+
+容器靠 Linux 内核的 **Namespace**（隔离视图）和 **Cgroup**（限制资源）实现——Namespace 让容器以为自己独占系统，Cgroup 限制它用多少 CPU/内存。
+
+## 二、Docker 核心概念
+
+### 2.1 镜像与容器
+
+- **镜像（Image）**——只读模板，包含应用和依赖。类似 OOP 里的"类"。
+- **容器（Container）**——镜像的运行实例，可读写。类似"对象"。
+
+```bash
+docker pull openjdk:21           # 拉取镜像
+docker images                    # 查看镜像
+docker run -it openjdk:21 java -version   # 运行容器
+docker ps                        # 查看运行中的容器
+docker stop <container-id>       # 停止
+docker rm <container-id>         # 删除
+```
+
+### 2.2 镜像分层
+
+镜像是一层一层堆出来的——基础镜像层 + 加依赖层 + 加应用层。每层都是只读的，多镜像共享底层，节省空间。
+
+```
+镜像层 (从下到上):
+  ├ debian:bookworm-slim   (基础 OS, 80MB)
+  ├ openjdk:21-slim        (+ JDK, 200MB)
+  ├ app.jar                (+ 应用, 30MB)
+  └ 配置文件               (+ 配置, 1KB)
+```
+
+容器启动时在最上层加一个**可写层**——所有修改写在这里，镜像本身不变。
+
+### 2.3 Dockerfile：镜像的"配方"
+
+Dockerfile 是个文本文件，描述怎么构建镜像：
+
+```dockerfile
+# 基础镜像
+FROM openjdk:21-slim
+
+# 工作目录
+WORKDIR /app
+
+# 复制 jar 包
+COPY target/myapp.jar /app/app.jar
+
+# 暴露端口
+EXPOSE 8080
+
+# 启动命令
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+```
+
+构建并运行：
+
+```bash
+docker build -t myapp:1.0 .       # 构建镜像
+docker run -d -p 8080:8080 myapp:1.0   # 后台运行, 端口映射
+```
+
+## 三、Java 应用的 Docker 最佳实践
+
+### 3.1 多阶段构建
+
+把"构建"和"运行"分开——构建阶段用 Maven 镜像打包，运行阶段只拷 jar 到精简的 JRE 镜像。最终镜像小很多。
+
+```dockerfile
+# 阶段 1: 构建
+FROM maven:3.9-eclipse-temurin-21 AS builder
+WORKDIR /build
+COPY pom.xml .
+RUN mvn dependency:go-offline           # 先下依赖 (利用缓存)
+COPY src ./src
+RUN mvn package -DskipTests
+
+# 阶段 2: 运行
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+COPY --from=builder /build/target/*.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+阶段 1 用 600MB 的 Maven 镜像打包，阶段 2 只拷贝生成的 jar 到 150MB 的 JRE 镜像。最终镜像约 180MB——比单阶段构建小一半。
+
+### 3.2 Spring Boot 分层
+
+Spring Boot 2.3+ 支持分层 jar——把依赖、应用代码、资源分层打包，Docker 构建时每层一个 COPY，依赖不变就缓存命中，构建快。
+
+```dockerfile
+FROM eclipse-temurin:21-jre as layers
+WORKDIR /app
+COPY target/*.jar app.jar
+RUN java -Djarmode=layertools -jar app.jar extract
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=layers /app/dependencies/ ./
+COPY --from=layers /app/spring-boot-loader/ ./
+COPY --from=layers /app/snapshot-dependencies/ ./
+COPY --from=layers /app/application/ ./
+ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+```
+
+改了代码只重建 application 层，依赖层缓存命中——构建从 2 分钟降到 20 秒。
+
+### 3.3 JVM 容器化注意事项
+
+- **内存限制感知**——Java 10+ 自动识别 cgroup 内存限制。设 `-XX:MaxRAMPercentage=75.0` 让 JVM 用容器内存的 75%。
+- **不要 swap**——容器 swap 慢，JVM GC 会卡。设 `--memory-swap=内存相等`。
+- **使用 ZGC/Shenandoah**——低延迟 GC 更适合容器。
+
+```dockerfile
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-XX:+UseZGC", "-jar", "app.jar"]
+```
+
+## 四、Docker Compose：多容器编排
+
+微服务有几十个容器，手动 `docker run` 不现实。**Docker Compose** 用一个 YAML 描述所有服务，一条命令全起来。
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    depends_on:
+      - mysql
+      - redis
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/mydb
+      SPRING_REDIS_HOST: redis
+
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: mydb
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  mysql_data:
+```
+
+```bash
+docker-compose up -d        # 启动所有服务 (后台)
+docker-compose logs -f app  # 看 app 日志
+docker-compose down         # 停止并删除
+```
+
+Compose 自动创建一个网络，服务间用服务名（`mysql`、`redis`）互相访问——比 IP 方便。
+
+## 五、Kubernetes：容器编排的王者
+
+Docker Compose 适合单机。几十台机器、上千容器时，需要 **Kubernetes（K8s）**——谷歌开源的容器编排平台。
+
+### 5.1 核心概念
+
+- **Pod**——K8s 最小调度单位，一个或多个紧密耦合的容器。
+- **Deployment**——管理 Pod 副本数，保证始终有 N 个实例运行。
+- **Service**——给一组 Pod 一个稳定的访问入口（Pod IP 会变，Service IP 不变）。
+- **Ingress**——HTTP 层入口，按域名/路径路由到 Service。
+- **ConfigMap / Secret**——配置和敏感信息。
+
+```
+用户 → Ingress → Service → Pod (容器)
+                     ↑
+              Deployment 管理 Pod 副本
+```
+
+### 5.2 部署一个 Java 应用
+
+```yaml
+# deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  replicas: 3                    # 3 个副本
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          image: myapp:1.0
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+spec:
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: LoadBalancer
+```
+
+```bash
+kubectl apply -f deployment.yaml   # 部署
+kubectl get pods                   # 查看 Pod
+kubectl scale deployment myapp --replicas=5   # 扩容到 5 个
+kubectl rollout restart deployment myapp      # 滚动更新
+```
+
+K8s 的杀手锏——**自愈**和**弹性扩缩**。Pod 挂了自动重启，流量大时自动扩容，闲时自动缩容。
+
+## 六、CI/CD：自动化流水线
+
+**CI/CD**（Continuous Integration / Continuous Deployment）——代码 push 后自动构建、测试、部署。
+
+```
+push 代码 → CI 服务器 → 编译 → 单测 → 打镜像 → 推镜像仓库 → CD 部署到 K8s
+```
+
+主流工具——**GitHub Actions**、**GitLab CI**、**Jenkins**。
+
+GitHub Actions 示例（`.github/workflows/build.yml`）：
+
+```yaml
+name: Build and Deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      - name: Build with Maven
+        run: mvn package -DskipTests
+      - name: Build Docker image
+        run: docker build -t myapp:${{ github.sha }} .
+      - name: Push to registry
+        run: |
+          docker login -u ${{ secrets.REGISTRY_USER }} -p ${{ secrets.REGISTRY_PASS }}
+          docker push myapp:${{ github.sha }}
+      - name: Deploy to K8s
+        run: |
+          kubectl set image deployment/myapp myapp=myapp:${{ github.sha }}
+```
+
+每次 push 到 main 分支，自动构建、打镜像、推仓库、滚动部署——开发者只管 push，运维全自动。
+
+## 七、实战：用 Java SE 模拟 Docker
+
+Piston 在线环境跑不了 Docker。我们用 Java SE 模拟 Docker 的核心概念——镜像分层、容器生命周期、端口映射、Compose 编排。
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+
+// 模拟 Docker: 镜像分层 + 容器生命周期 + Compose 编排
+class MiniDocker {
+    // 镜像: 名字 -> 层列表
+    private final Map<String, List<String>> images = new LinkedHashMap<>();
+    // 容器: id -> 状态
+    private final Map<String, Container> containers = new ConcurrentHashMap<>();
+    // 容器端口映射
+    private final Map<Integer, String> portMap = new ConcurrentHashMap<>();
+    private int containerCounter = 0;
+
+    static class Container {
+        final String id;
+        final String image;
+        volatile String status;   // created / running / stopped / exited
+        final int hostPort;
+        final int containerPort;
+        final Map<String, String> env = new LinkedHashMap<>();
+        final List<String> layers;
+        Container(String id, String image, int hostPort, int containerPort, List<String> layers) {
+            this.id = id; this.image = image;
+            this.hostPort = hostPort; this.containerPort = containerPort;
+            this.layers = layers;
+            this.status = "created";
+        }
+    }
+
+    // 构建镜像 (Dockerfile 的 FROM + COPY + RUN 模拟)
+    public void build(String tag, String... layers) {
+        List<String> layerList = new ArrayList<>();
+        for (String layer : layers) {
+            layerList.add(layer);
+            System.out.println("  Step: " + layer);
+        }
+        images.put(tag, layerList);
+        System.out.println("  ✓ 构建镜像 " + tag + " (" + layerList.size() + " 层)");
+    }
+
+    // 运行容器
+    public String run(String image, int hostPort, int containerPort, Map<String, String> env) {
+        if (!images.containsKey(image)) {
+            System.out.println("  镜像 " + image + " 不存在");
+            return null;
+        }
+        String id = "c" + (++containerCounter);
+        Container c = new Container(id, image, hostPort, containerPort, images.get(image));
+        if (env != null) c.env.putAll(env);
+        if (hostPort > 0) {
+            if (portMap.containsKey(hostPort)) {
+                System.out.println("  端口 " + hostPort + " 已被占用");
+                return null;
+            }
+            portMap.put(hostPort, id);
+        }
+        containers.put(id, c);
+        c.status = "running";
+        System.out.println("  → 启动容器 " + id + " (镜像: " + image
+            + ", 端口: " + hostPort + "->" + containerPort + ")");
+        return id;
+    }
+
+    public void stop(String id) {
+        Container c = containers.get(id);
+        if (c != null) {
+            c.status = "stopped";
+            if (c.hostPort > 0) portMap.remove(c.hostPort);
+            System.out.println("  ■ 停止容器 " + id);
+        }
+    }
+
+    public void rm(String id) {
+        Container c = containers.remove(id);
+        if (c != null) {
+            if (c.hostPort > 0) portMap.remove(c.hostPort);
+            System.out.println("  ✗ 删除容器 " + id);
+        }
+    }
+
+    public void ps() {
+        System.out.println("  容器列表:");
+        System.out.println("  ID    镜像                状态      端口");
+        for (Container c : containers.values()) {
+            System.out.printf("  %-5s %-20s %-9s %d->%d%n",
+                c.id, c.image, c.status, c.hostPort, c.containerPort);
+        }
+    }
+
+    public void images() {
+        System.out.println("  镜像列表:");
+        for (Map.Entry<String, List<String>> e : images.entrySet()) {
+            System.out.println("  " + e.getKey() + " (" + e.getValue().size() + " 层)");
+        }
+    }
+
+    // 模拟访问容器
+    public void curl(int hostPort, String path) {
+        String cid = portMap.get(hostPort);
+        if (cid == null) {
+            System.out.println("  端口 " + hostPort + " 无容器监听");
+            return;
+        }
+        Container c = containers.get(cid);
+        if (!"running".equals(c.status)) {
+            System.out.println("  容器 " + cid + " 未运行");
+            return;
+        }
+        System.out.println("  GET localhost:" + hostPort + path + " -> 容器 " + cid
+            + " 响应: 200 OK (来自 " + c.image + ")");
+    }
+
+    public Collection<Container> getContainers() { return containers.values(); }
+}
+
+// 模拟 Docker Compose 编排
+class MiniCompose {
+    private final MiniDocker docker;
+    static class ServiceDef {
+        String name, image;
+        int hostPort, containerPort;
+        Map<String, String> env = new LinkedHashMap<>();
+        List<String> dependsOn = new ArrayList<>();
+        ServiceDef(String name, String image, int hostPort, int containerPort) {
+            this.name = name; this.image = image;
+            this.hostPort = hostPort; this.containerPort = containerPort;
+        }
+    }
+    private final List<ServiceDef> services = new ArrayList<>();
+
+    public MiniCompose(MiniDocker docker) { this.docker = docker; }
+
+    public void addService(ServiceDef s) { services.add(s); }
+
+    public void up() {
+        System.out.println("  启动 Compose 编排:");
+        for (ServiceDef s : services) {
+            for (String dep : s.dependsOn) {
+                System.out.println("    " + s.name + " 等待 " + dep + " 就绪...");
+            }
+            System.out.println("    [" + s.name + "]");
+            docker.run(s.image, s.hostPort, s.containerPort, s.env);
+        }
+    }
+
+    public void down() {
+        System.out.println("  停止 Compose 编排:");
+        for (ServiceDef s : services) {
+            // 简化: 找到匹配的容器停止
+            for (MiniDocker.Container c : docker.getContainers()) {
+                if (c.image.equals(s.image)) {
+                    docker.stop(c.id);
+                    docker.rm(c.id);
+                }
+            }
+        }
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Docker 与部署模拟 ===\\n");
+
+        MiniDocker docker = new MiniDocker();
+
+        // 1. 构建镜像 (多阶段构建模拟)
+        System.out.println("--- 1. 构建镜像 (Dockerfile 多阶段) ---");
+        docker.build("myapp:1.0",
+            "FROM eclipse-temurin:21-jre-alpine AS base",
+            "WORKDIR /app",
+            "COPY target/app.jar /app/app.jar",
+            "EXPOSE 8080",
+            "ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]");
+
+        docker.build("mysql:8",
+            "FROM oraclelinux:8",
+            "INSTALL mysql",
+            "EXPOSE 3306");
+
+        docker.build("redis:7",
+            "FROM alpine:3.18",
+            "INSTALL redis",
+            "EXPOSE 6379");
+
+        System.out.println();
+        docker.images();
+
+        // 2. 运行容器
+        System.out.println("\\n--- 2. 运行容器 (docker run) ---");
+        Map<String, String> appEnv = new LinkedHashMap<>();
+        appEnv.put("SPRING_DATASOURCE_URL", "jdbc:mysql://mysql:3306/mydb");
+        appEnv.put("SPRING_REDIS_HOST", "redis");
+        docker.run("myapp:1.0", 8080, 8080, appEnv);
+        docker.run("mysql:8", 3306, 3306, null);
+        docker.run("redis:7", 6379, 6379, null);
+
+        System.out.println("\\n--- 3. 查看容器 (docker ps) ---");
+        docker.ps();
+
+        // 4. 访问容器
+        System.out.println("\\n--- 4. 访问容器 (curl) ---");
+        docker.curl(8080, "/api/users");
+        docker.curl(8080, "/api/orders");
+
+        // 5. 停止 + 重启
+        System.out.println("\\n--- 5. 容器生命周期 ---");
+        docker.stop("c1");
+        docker.ps();
+        docker.curl(8080, "/api/users");   // 应该访问失败
+
+        // 6. Docker Compose 编排
+        System.out.println("\\n--- 6. Docker Compose 编排 ---");
+        MiniCompose compose = new MiniCompose(docker);
+        MiniCompose.ServiceDef app = new MiniCompose.ServiceDef("app", "myapp:1.0", 9090, 8080);
+        app.dependsOn.add("mysql");
+        app.dependsOn.add("redis");
+        MiniCompose.ServiceDef mysql = new MiniCompose.ServiceDef("mysql", "mysql:8", 3307, 3306);
+        MiniCompose.ServiceDef redis = new MiniCompose.ServiceDef("redis", "redis:7", 6380, 6379);
+        compose.addService(mysql);
+        compose.addService(redis);
+        compose.addService(app);
+        compose.up();
+
+        System.out.println();
+        docker.ps();
+
+        // 7. 模拟滚动更新 (K8s 滚动更新思路)
+        System.out.println("\\n--- 7. 滚动更新 (K8s 思路) ---");
+        System.out.println("  当前版本: v1, 副本数 3");
+        docker.build("myapp:2.0",
+            "FROM eclipse-temurin:21-jre-alpine",
+            "COPY target/app-v2.jar /app/app.jar",
+            "EXPOSE 8080",
+            "ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]");
+        System.out.println("  滚动更新: v1 → v2");
+        System.out.println("    Step 1: 启动 1 个 v2 容器 (此时 v1×3 + v2×1)");
+        docker.run("myapp:2.0", 8081, 8080, appEnv);
+        System.out.println("    Step 2: 停止 1 个 v1 容器 (此时 v1×2 + v2×1)");
+        docker.stop("c1");
+        System.out.println("    Step 3: 启动 1 个 v2 容器 (此时 v1×2 + v2×2)");
+        docker.run("myapp:2.0", 8082, 8080, appEnv);
+        System.out.println("    Step 4: 停止 1 个 v1 容器 (此时 v1×1 + v2×2)");
+        System.out.println("    Step 5: 重复直到 v1 全部下线, v2×3");
+        System.out.println("  ✓ 滚动更新完成, 零停机");
+
+        System.out.println("\\n--- 8. 最终容器列表 ---");
+        docker.ps();
+    }
+}`} />
+
+> **观察重点**：镜像分层构建，每层一个步骤；容器有 `created/running/stopped` 生命周期；端口映射让外部能访问容器；Compose 按依赖顺序启动多服务；滚动更新逐个替换实例，保证零停机。
+
+## 八、部署架构演进
+
+```
+物理机 → 虚拟机 → 容器 → K8s → Serverless
+```
+
+| 阶段 | 单位 | 特点 |
+| --- | --- | --- |
+| 物理机 | 整机 | 隔离差，资源浪费 |
+| 虚拟机 | VM | 隔离好，重 |
+| 容器 | 容器 | 轻量，秒级启动 |
+| K8s | Pod | 自动调度、自愈、扩缩 |
+| Serverless | 函数 | 按调用计费，无需管服务器 |
+
+## 九、本章小结
+
+| 知识点 | 要点 |
+| --- | --- |
+| 容器 vs VM | 容器共享内核，轻量秒启；VM 隔离彻底但重 |
+| 镜像 | 只读分层模板，类似"类" |
+| 容器 | 镜像的运行实例，类似"对象" |
+| Dockerfile | 镜像构建配方：FROM/COPY/RUN/ENTRYPOINT |
+| 多阶段构建 | 构建阶段 + 运行阶段，最终镜像小 |
+| Docker Compose | 单机多容器编排，YAML 描述 |
+| Kubernetes | 集群级容器编排，Pod/Deployment/Service |
+| CI/CD | 自动化构建-测试-部署流水线 |
+
+## 记忆口诀
+
+- **容器 vs VM**——容器共享内核轻，VM 各带内核重。
+- **镜像容器关系**——镜像是类，容器是对象。
+- **Dockerfile 四件套**——FROM 打底，COPY 拷贝，RUN 执行，ENTRYPOINT 启动。
+- **多阶段构建**——构建用大镜像，运行用小镜像。
+- **K8s 三大件**——Pod 跑容器，Deployment 管副本， Service 给入口。
+
+## 结语
+
+Docker 把"环境一致"这件事做到了极致——一次打包，处处运行。K8s 又把"管理容器"这件事自动化了——自愈、扩缩、滚动更新。加上 CI/CD 流水线，从代码到上线全程自动化。
+
+这是第十四阶段最后一篇。回顾这一阶段——设计模式教你写好代码，数据结构算法教你想清楚，Redis/消息队列/微服务/Docker 教你构建分布式系统。从单机到分布式，从代码到部署，你已经具备了一个 Java 工程师的核心知识体系。
+
+下一阶段我们进入**综合实战**——亲手做一个完整的待办事项 CLI 项目，把前面学到的 IO、集合、并发、反射全用上。然后最后一阶段——面试题精讲，把零散知识串成应试武器。

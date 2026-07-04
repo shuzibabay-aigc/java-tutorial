@@ -1,0 +1,640 @@
+---
+title: "Spring Boot"
+chapter: 70
+stage: "第十三阶段"
+stageName: "Java Web 与 Spring 生态"
+order: 3
+description: "掌握 Spring Boot 起步依赖与自动配置原理、第一个 REST API、application.yml 配置、整合 MyBatis-Plus/Spring Data JPA、虚拟线程整合、Actuator 监控"
+pubDate: 2026-07-03
+tags: ["Java", "Spring Boot", "自动配置", "REST", "MyBatis", "JPA", "虚拟线程"]
+---
+
+# Spring Boot
+
+上一章我们看了 Spring 的 IoC/AOP——强大但配置繁琐：要写一堆 XML 或 Java Config，要部署到 Tomcat，要管理一堆依赖版本。**Spring Boot** 就是来解放这一切的——"约定优于配置" + "开箱即用"，让一个 Spring 应用从"一周搭起来"变成"五分钟跑起来"。
+
+这一章看 Spring Boot 的核心——自动配置、起步依赖、REST API、配置文件、数据访问整合、虚拟线程。
+
+## 一、Spring Boot 解决了什么
+
+传统 Spring 应用的痛点：
+
+1. **配置爆炸** —— 一个简单 Web 应用要写 `web.xml`、`applicationContext.xml`、`spring-mvc.xml`、`dispatcher-servlet.xml`……
+2. **依赖地狱** —— Spring 自己几十个模块，加上 Spring MVC、事务、ORM、JSON……版本要自己协调。
+3. **部署繁琐** —— 打成 WAR 包，部署到 Tomcat，配置数据源……
+4. **启动慢** —— Tomcat 启动 + Spring 上下文加载，几十秒。
+
+Spring Boot 的解药：
+
+- **起步依赖（Starter）** —— 一个 `spring-boot-starter-web` 拉齐 Web 开发所需的所有库，版本协调好。
+- **自动配置（Auto-Configuration）** —— 引入数据库驱动，自动配数据源；引入 Thymeleaf，自动配视图解析器。
+- **内嵌 Tomcat** —— `java -jar app.jar` 直接跑，不用部署。
+- **Actuator** —— 内置健康检查、监控端点。
+- **生产就绪** —— 默认配置已适合大多数场景。
+
+## 二、起步依赖与自动配置
+
+### 2.1 起步依赖 Starter
+
+Spring Boot 把常用场景的依赖打包成"Starter"——一个依赖拉齐一整套：
+
+| Starter | 用途 |
+| --- | --- |
+| `spring-boot-starter` | 核心基础 |
+| `spring-boot-starter-web` | Web + 内嵌 Tomcat + Spring MVC |
+| `spring-boot-starter-data-jpa` | Spring Data JPA + Hibernate |
+| `spring-boot-starter-data-redis` | Redis 集成 |
+| `spring-boot-starter-security` | Spring Security |
+| `spring-boot-starter-test` | 测试（JUnit/Mockito/AssertJ） |
+| `spring-boot-starter-actuator` | 监控端点 |
+| `spring-boot-starter-validation` | Bean Validation |
+
+```xml
+<parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.2.0</version>
+</parent>
+
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+</dependencies>
+```
+
+`spring-boot-starter-parent` 是父 POM——管理所有 Spring Boot 相关依赖的版本，子项目不用写版本号。这就是"版本协调"。
+
+### 2.2 自动配置原理
+
+`@SpringBootApplication` 是组合注解：
+
+```java
+@SpringBootApplication   // 等价于下面三个
+@SpringBootConfiguration   // @Configuration, 配置类
+@EnableAutoConfiguration   // 开启自动配置
+@ComponentScan             // 扫描当前包及子包
+public class App { ... }
+```
+
+`@EnableAutoConfiguration` 是自动配置的核心——它通过 `spring.factories`（Spring Boot 2.x）或 `META-INF/spring/...imports`（3.x）加载一堆自动配置类，每个配置类根据条件决定是否生效：
+
+```java
+@AutoConfiguration
+@ConditionalOnClass(DataSource.class)              // classpath 有 DataSource 类才生效
+@ConditionalOnProperty(prefix = "spring.datasource",
+                       name = "url")                // 配了 url 才生效
+@EnableConfigurationProperties(DataSourceProperties.class)
+public class DataSourceAutoConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean                       // 用户没自己定义才创建
+    public DataSource dataSource(DataSourceProperties props) {
+        return props.initializeDataSourceBuilder().build();
+    }
+}
+```
+
+`@ConditionalOnXxx` 是关键——条件装配：
+
+- `@ConditionalOnClass(X.class)` —— classpath 有 X 类才生效。
+- `@ConditionalOnMissingBean` —— 用户没自己定义才生效（用户的优先）。
+- `@ConditionalOnProperty` —— 配了某属性才生效。
+- `@ConditionalOnWebApplication` —— 是 Web 应用才生效。
+
+效果——你引入 MySQL 驱动 + 配 `spring.datasource.url`，数据源自动配好；不引入就不配。**"约定优于配置"**——按约定的方式做事，零配置；偏离约定才需配置。
+
+## 三、第一个 REST API
+
+```java
+// src/main/java/com/example/App.java
+@SpringBootApplication
+public class App {
+    public static void main(String[] args) {
+        SpringApplication.run(App.class, args);
+    }
+}
+```
+
+```java
+// src/main/java/com/example/controller/UserController.java
+@RestController
+@RequestMapping("/api/users")
+@RequiredArgsConstructor
+public class UserController {
+
+    private final UserService userService;
+
+    @GetMapping
+    public List<User> list() {
+        return userService.findAll();
+    }
+
+    @GetMapping("/{id}")
+    public User getById(@PathVariable Long id) {
+        return userService.findById(id);
+    }
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    public User create(@Valid @RequestBody CreateUserRequest req) {
+        return userService.create(req);
+    }
+
+    @PutMapping("/{id}")
+    public User update(@PathVariable Long id, @RequestBody UpdateUserRequest req) {
+        return userService.update(id, req);
+    }
+
+    @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable Long id) {
+        userService.delete(id);
+    }
+}
+```
+
+注解解析：
+
+| 注解 | 作用 |
+| --- | --- |
+| `@RestController` | `@Controller` + `@ResponseBody`，返回值自动转 JSON |
+| `@RequestMapping` | 类级路径前缀 |
+| `@GetMapping`/`@PostMapping`/... | HTTP 方法映射 |
+| `@PathVariable` | 取 URL 路径变量 `/users/{id}` |
+| `@RequestParam` | 取查询参数 `?name=x` |
+| `@RequestBody` | 把请求体反序列化成对象 |
+| `@Valid` | 触发 Bean Validation 校验 |
+| `@ResponseStatus` | 指定响应状态码 |
+
+启动后 `curl http://localhost:8080/api/users` 就能拿到 JSON——Spring Boot 自动配了 Jackson 序列化、内嵌 Tomcat、DispatcherServlet，零配置。
+
+## 四、配置文件 application.yml
+
+Spring Boot 支持 `application.properties` 和 `application.yml`。yml 层次更清晰，主流：
+
+```yaml
+server:
+  port: 8080                    # 服务端口
+  servlet:
+    context-path: /api          # 上下文路径
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/test
+    username: root
+    password: 123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+
+  jpa:
+    hibernate:
+      ddl-auto: update          # 自动建表
+    show-sql: true
+    properties:
+      hibernate.format_sql: true
+
+  redis:
+    host: localhost
+    port: 6379
+
+  threads:
+    virtual:
+      enabled: true             # Spring Boot 3.2+ 启用虚拟线程
+
+logging:
+  level:
+    com.example: DEBUG
+    org.hibernate.SQL: DEBUG
+  file:
+    name: logs/app.log
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,env
+```
+
+**Profile 多环境**——`application-dev.yml`/`application-prod.yml`，激活用 `spring.profiles.active=prod`。
+
+绑定到字段：
+
+```java
+@ConfigurationProperties(prefix = "app")
+@Data
+public class AppProperties {
+    private String name;
+    private int maxSize;
+    private List<String> allowedOrigins;
+}
+```
+
+```yaml
+app:
+  name: 我的系统
+  max-size: 100
+  allowed-origins:
+    - https://a.com
+    - https://b.com
+```
+
+## 五、整合 MyBatis / MyBatis-Plus
+
+```xml
+<dependency>
+    <groupId>com.baomidou</groupId>
+    <artifactId>mybatis-plus-boot-starter</artifactId>
+    <version>3.5.5</version>
+</dependency>
+```
+
+```java
+@Data
+@TableName("users")
+public class User {
+    @TableId(type = IdType.AUTO)
+    private Long id;
+    private String name;
+    private Integer age;
+}
+
+@Mapper
+public interface UserMapper extends BaseMapper<User> {
+    // BaseMapper 自带: insert/updateById/deleteById/selectById/selectList...
+    // 复杂查询写 XML 或注解
+    @Select("SELECT * FROM users WHERE age > #{age}")
+    List<User> findOlderThan(int age);
+}
+
+@Service
+@RequiredArgsConstructor
+public class UserService {
+    private final UserMapper userMapper;
+
+    public List<User> findAll() {
+        return userMapper.selectList(null);   // null = 无条件
+    }
+
+    public User findById(Long id) {
+        return userMapper.selectById(id);
+    }
+
+    public User create(User u) {
+        userMapper.insert(u);
+        return u;   // u.id 已自动回填
+    }
+
+    // 条件构造器
+    public List<User> findByNameLike(String keyword) {
+        return userMapper.selectList(
+            new LambdaQueryWrapper<User>()
+                .like(User::getName, keyword)
+                .ge(User::getAge, 18)
+                .orderByDesc(User::getId)
+        );
+    }
+}
+```
+
+MyBatis-Plus 的杀手锏——`BaseMapper` 自带 CRUD，复杂查询用 `LambdaQueryWrapper` 链式构造，零 SQL 搞定大多数场景。
+
+## 六、整合 Spring Data JPA
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-jpa</artifactId>
+</dependency>
+```
+
+```java
+@Entity
+@Table(name = "users")
+@Data
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    private String name;
+    private Integer age;
+}
+
+// Repository 接口, 不用写实现!
+public interface UserRepository extends JpaRepository<User, Long> {
+    List<User> findByAgeGreaterThan(int age);
+    Optional<User> findByName(String name);
+
+    @Query("SELECT u FROM User u WHERE u.age BETWEEN :min AND :max")
+    List<User> findByAgeRange(@Param("min") int min, @Param("max") int max);
+}
+
+@Service
+@RequiredArgsConstructor
+public class UserService {
+    private final UserRepository repo;
+
+    @Transactional
+    public User create(User u) {
+        return repo.save(u);
+    }
+
+    public List<User> findByAgeRange(int min, int max) {
+        return repo.findByAgeRange(min, max);
+    }
+}
+```
+
+Spring Data JPA 的"魔法"——只声明接口方法，框架自动实现。`findByAgeGreaterThan` 这种方法名直接被解析成 SQL `WHERE age ＞ ?`。复杂查询用 `@Query` 写 JPQL。
+
+## 七、Spring Boot 与虚拟线程
+
+Spring Boot 3.2+ 支持虚拟线程（Java 21）——一行配置让每个 HTTP 请求跑在虚拟线程上：
+
+```yaml
+spring:
+  threads:
+    virtual:
+      enabled: true
+```
+
+效果——Tomcat 不再受平台线程池（默认 200）限制，每个请求一个虚拟线程，能轻松撑 10 万并发。虚拟线程在 IO 时自动让出 CPU，几乎不耗资源。
+
+传统模型（平台线程）：
+
+```
+请求1 → 线程1 (IO 阻塞时线程1 干等)
+请求2 → 线程2
+...
+请求200 → 线程200 (满了, 后续请求排队)
+```
+
+虚拟线程模型：
+
+```
+请求1 → 虚拟线程1 (IO 时挂起, 平台线程去跑别的虚拟线程)
+请求2 → 虚拟线程2
+...
+请求100000 → 虚拟线程100000 (都跑在几十个平台线程上)
+```
+
+**注意**——虚拟线程不适合 CPU 密集任务（它解决 IO 阻塞问题）。同步阻塞代码（JDBC、HTTP 调用）直接受益，无需改代码。
+
+## 八、Actuator 监控
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+```
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,env,loggers
+  endpoint:
+    health:
+      show-details: always
+```
+
+常用端点：
+
+| 端点 | 用途 |
+| --- | --- |
+| `/actuator/health` | 健康检查（数据库、Redis 状态） |
+| `/actuator/info` | 应用信息 |
+| `/actuator/metrics` | 指标（JVM、HTTP 请求） |
+| `/actuator/env` | 环境变量 |
+| `/actuator/loggers` | 动态调日志级别 |
+| `/actuator/beans` | 所有 Bean |
+| `/actuator/mappings` | 所有 URL 映射 |
+
+```bash
+curl localhost:8080/actuator/health
+# {"status":"UP","components":{"db":{"status":"UP"},...}}
+
+# 动态调日志级别 (不用重启)
+curl -X POST localhost:8080/actuator/loggers/com.example \
+  -H 'Content-Type: application/json' \
+  -d '{"configuredLevel":"DEBUG"}'
+```
+
+生产环境配合 Prometheus + Grafana 做监控——`/actuator/prometheus` 暴露 Prometheus 格式指标。
+
+## 九、实战：模拟 Spring Boot 自动配置
+
+由于 Spring Boot 需要完整运行环境，Piston 跑不了。下面用纯 Java SE 模拟**自动配置**的核心思想——根据 classpath 上有什么类、配置文件有什么属性，决定创建哪些 Bean。
+
+<CodeRunner code={`import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+// === 模拟 Spring Boot 注解 ===
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface AutoConfiguration {}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface ConditionalOnClass {
+    Class<?> value();
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface ConditionalOnProperty {
+    String name();
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface ConditionalOnMissingBean {
+    Class<?> value();
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface Bean {}
+
+// === 模拟自动配置类 ===
+// 数据源自动配置: 当 classpath 有 javax.sql.DataSource 且配了 url 时生效
+@AutoConfiguration
+@ConditionalOnClass(DataSource.class)
+class DataSourceAutoConfiguration {
+
+    @Bean
+    @ConditionalOnProperty(name = "spring.datasource.url")
+    public DataSource dataSource(Map<String, String> props) {
+        System.out.println("  [自动配置] 创建 DataSource: " + props.get("spring.datasource.url"));
+        return new DataSource(props.get("spring.datasource.url"),
+            props.get("spring.datasource.username"));
+    }
+}
+
+// Redis 自动配置: 当 classpath 有 RedisClient 类时生效 (这里模拟没有)
+@AutoConfiguration
+@ConditionalOnClass(RedisClient.class)
+class RedisAutoConfiguration {
+    @Bean
+    public RedisClient redisClient() {
+        System.out.println("  [自动配置] 创建 RedisClient");
+        return new RedisClient();
+    }
+}
+
+// 模拟类 (实际由引入依赖决定是否在 classpath)
+class DataSource {
+    private final String url, user;
+    public DataSource(String url, String user) { this.url = url; this.user = user; }
+    public String toString() { return "DataSource(" + url + ", " + user + ")"; }
+}
+class RedisClient {}   // 这个类"不在" classpath (我们故意不加载)
+
+// === 迷你 Spring Boot 容器 ===
+class MiniSpringBoot {
+    private final Map<String, Object> beans = new ConcurrentHashMap<>();
+    private final Map<String, String> properties = new ConcurrentHashMap<>();
+    private final Set<Class<?>> classpathClasses = new HashSet<>();
+
+    public void setProperty(String k, String v) { properties.put(k, v); }
+    public void registerClasspath(Class<?> c) { classpathClasses.add(c); }
+
+    @SuppressWarnings("unchecked")
+    public <T> T getBean(Class<T> type) {
+        return (T) beans.values().stream()
+            .filter(v -> type.isInstance(v))
+            .findFirst().orElse(null);
+    }
+
+    // 执行自动配置: 扫描所有 @AutoConfiguration 类
+    public void runAutoConfiguration(Class<?>... configs) throws Exception {
+        System.out.println("[Spring Boot] 启动自动配置...");
+        System.out.println("  classpath 类: " + classpathClasses);
+        System.out.println("  配置: " + properties);
+
+        for (Class<?> configClass : configs) {
+            if (!configClass.isAnnotationPresent(AutoConfiguration.class)) continue;
+
+            // 检查 @ConditionalOnClass
+            ConditionalOnClass onClass = configClass.getAnnotation(ConditionalOnClass.class);
+            if (onClass != null && !classpathClasses.contains(onClass.value())) {
+                System.out.println("  [跳过] " + configClass.getSimpleName()
+                    + " (classpath 缺少 " + onClass.value().getSimpleName() + ")");
+                continue;
+            }
+
+            Object configInstance = configClass.getDeclaredConstructor().newInstance();
+            System.out.println("  [生效] " + configClass.getSimpleName());
+
+            // 执行 @Bean 方法
+            for (Method m : configClass.getDeclaredMethods()) {
+                if (!m.isAnnotationPresent(Bean.class)) continue;
+
+                // @ConditionalOnProperty
+                ConditionalOnProperty onProp = m.getAnnotation(ConditionalOnProperty.class);
+                if (onProp != null && !properties.containsKey(onProp.name())) {
+                    System.out.println("    [跳过] " + m.getName()
+                        + " (未配 " + onProp.name() + ")");
+                    continue;
+                }
+
+                // @ConditionalOnMissingBean
+                ConditionalOnMissingBean onMissing = m.getAnnotation(ConditionalOnMissingBean.class);
+                if (onMissing != null && getBean(onMissing.value()) != null) {
+                    System.out.println("    [跳过] " + m.getName() + " (已存在)");
+                    continue;
+                }
+
+                // 调用方法创建 Bean
+                Object bean = m.invoke(configInstance, properties);
+                beans.put(m.getName(), bean);
+                System.out.println("    [创建] " + m.getName() + " -> " + bean);
+            }
+        }
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Spring Boot 自动配置演示 ===\\n");
+
+        // 模拟场景: 引入了 DataSource (在 classpath), 没引入 Redis
+        MiniSpringBoot app = new MiniSpringBoot();
+        app.registerClasspath(DataSource.class);   // DataSource 在 classpath
+        // RedisClient 不注册, 模拟"没引入 redis 依赖"
+        app.setProperty("spring.datasource.url", "jdbc:mysql://localhost/test");
+        app.setProperty("spring.datasource.username", "root");
+
+        // 执行自动配置
+        app.runAutoConfiguration(DataSourceAutoConfiguration.class, RedisAutoConfiguration.class);
+
+        // 看 Bean
+        System.out.println("\\n--- 最终容器中的 Bean ---");
+        DataSource ds = app.getBean(DataSource.class);
+        System.out.println("DataSource: " + ds);
+        RedisClient redis = app.getBean(RedisClient.class);
+        System.out.println("RedisClient: " + redis + " (因为没引入 redis 依赖, 自动配置跳过了)");
+
+        // 第二轮: 加上 RedisClient 类
+        System.out.println("\\n--- 第二轮: 模拟引入 redis 依赖 ---");
+        MiniSpringBoot app2 = new MiniSpringBoot();
+        app2.registerClasspath(DataSource.class);
+        app2.registerClasspath(RedisClient.class);   // 这次有了
+        app2.setProperty("spring.datasource.url", "jdbc:mysql://localhost/prod");
+        app2.setProperty("spring.datasource.username", "admin");
+        app2.runAutoConfiguration(DataSourceAutoConfiguration.class, RedisAutoConfiguration.class);
+
+        System.out.println("\\n=== Spring Boot 关键点 ===");
+        System.out.println("1. Starter: 一个依赖拉齐整套库 (spring-boot-starter-web)");
+        System.out.println("2. 自动配置: @ConditionalOnClass/Property/MissingBean 条件装配");
+        System.out.println("3. 内嵌 Tomcat: java -jar 直接跑, 不用部署");
+        System.out.println("4. @SpringBootApplication = 配置+自动配置+扫描");
+        System.out.println("5. application.yml 配置 + Profile 多环境");
+        System.out.println("6. @RestController + @GetMapping 写 REST API");
+        System.out.println("7. MyBatis-Plus BaseMapper 自带 CRUD");
+        System.out.println("8. Spring Data JPA 方法名解析成 SQL");
+        System.out.println("9. Spring Boot 3.2+ 一行启用虚拟线程");
+        System.out.println("10. Actuator: 健康检查/监控/动态调日志");
+    }
+}`} />
+
+> **观察重点**：
+> - **`DataSourceAutoConfiguration` 生效，`RedisAutoConfiguration` 跳过**——因为 classpath 没有 `RedisClient`（模拟没引入 redis 依赖）。
+> - **第二轮引入 RedisClient 后，RedisAutoConfiguration 也生效**——这就是"引入依赖即获得配置"。
+> - **`@ConditionalOnProperty` 检查配置项**——没配 url 就不创建 DataSource。
+> - **用户自定义 Bean 优先**——`@ConditionalOnMissingBean` 让用户的 Bean 覆盖默认。
+
+## 十、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| Starter | 起步依赖，一个拉齐整套库 |
+| 自动配置 | `@ConditionalOnXxx` 条件装配 |
+| `@SpringBootApplication` | 配置 + 自动配置 + 组件扫描 |
+| `@RestController` | `@Controller` + `@ResponseBody` |
+| `application.yml` | 配置文件，支持 Profile |
+| MyBatis-Plus | `BaseMapper` 自带 CRUD + 条件构造器 |
+| Spring Data JPA | 方法名解析成 SQL，零实现 |
+| 虚拟线程 | Spring Boot 3.2+ 一行启用 |
+| Actuator | 监控端点，健康检查/指标 |
+
+**记忆口诀**：
+
+- **Starter 拉齐依赖**——`spring-boot-starter-web` 一行起 Web。
+- **自动配置条件装配**——`@ConditionalOnClass`/`Property`/`MissingBean`。
+- **内嵌 Tomcat**——`java -jar` 直接跑。
+- **`@RestController` 返回 JSON**——自动 Jackson 序列化。
+- **MyBatis-Plus `BaseMapper`**——CRUD 零代码。
+- **JPA 方法名即 SQL**——`findByAgeGreaterThan` 自动解析。
+- **虚拟线程一行开**——`spring.threads.virtual.enabled=true`。
+
+## 结语：从 Spring 到 Spring Boot
+
+这一章我们看了 Spring Boot——把 Spring 的强大包装成开箱即用。下一章深入数据访问层——MyBatis 的动态 SQL、MyBatis-Plus 增强、Spring Data JPA、数据库迁移工具。

@@ -1,0 +1,509 @@
+---
+title: "内部类"
+chapter: 11
+stage: "第二阶段"
+stageName: "面向对象编程"
+order: 6
+description: "掌握成员内部类、静态内部类、局部内部类、匿名内部类，以及 Builder 模式与闭包等应用场景"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "内部类", "匿名内部类", "Builder模式"]
+---
+
+# 内部类
+
+想象一栋咖啡馆。它的外墙是公开的门面，任何人都能进来点单。但咖啡馆内部还有员工通道、储藏室、咖啡机操作台——这些"内部结构"只为咖啡馆本身服务，外部客人既看不到也不该看到。
+
+Java 的**内部类**（Inner Class）就是这种"建筑内的建筑"——一个类定义在另一个类的内部。它能让某些逻辑紧密相关的类"住在一起"，并拥有访问外部类私有成员的特权。本章我们将学习四种内部类，并理解它们各自的应用场景。
+
+## 一、为什么要内部类？
+
+在正式学习之前，先理解"为什么需要内部类"。
+
+**场景一：紧密协作的辅助类。** 一个 `LinkedList` 内部有 `Node` 节点类。`Node` 只为 `LinkedList` 服务，外部根本不需要知道它存在。把 `Node` 定义在 `LinkedList` 内部，既隐藏了实现细节，又让两者紧密协作。
+
+**场景二：访问外部类的私有成员。** 普通类无法访问另一个类的 `private` 字段。但内部类可以"穿透"外部类的封装，直接访问其私有成员——这是 Java 编译器提供的特殊语法糖。
+
+**场景三：实现回调与闭包。** 在事件处理、回调函数场景中，我们需要"一个能访问外部上下文的小对象"。匿名内部类正是为此而生。
+
+Java 提供了四种内部类，各有用途：
+
+| 类型 | 定义位置 | 能否访问外部类成员 | 典型用途 |
+| --- | --- | --- | --- |
+| 成员内部类 | 类中（与字段同级） | ✅（含私有） | 与外部类紧密协作 |
+| 静态内部类 | 类中（带 static） | ❌（不依赖实例） | 隐藏辅助类、Builder |
+| 局部内部类 | 方法中 | ✅（仅 final 局部变量） | 临时辅助类 |
+| 匿名内部类 | 方法中（无名字） | ✅（仅 final 局部变量） | 回调、事件处理 |
+
+## 二、成员内部类
+
+### 2.1 定义与基本用法
+
+成员内部类定义在外部类的内部，与字段、方法同级：
+
+```java
+public class Outer {
+    private String secret = "外部类的秘密";
+
+    // 成员内部类
+    class Inner {
+        void access() {
+            // 内部类可以直接访问外部类的私有成员！
+            System.out.println("我看到 " + secret);
+        }
+    }
+}
+```
+
+创建内部类对象需要先有外部类对象：
+
+```java
+Outer outer = new Outer();
+Outer.Inner inner = outer.new Inner();   // 注意语法
+inner.access();   // 输出"我看到 外部类的秘密"
+```
+
+### 2.2 内部类如何访问外部类私有成员
+
+这其实是编译器的"魔法"。`Inner` 对象在内部持有一个隐式的 `Outer this` 引用，指向创建它的外部类对象。编译器把对 `secret` 的访问转换成 `Outer.this.secret`：
+
+```java
+class Inner {
+    void access() {
+        System.out.println("我看到 " + Outer.this.secret);
+    }
+}
+```
+
+`Outer.this` 是显式获取外部类当前对象的语法。当内外类字段同名时，用它来区分：
+
+```java
+class Outer {
+    int x = 10;
+    class Inner {
+        int x = 20;
+        void show() {
+            int x = 30;
+            System.out.println(x);             // 30（局部）
+            System.out.println(this.x);        // 20（内部类字段）
+            System.out.println(Outer.this.x);  // 10（外部类字段）
+        }
+    }
+}
+```
+
+### 2.3 成员内部类的局限
+
+- **不能定义静态成员**（除了 `static final` 常量）。因为它依赖外部类实例，本身是实例级的。
+- 创建对象必须先有外部类对象，使用上不够灵活。
+- 实际开发中，成员内部类用得较少——大多场景用静态内部类或匿名内部类更合适。
+
+## 三、静态内部类
+
+### 3.1 定义
+
+在内部类前加 `static` 关键字，就成了**静态内部类**：
+
+```java
+public class Outer {
+    private static String secret = "外部类的静态秘密";
+
+    // 静态内部类
+    static class StaticInner {
+        void access() {
+            // 只能访问外部类的静态成员（含私有）
+            System.out.println("我看到 " + secret);
+        }
+    }
+}
+```
+
+### 3.2 创建对象无需外部类实例
+
+```java
+Outer.StaticInner inner = new Outer.StaticInner();   // 不需要 new Outer()
+inner.access();
+```
+
+### 3.3 为什么静态内部类最常用
+
+静态内部类不依赖外部类实例，使用更灵活，是最常用的内部类形式。它的核心价值是**"命名空间"**和**"封装"**：
+
+- **命名空间**：`Map.Entry` 是 `Map` 的静态内部类，表达"Entry 是 Map 的一部分"这种从属关系。
+- **封装**：`HashMap.Node` 是 `HashMap` 的静态内部类，对外隐藏节点实现。
+
+JDK 中大量使用静态内部类：
+
+| 静态内部类 | 所属 | 用途 |
+| --- | --- | --- |
+| `Map.Entry` | `Map` 接口 | 表示键值对 |
+| `HashMap.Node` | `HashMap` | 表示哈希桶节点 |
+| `Thread.Builder` | `Thread` | 构建线程 |
+| `Integer.Cache` | `Integer` | 整数缓存 |
+
+> 💡 **设计原则**：如果一个类只为另一个类服务，且不需要访问后者的实例字段，就把它定义成后者的**静态内部类**。这是 Java 标准库最常用的"辅助类隐藏"手法。
+
+### 3.4 实战：用静态内部类实现 Builder 模式
+
+**Builder 模式**用于构造参数很多的对象。以一杯定制咖啡为例：
+
+<CodeRunner code={`public class Main {
+    // 咖啡类：用 Builder 构建
+    static class Coffee {
+        private String name;
+        private int size;
+        private boolean hasMilk;
+        private boolean hasSugar;
+        private int shots;       // 浓缩份数
+        private String syrup;    // 糖浆口味
+
+        // 私有构造，只能通过 Builder 创建
+        private Coffee(Builder b) {
+            this.name = b.name;
+            this.size = b.size;
+            this.hasMilk = b.hasMilk;
+            this.hasSugar = b.hasSugar;
+            this.shots = b.shots;
+            this.syrup = b.syrup;
+        }
+
+        public String describe() {
+            return String.format(
+                "%s（%dml，%d 份浓缩，奶=%b，糖=%b，糖浆=%s）",
+                name, size, shots, hasMilk, hasSugar,
+                syrup == null ? "无" : syrup
+            );
+        }
+
+        // 静态内部类 Builder
+        public static class Builder {
+            private String name;
+            private int size = 350;          // 默认值
+            private boolean hasMilk = false;
+            private boolean hasSugar = false;
+            private int shots = 1;
+            private String syrup = null;
+
+            public Builder(String name) {
+                this.name = name;
+            }
+
+            public Builder size(int size)         { this.size = size; return this; }
+            public Builder milk()                  { this.hasMilk = true; return this; }
+            public Builder sugar()                 { this.hasSugar = true; return this; }
+            public Builder shots(int n)            { this.shots = n; return this; }
+            public Builder syrup(String flavor)    { this.syrup = flavor; return this; }
+
+            public Coffee build() {
+                return new Coffee(this);
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        // 链式调用，优雅地构建对象
+        Coffee c1 = new Coffee.Builder("拿铁")
+            .size(500)
+            .milk()
+            .sugar()
+            .shots(2)
+            .build();
+
+        Coffee c2 = new Coffee.Builder("美式")
+            .size(400)
+            .shots(3)
+            .syrup("香草")
+            .build();
+
+        Coffee c3 = new Coffee.Builder("玛奇朵").milk().build();
+
+        System.out.println(c1.describe());
+        System.out.println(c2.describe());
+        System.out.println(c3.describe());
+    }
+}`} />
+
+Builder 模式的优势：
+
+- 避免了"参数太多，构造方法签名难记"的问题。
+- 链式调用，可读性强。
+- 字段不可变（`Coffee` 没有 setter），线程安全。
+- 默认值清晰，可选参数灵活。
+
+`Builder` 作为 `Coffee` 的静态内部类，既与 `Coffee` 紧密关联（能访问其私有构造），又不依赖 `Coffee` 实例（可以独立 `new`）。这是静态内部类的最佳实践之一。
+
+## 四、局部内部类
+
+### 4.1 定义
+
+局部内部类定义在**方法、构造方法或代码块内部**，作用域仅限该方法：
+
+```java
+public class Outer {
+    public void process() {
+        // 局部内部类：只在 process 方法内可见
+        class Helper {
+            void assist() {
+                System.out.println("协助处理");
+            }
+        }
+
+        Helper h = new Helper();
+        h.assist();
+    }
+}
+```
+
+### 4.2 访问方法的局部变量
+
+局部内部类可以访问方法的局部变量，但有一个重要限制：**只能访问 `final` 或 effectively final（事实上 final）的局部变量**。
+
+```java
+public void process() {
+    int x = 10;   // effectively final（不再修改）
+    // x = 20;    // 一旦修改，下面的局部内部类就会编译错误
+
+    class Helper {
+        void show() {
+            System.out.println(x);   // ✅ 可以访问 effectively final 变量
+        }
+    }
+    new Helper().show();
+}
+```
+
+**为什么有这个限制？** 因为局部内部类对象的生命周期可能超过方法的执行周期（比如方法返回了对象）。如果它捕获的局部变量被修改，内部类看到的就是不一致的值。Java 通过"捕获变量的副本"来解决，但要求变量不再修改以保证一致性。这其实是**闭包**（Closure）的语义。
+
+局部内部类在实际开发中较少使用，因为它会让方法变长。大多场景可以用匿名内部类或 Lambda 替代。
+
+## 五、匿名内部类
+
+### 5.1 定义
+
+匿名内部类（Anonymous Inner Class）没有名字，定义的同时就实例化。它的语法是 `new 父类型() { 类体 }`：
+
+```java
+Runnable r = new Runnable() {       // 实现 Runnable 接口
+    @Override
+    public void run() {
+        System.out.println("运行中");
+    }
+};
+r.run();
+```
+
+### 5.2 两种形式
+
+匿名内部类可以基于**接口**或**类**：
+
+```java
+// 基于接口
+Comparator<String> cmp = new Comparator<>() {
+    @Override
+    public int compare(String a, String b) {
+        return a.length() - b.length();
+    }
+};
+
+// 基于类（包括抽象类）
+Animal a = new Animal("无名") {     // 抽象类的匿名子类
+    @Override
+    public String sound() { return "???"; }
+};
+```
+
+### 5.3 特点
+
+- **没有名字**，所以无法再次实例化，是一次性的。
+- **不能有构造方法**（没名字怎么写构造方法？）。初始化逻辑放在实例初始化块 `{ ... }` 中。
+- **可以访问外部类的成员**（如果在成员位置定义），也受 effectively final 限制（如果在方法中定义）。
+- **常用于回调、事件处理、临时实现接口**。
+
+### 5.4 Java 8 之前的事件处理
+
+在 Lambda 出现之前，匿名内部类是 GUI 编程的标配：
+
+```java
+button.addActionListener(new ActionListener() {
+    @Override
+    public void actionPerformed(ActionEvent e) {
+        System.out.println("按钮被点击");
+    }
+});
+```
+
+Java 8 之后，对于函数式接口，可以用 Lambda 简化：
+
+```java
+button.addActionListener(e -> System.out.println("按钮被点击"));
+```
+
+> 💡 **何时用匿名内部类而非 Lambda**：
+> - 需要实现**多个方法**的接口（Lambda 只能实现单个抽象方法）。
+> - 需要定义字段或额外方法。
+> - 基于类（不是接口）创建匿名子类。
+
+### 5.5 匿名内部类的"this"陷阱
+
+匿名内部类中的 `this` 指向**匿名内部类实例本身**，不是外部类。如果想在匿名内部类中引用外部类的 `this`，需要用 `外部类名.this`：
+
+```java
+public class Outer {
+    public Runnable createRunnable() {
+        return new Runnable() {
+            @Override
+            public void run() {
+                System.out.println(this);              // 匿名内部类对象
+                System.out.println(Outer.this);        // 外部类对象
+            }
+        };
+    }
+}
+```
+
+Lambda 则不同——Lambda 内的 `this` 指向**外部类**。这是 Lambda 与匿名内部类的一个重要区别。
+
+## 六、内部类的应用场景与最佳实践
+
+### 6.1 场景总结
+
+| 场景 | 推荐类型 | 例子 |
+| --- | --- | --- |
+| 隐藏辅助类，无需访问实例 | 静态内部类 | `HashMap.Node`、`Map.Entry` |
+| 构建器模式 | 静态内部类 | `Coffee.Builder` |
+| 一次性实现接口（单方法） | Lambda（优先） | `Comparator`、`Runnable` |
+| 一次性实现接口（多方法） | 匿名内部类 | `WindowAdapter` |
+| 需要访问外部实例的私有成员 | 成员内部类 | 迭代器实现 |
+| 临时辅助类，仅方法内用 | 局部内部类 | 复杂方法的内部数据结构 |
+
+### 6.2 闭包：内部类与函数式编程
+
+**闭包**（Closure）是一个函数，它"记住"了自己被创建时的环境（外部变量）。Java 没有真正的"独立函数"，但内部类和 Lambda 实现了闭包的语义——它们能捕获外部变量。
+
+```java
+public class Counter {
+    public Runnable makeIncrementer() {
+        int[] count = {0};    // 用数组绕过 effectively final 限制（不推荐，仅演示）
+        return () -> {
+            count[0]++;
+            System.out.println("计数：" + count[0]);
+        };
+    }
+}
+
+// 使用：
+Runnable r = new Counter().makeIncrementer();
+r.run();   // 计数：1
+r.run();   // 计数：2
+```
+
+这个 Lambda "捕获"了 `count` 数组，每次调用都修改它。这就是闭包——函数携带了它依赖的环境。
+
+### 6.3 最佳实践
+
+1. **优先用静态内部类**：除非确实需要访问外部实例，否则用 `static`。Effective Java 第 24 条："静态成员类优于非静态成员类"。非静态内部类会隐式持有外部类引用，可能导致内存泄漏（外部类本该被回收，但内部类引用让它"赖着不走"）。
+
+2. **优先用 Lambda 替代函数式接口的匿名内部类**：代码更简洁。
+
+3. **避免在匿名内部类中写复杂逻辑**：如果方法体超过几行，抽成命名类更易维护。
+
+4. **注意内存泄漏**：非静态内部类持有外部类引用，如果内部类对象生命周期长（如放入静态集合、注册为监听器），外部类无法回收。这时应改用静态内部类 + 弱引用，或显式注销。
+
+## 七、综合实战
+
+最后看一个综合例子，演示各类内部类的使用：
+
+<CodeRunner code={`public class Main {
+    // 外部类：咖啡店
+    static class CoffeeShop {
+        private String shopName = "星巴客";
+        private static int totalOrders = 0;
+
+        // 1. 成员内部类：吧台（依赖咖啡店实例）
+        class Barista {
+            void makeCoffee(String type) {
+                totalOrders++;
+                System.out.println(shopName + " 的吧台制作了一杯" + type + "（第 " + totalOrders + " 单）");
+            }
+        }
+
+        // 2. 静态内部类：菜单项（不依赖实例）
+        static class MenuItem {
+            private String name;
+            private double price;
+
+            public MenuItem(String name, double price) {
+                this.name = name;
+                this.price = price;
+            }
+
+            public void show() {
+                System.out.printf("  %-10s ￥%.2f%n", name, price);
+            }
+        }
+
+        public void serve(String type) {
+            // 3. 局部内部类：仅在本方法内使用
+            class Order {
+                String customerName;
+                Order(String name) { this.customerName = name; }
+                void print() {
+                    System.out.println("订单：" + customerName + " 的" + type);
+                }
+            }
+
+            Order order = new Order("顾客A");
+            order.print();
+
+            // 4. 匿名内部类：一次性回调
+            Runnable callback = new Runnable() {
+                @Override
+                public void run() {
+                    System.out.println("通知：" + type + " 制作完成！");
+                }
+            };
+            callback.run();
+        }
+    }
+
+    public static void main(String[] args) {
+        CoffeeShop shop = new CoffeeShop();
+
+        // 成员内部类
+        CoffeeShop.Barista barista = shop.new Barista();
+        barista.makeCoffee("拿铁");
+        barista.makeCoffee("美式");
+
+        // 静态内部类（无需 shop 实例）
+        System.out.println("\\n--- 菜单 ---");
+        CoffeeShop.MenuItem m1 = new CoffeeShop.MenuItem("拿铁", 28);
+        CoffeeShop.MenuItem m2 = new CoffeeShop.MenuItem("美式", 22);
+        m1.show();
+        m2.show();
+
+        // 局部内部类 + 匿名内部类
+        System.out.println("\\n--- 服务流程 ---");
+        shop.serve("卡布奇诺");
+    }
+}`} />
+
+## 八、本章小结
+
+| 类型 | 关键特性 | 典型用途 |
+| --- | --- | --- |
+| 成员内部类 | 持有外部类引用，可访问私有成员 | 迭代器、紧密协作类 |
+| 静态内部类 | 不依赖外部实例，最常用 | 隐藏辅助类、Builder 模式 |
+| 局部内部类 | 作用域限方法内，受 effectively final 限制 | 临时辅助类 |
+| 匿名内部类 | 无名字，一次性使用 | 回调、事件处理、临时实现 |
+
+| 最佳实践 | 说明 |
+| --- | --- |
+| 优先用静态内部类 | 避免隐式引用导致的内存泄漏 |
+| 优先用 Lambda | 函数式接口的匿名内部类可被 Lambda 替代 |
+| 注意 effectively final | 局部内部类和 Lambda 捕获的变量不能修改 |
+| 警惕内存泄漏 | 长生命周期的内部类对象会持有外部类 |
+
+## 结语
+
+内部类是 Java 语言中细腻而精巧的一笔。它让"类与类之间的关系"有了更多层次——不只有平级的继承与组合，还有嵌套的从属与协作。从 Builder 模式的优雅链式调用，到事件处理的简洁回调，再到 JDK 源码中无处不在的隐藏实现，内部类早已融入 Java 的肌理。
+
+掌握内部类，你就拥有了写出"高内聚、低耦合"代码的又一利器。下一章，我们将学习 Java 中两种特殊的"类型"——**枚举**与**注解**。枚举让常量变得类型安全而富有表现力，注解则为代码添加"元数据"，支撑起 Spring、JUnit 等框架的魔法。它们是现代 Java 不可或缺的优雅工具。

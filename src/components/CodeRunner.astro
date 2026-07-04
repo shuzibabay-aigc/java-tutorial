@@ -1,0 +1,134 @@
+---
+// CodeRunner 组件：使用 Piston API 在浏览器端在线运行 Java 代码
+// Piston API 是免费公共代码执行服务，无需 API Key，不占用我们服务器资源
+import { type Lang, getUiStrings } from '../i18n/ui';
+
+const { code = '', showOutput = true, lang = 'zh' as Lang } = Astro.props;
+const ui = getUiStrings(lang);
+---
+
+<div class="code-runner" data-code-runner>
+  <div class="code-runner-toolbar">
+    <span class="code-runner-label">
+      <span class="dot"></span>
+      {ui.codeRunnerLabel}
+    </span>
+    <div class="code-runner-actions">
+      <button class="run-btn run-btn-copy" data-action="copy" data-text-copy={ui.copyBtn} data-text-done={ui.copySuccess}>{ui.copyBtn}</button>
+      <button class="run-btn run-btn-execute" data-action="run" data-text-run={ui.runBtn} data-text-running={ui.running}>{ui.runBtn}</button>
+    </div>
+  </div>
+  <textarea data-code-area spellcheck="false" autocomplete="off">{code}</textarea>
+  <div class="code-runner-output" data-output-area style="display: none;">
+    <div class="code-runner-output-header">{ui.outputHeader}</div>
+    <div data-output-content></div>
+  </div>
+</div>
+
+<script is:inline define:vars={{ showOutput, ui }}>
+  document.querySelectorAll('[data-code-runner]').forEach((runner) => {
+    const textarea = runner.querySelector('[data-code-area]');
+    const runBtn = runner.querySelector('[data-action="run"]');
+    const copyBtn = runner.querySelector('[data-action="copy"]');
+    const outputArea = runner.querySelector('[data-output-area]');
+    const outputContent = runner.querySelector('[data-output-content]');
+
+    const txtCopy = copyBtn.getAttribute('data-text-copy');
+    const txtDone = copyBtn.getAttribute('data-text-done');
+    const txtRun = runBtn.getAttribute('data-text-run');
+    const txtRunning = runBtn.getAttribute('data-text-running');
+
+    // Tab 键插入空格而非切换焦点
+    textarea.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        textarea.value = textarea.value.substring(0, start) + '  ' + textarea.value.substring(end);
+        textarea.selectionStart = textarea.selectionEnd = start + 2;
+      }
+    });
+
+    // 复制代码
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(textarea.value);
+        copyBtn.textContent = '✓ ' + txtDone;
+        setTimeout(() => { copyBtn.textContent = txtCopy; }, 2000);
+      } catch (err) {
+        copyBtn.textContent = '✗';
+        setTimeout(() => { copyBtn.textContent = txtCopy; }, 2000);
+      }
+    });
+
+    // 运行代码 — 调用 Piston API
+    runBtn.addEventListener('click', async () => {
+      const code = textarea.value;
+      if (!code.trim()) return;
+
+      runBtn.disabled = true;
+      runBtn.innerHTML = '⏳ ' + txtRunning;
+      outputArea.style.display = 'block';
+      outputContent.innerHTML = `
+        <div class="code-runner-loading">
+          <div class="spinner"></div>
+          ${ui.running}
+        </div>
+      `;
+
+      try {
+        // 确保 class 名为 Main（Piston 要求文件名与 public class 一致）
+        let processedCode = code;
+        const classMatch = code.match(/public\s+class\s+(\w+)/);
+        if (classMatch && classMatch[1] !== 'Main') {
+          processedCode = code.replace(/public\s+class\s+\w+/, 'public class Main');
+        }
+
+        const response = await fetch('https://emkc.org/api/v2/piston/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            language: 'java',
+            version: '17.0.1',
+            files: [{ name: 'Main.java', content: processedCode }],
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`API ${response.status}`);
+        }
+
+        const result = await response.json();
+        const stdout = result.run?.stdout || '';
+        const stderr = result.run?.stderr || '';
+        const exitCode = result.run?.code ?? 0;
+
+        let output = '';
+        if (stdout) output += stdout;
+        if (stderr) {
+          output += (output ? '\n' : '') + '--- stderr ---\n' + stderr;
+        }
+        if (exitCode !== 0 && !output) {
+          output = `exit code: ${exitCode}`;
+        }
+        if (!output) output = '(no output)';
+
+        const isError = stderr.length > 0 && exitCode !== 0;
+        outputContent.innerHTML = `<pre><code class="${isError ? 'error' : ''}">${escapeHtml(output)}</code></pre>`;
+      } catch (err) {
+        outputContent.innerHTML = `<pre><code class="error">${ui.runError}: ${escapeHtml(err.message)}</code></pre>`;
+      } finally {
+        runBtn.disabled = false;
+        runBtn.innerHTML = txtRun;
+      }
+    });
+
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+  });
+</script>

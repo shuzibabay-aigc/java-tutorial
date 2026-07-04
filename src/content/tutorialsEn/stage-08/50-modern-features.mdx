@@ -1,0 +1,700 @@
+---
+title: "A Quick Tour of Other Modern Features"
+chapter: 50
+stage: "Stage 8"
+stageName: "Modern Java Features"
+order: 5
+description: "Tour interface private methods, Stream enhancements (takeWhile/dropWhile/ofNullable/toList), HttpClient (sync/async HTTP/2), Text Blocks, Sequenced Collections, and the Foreign Function & Memory API"
+pubDate: 2026-07-03
+tags: ["Java", "HttpClient", "Text Blocks", "Sequenced Collections", "FFM API", "Stream"]
+---
+
+# A Quick Tour of Other Modern Features
+
+This chapter is Stage 8's finale — the previous four chapters covered the "heavyweight" features: the module system, Records, Sealed Classes, and Pattern Matching. This chapter knocks out the remaining "small but beautiful" features in one go. None is as revolutionary as the three-piece set, but together they make writing Java much more pleasant.
+
+This chapter quickly covers six features:
+
+1. **Interface private methods** (Java 9+)
+2. **Stream enhancements** (Java 9+ / 16+)
+3. **HttpClient** (Java 11+)
+4. **Text Blocks** (Java 15+)
+5. **Sequenced Collections** (Java 21+)
+6. **Foreign Function & Memory API** (Java 22+, finalized)
+
+## 1. Interface Private Methods (Java 9+)
+
+### 1.1 The Pain Point: Code Reuse in Interfaces
+
+Java 8 introduced `default` and `static` methods in interfaces — interfaces could finally carry "implementation." But a problem quickly emerged: how do multiple default methods share code?
+
+```java
+interface Logger {
+    default void logInfo(String msg) {
+        // Want to reuse this formatting logic
+        System.out.println("[INFO] " + msg);
+    }
+    default void logError(String msg) {
+        // Write the formatting again?
+        System.out.println("[ERROR] " + msg);
+    }
+}
+```
+
+Java 8 had no way out — you had to write the "shared logic" as a `default` method too, but then it was **exposed to the interface's users**. Users could see "internal methods" like `logInternal`, breaking abstraction.
+
+### 1.2 Java 9's Solution: Interface Private Methods
+
+Java 9 (JEP 213) allows `private` methods in interfaces — callable only by default/static methods within the same interface:
+
+```java
+interface Logger {
+    default void logInfo(String msg) {
+        log("INFO", msg);   // call private method
+    }
+    default void logError(String msg) {
+        log("ERROR", msg);
+    }
+    default void logWarn(String msg) {
+        log("WARN", msg);
+    }
+
+    // Private method, reuses logic, not exposed to implementers
+    private void log(String level, String msg) {
+        System.out.println("[" + level + "] " + msg + " @" + System.currentTimeMillis());
+    }
+
+    // Can also be static private
+    private static String format(String level, String msg) {
+        return "[" + level + "] " + msg;
+    }
+}
+```
+
+Characteristics:
+
+- **`private` methods**: instance methods, called by default methods.
+- **`private static` methods**: static methods, called by static/default methods.
+- **Cannot be abstract** — private methods must have an implementation.
+- **Not inherited by implementers** — visible only inside the interface.
+
+A small feature, but it solves interface code reuse's "last mile."
+
+## 2. Stream Enhancements (Java 9+ / 16+)
+
+Java 8 introduced the Stream API, and later versions kept "patching" it. The most commonly used enhancements:
+
+### 2.1 takeWhile / dropWhile (Java 9+)
+
+`takeWhile`: takes the prefix that satisfies the predicate, stopping at the first element that doesn't.
+
+`dropWhile`: skips the prefix that satisfies the predicate, starting to take from the first element that doesn't.
+
+```java
+Stream.of(1, 2, 3, 4, 5, 2, 1)
+    .takeWhile(n -> n < 4)   // take 1, 2, 3, stop at 4
+    .collect(Collectors.toList());   // [1, 2, 3]
+
+Stream.of(1, 2, 3, 4, 5, 2, 1)
+    .dropWhile(n -> n < 4)   // skip 1, 2, 3, start from 4
+    .collect(Collectors.toList());   // [4, 5, 2, 1]
+```
+
+**Difference from `filter`** — `filter` is "filter the whole stream," `takeWhile`/`dropWhile` are "prefix operations." Especially useful for **ordered streams segmented by some condition**: log pagination by time, sequence segmentation by threshold.
+
+### 2.2 ofNullable (Java 9+)
+
+`Stream.ofNullable(null)` returns an empty stream, no NPE:
+
+```java
+Stream.ofNullable(null).count();   // 0
+Stream.ofNullable("hello").count();   // 1
+
+// Pair with flatMap to handle possibly null elements
+Stream.of("a", null, "b", null, "c")
+    .flatMap(Stream::ofNullable)   // filter out nulls
+    .collect(Collectors.toList());   // [a, b, c]
+```
+
+### 2.3 Stream.toList() (Java 16+)
+
+Before Java 16, collecting a Stream into a List required `.collect(Collectors.toList())` — long and error-prone. Java 16 added `Stream.toList()` for direct collection:
+
+```java
+// Old style
+List<String> list = stream.collect(Collectors.toList());
+
+// New style
+List<String> list = stream.toList();
+```
+
+**Note**: `toList()` returns an **immutable List** — you can't `add`/`remove`. For a mutable List, use `collect(Collectors.toCollection(ArrayList::new))`.
+
+```java
+List<Integer> nums = Stream.of(1, 2, 3).toList();
+nums.add(4);   // throws UnsupportedOperationException
+```
+
+### 2.4 Other Minor Enhancements
+
+- `Stream.iterate(seed, hasNext, next)` — iterate with a termination condition, like a for loop.
+- `IntStream.takeWhile/dropWhile` — primitive streams also support them.
+- `Collectors.teeing` — dual-downstream collector, computing two stats at once (e.g., sum and count for an average).
+
+```java
+// Java 9: iterate with termination condition
+Stream.iterate(1, n -> n <= 100, n -> n + 1)
+    .forEach(System.out::println);   // equivalent to for (int i=1; i<=100; i++)
+
+// Java 12+: teeing computes sum and count at once
+double avg = Stream.of(1, 2, 3, 4, 5)
+    .collect(Collectors.teeing(
+        Collectors.summingDouble(i -> i),
+        Collectors.counting(),
+        (sum, count) -> sum / count
+    ));   // 3.0
+```
+
+## 3. HttpClient (Java 11+)
+
+Java 9 introduced a new HTTP Client API (`java.net.http`), finalized in Java 11 (JEP 321). It replaces the aging `HttpURLConnection` — supporting HTTP/2, WebSocket, sync/async, and connection pooling.
+
+### 3.1 Basic Usage
+
+```java
+import java.net.URI;
+import java.net.http.*;
+import java.time.Duration;
+
+HttpClient client = HttpClient.newBuilder()
+    .version(HttpClient.Version.HTTP_2)        // default HTTP/2, auto-fallback to HTTP/1.1
+    .connectTimeout(Duration.ofSeconds(10))
+    .build();
+
+HttpRequest request = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.example.com/users"))
+    .timeout(Duration.ofSeconds(30))
+    .header("Accept", "application/json")
+    .GET()
+    .build();
+
+// Synchronous
+HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+System.out.println(response.statusCode());
+System.out.println(response.body());
+
+// Asynchronous
+client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+    .thenApply(HttpResponse::body)
+    .thenAccept(System.out::println)
+    .join();   // wait for completion
+```
+
+### 3.2 Advantage Comparison
+
+| Dimension | HttpURLConnection | HttpClient |
+| --- | --- | --- |
+| HTTP/2 | Not supported | Native support |
+| Async | You spin your own threads | Built-in `sendAsync` |
+| Connection pool | None (new each time) | Built-in pool |
+| API design | Ancient, verbose config | Builder pattern, clear |
+| WebSocket | Not supported | Native support |
+| HTTPS | Verbose config | Supported by default |
+
+### 3.3 POST JSON
+
+```java
+String json = "{\"name\":\"Alice\",\"age\":30}";
+HttpRequest postReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.example.com/users"))
+    .header("Content-Type", "application/json")
+    .POST(HttpRequest.BodyPublishers.ofString(json))
+    .build();
+```
+
+### 3.4 Note
+
+HttpClient itself is **thread-safe** and reusable — typically an application creates one client and shares it globally. Each request creates an `HttpRequest` object (immutable, reusable).
+
+## 4. Text Blocks (Java 15+)
+
+### 4.1 The Pain Point: "Escape Hell" in Strings
+
+Writing SQL, JSON, HTML — Java string escaping drives you crazy:
+
+```java
+String json = "{\\n" +
+    "  \\"name\\": \\"Alice\\",\\n" +
+    "  \\"age\\": 30\\n" +
+    "}";
+```
+
+Every line `+` concatenated, every `"` escaped to `\"` — 10 lines of JSON looks like hieroglyphics.
+
+### 4.2 Text Block Syntax
+
+Java 15 (JEP 378) introduced **Text Blocks** — multi-line strings wrapped in three double quotes `"""`:
+
+```java
+String json = """
+        {
+          "name": "Alice",
+          "age": 30
+        }
+        """;
+```
+
+Characteristics:
+
+- **Multi-line** — line breaks directly, no `\n`.
+- **No quote escaping** — write `"` directly.
+- **Indentation control** — the compiler automatically removes the "common minimal indent," aligning the code.
+- **Closing `"""`** on its own line marks the end of the string.
+
+### 4.3 Indentation Rules
+
+Text block indentation is "smart" — based on the position of the **closing `"""`**:
+
+```java
+String s = """
+        hello
+        world
+        """;   // closing """ here
+// s = "hello\\nworld\\n"  (indentation removed)
+```
+
+If the closing `"""` is further left, more indentation is preserved:
+
+```java
+String s = """
+            hello
+            world
+        """;   // closing """ further left
+// s = "    hello\\n    world\\n"  (4 spaces preserved)
+```
+
+### 4.4 Escaping and Interpolation
+
+Inside text blocks you can still use `\s` (preserve trailing spaces), `\<newline>` (line continuation):
+
+```java
+String sql = """
+        SELECT id, name \\
+               age \\
+        FROM   users \\
+        WHERE  age > 18
+        """;
+// Actually "SELECT id, name age FROM users WHERE age > 18" (one line)
+
+String colors = """
+        red   \\s
+        green \\s
+        blue  \\s
+        """;   // \\s preserves trailing spaces, otherwise the compiler strips them
+```
+
+Java has no built-in string interpolation (like `${var}`), but you can use `String.format` or `formatted`:
+
+```java
+String name = "Alice";
+int age = 30;
+String json = """
+        {
+          "name": "%s",
+          "age": %d
+        }
+        """.formatted(name, age);
+```
+
+## 5. Sequenced Collections (Java 21+)
+
+### 5.1 The Pain Point: Getting the "Last Element" Is That Hard?
+
+Before Java 21, different collections had completely inconsistent APIs for "getting the last element":
+
+```java
+List<Integer> list = List.of(1, 2, 3);
+list.get(list.size() - 1);   // List's last
+
+Deque<Integer> deque = new ArrayDeque<>(list);
+deque.getLast();   // Deque's last
+
+SortedSet<Integer> set = new TreeSet<>(list);
+set.last();   // SortedSet's last
+
+// Set has "no order", getting last is meaningless (but LinkedHashSet has order...)
+```
+
+Each collection type had its own API, impossible to remember. `Map` was worse — getting the last entry required `map.entrySet().iterator()` and iterating `next` to the end.
+
+### 5.2 The Sequenced Collections Interface
+
+Java 21 (JEP 431) introduced three new interfaces to unify "ordered collections":
+
+- `SequencedCollection＜E＞` — an ordered Collection
+- `SequencedSet＜E＞` — an ordered Set
+- `SequencedMap＜K,V＞` — an ordered Map
+
+New methods:
+
+```java
+interface SequencedCollection<E> extends Collection<E> {
+    SequencedCollection<E> reversed();   // reverse
+    void addFirst(E e);                  // add to head
+    void addLast(E e);                   // add to tail
+    E getFirst();                        // get first
+    E getLast();                         // get last
+    E removeFirst();                     // remove first
+    E removeLast();                      // remove last
+}
+```
+
+```java
+List<Integer> list = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+list.getFirst();      // 1
+list.getLast();       // 5
+list.addFirst(0);     // [0, 1, 2, 3, 4, 5]
+list.reversed();      // [5, 4, 3, 2, 1, 0]
+
+LinkedHashSet<Integer> set = new LinkedHashSet<>(List.of(1, 2, 3));
+set.getFirst();       // 1
+set.getLast();        // 3   (impossible before!)
+
+LinkedHashMap<String, Integer> map = new LinkedHashMap<>();
+map.put("a", 1); map.put("b", 2); map.put("c", 3);
+map.firstEntry();     // a=1
+map.lastEntry();      // c=3   (impossible before!)
+map.pollLastEntry();  // removes and returns c=3
+map.reversed();       // reversed Map view
+```
+
+Finally — all "ordered collections" share one API. Readability and portability take a big leap.
+
+### 5.3 Which Collections Implement It
+
+- `List`, `Deque`, `Queue` → implement `SequencedCollection`
+- `LinkedHashSet` → implements `SequencedSet`
+- `LinkedHashMap` → implements `SequencedMap`
+- `TreeSet` / `TreeMap` also implement (by comparison order)
+- `HashSet` / `HashMap` do not (no order)
+
+## 6. Foreign Function & Memory API (Java 22+)
+
+### 6.1 The Pain Point: JNI's Torment
+
+Java calling C/C++ libraries always used JNI (Java Native Interface) — but it has big problems:
+
+- **Writing C bridge code** — you have to write `.h` headers, `.c` implementations, compile to `.so`/`.dll`, complex deployment.
+- **Memory-unsafe** — C pointers, memory allocations are outside the JVM's reach, easily causing segfaults.
+- **Performance overhead** — JNI calls have context-switch overhead.
+- **Can't call system functions** — calling `printf`, `getpid` and other libc functions also requires C wrappers.
+
+### 6.2 What the FFM API Is
+
+**The Foreign Function & Memory API (FFM)** is a feature finalized in Java 22 (JEP 454), letting Java **directly call** C/C++ library functions and **directly manipulate** off-heap memory, **without writing JNI bridge code**.
+
+Core APIs:
+
+- `Linker` — platform linker, finds C functions.
+- `SymbolLookup` — finds symbols in `.so`/`.dll`.
+- `MemorySegment` — off-heap memory segment, replaces `sun.misc.Unsafe` and `ByteBuffer`.
+- `Arena` — memory allocator, manages lifecycle.
+
+### 6.3 Calling a C Function Example
+
+```java
+import java.lang.foreign.*;
+import java.lang.invoke.MethodHandle;
+
+Linker linker = Linker.nativeLinker();
+SymbolLookup stdlib = linker.defaultLookup();
+
+// Find C's printf function
+MethodHandle printf = stdlib.find("printf")
+    .orElseThrow();
+
+// Call
+try (Arena arena = Arena.ofConfined()) {
+    MemorySegment format = arena.allocateUtf8String("Hello %s!\\n");
+    MemorySegment arg = arena.allocateUtf8String("World");
+    printf.invoke(format, arg);   // outputs "Hello World!"
+}
+```
+
+Not a line of C code, yet directly calling `printf` — unimaginable in the JNI era. Memory managed by `Arena.ofConfined()` is automatically released when try-with-resources ends, **memory-safe**.
+
+### 6.4 Performance and Use Cases
+
+FFM's design goal is **performance close to JNI, memory safer**. It replaces three old APIs:
+
+- `sun.misc.Unsafe` (internal API, slated for removal)
+- `java.nio.ByteBuffer`'s direct memory (limited API)
+- JNI (complex development)
+
+Suitable scenarios: high-performance computing, calling native libraries (OpenSSL, SQLite, CUDA), game engines, database drivers. From Java 22 onward, official database drivers and TLS libraries are being rewritten with FFM.
+
+## 7. Practice: Comprehensive Demo
+
+The following example demonstrates all six features together.
+
+<CodeRunner code={`import java.util.*;
+import java.util.stream.*;
+import java.net.URI;
+import java.net.http.*;
+import java.time.Duration;
+import java.util.concurrent.*;
+
+public class Main {
+    // === 1. Interface private methods ===
+    interface Logger {
+        default void logInfo(String msg) { log("INFO", msg); }
+        default void logError(String msg) { log("ERROR", msg); }
+        default void logWarn(String msg) { log("WARN", msg); }
+        // Private method, reuses logic, not exposed to implementers
+        private void log(String level, String msg) {
+            System.out.println("[" + level + "] " + msg);
+        }
+        private static String format(String level, String msg) {
+            return "[" + level + "] " + msg;
+        }
+    }
+
+    static class MyLogger implements Logger {}
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Quick Tour of Other Modern Features ===\\n");
+
+        // 1. Interface private methods
+        System.out.println("--- 1. Interface Private Methods ---");
+        MyLogger logger = new MyLogger();
+        logger.logInfo("info");
+        logger.logError("error");
+        logger.logWarn("warning");
+
+        // 2. Stream enhancements
+        System.out.println("\\n--- 2. Stream Enhancements ---");
+        // takeWhile / dropWhile
+        List<Integer> taken = Stream.of(1, 2, 3, 4, 5, 2, 1)
+            .takeWhile(n -> n < 4).toList();
+        List<Integer> dropped = Stream.of(1, 2, 3, 4, 5, 2, 1)
+            .dropWhile(n -> n < 4).toList();
+        System.out.println("takeWhile(n<4): " + taken);   // [1, 2, 3]
+        System.out.println("dropWhile(n<4): " + dropped); // [4, 5, 2, 1]
+
+        // ofNullable
+        long count = Stream.of("a", null, "b", null, "c")
+            .flatMap(Stream::ofNullable).count();
+        System.out.println("ofNullable filter null result: " + count + " items");   // 3
+
+        // iterate with termination condition
+        List<Integer> range = Stream.iterate(1, n -> n <= 5, n -> n + 1).toList();
+        System.out.println("iterate(1, <=5, +1): " + range);   // [1, 2, 3, 4, 5]
+
+        // toList (Java 16+) immutable
+        List<String> names = Stream.of("Alice", "Bob", "Charlie").toList();
+        System.out.println("toList: " + names + " (immutable)");
+        try {
+            names.add("David");
+        } catch (UnsupportedOperationException e) {
+            System.out.println("  Trying to add throws: " + e.getClass().getSimpleName());
+        }
+
+        // teeing computes sum and count at once
+        double avg = Stream.of(1, 2, 3, 4, 5).collect(Collectors.teeing(
+            Collectors.summingDouble(i -> i),
+            Collectors.counting(),
+            (sum, cnt) -> sum / cnt
+        ));
+        System.out.println("teeing average: " + avg);   // 3.0
+
+        // 3. Text Blocks
+        System.out.println("\\n--- 3. Text Blocks ---");
+        String json = """
+                {
+                  "name": "Alice",
+                  "age": 30,
+                  "skills": ["Java", "Python"]
+                }
+                """;
+        System.out.println(json);
+
+        // formatted interpolation
+        String name = "Bob";
+        int age = 25;
+        String greeting = """
+                Hello, %s!
+                You are %d years old.
+                """.formatted(name, age);
+        System.out.println(greeting.strip());
+
+        // SQL example
+        String sql = """
+                SELECT u.id, u.name, COUNT(o.id) AS order_count
+                FROM   users u
+                LEFT JOIN orders o ON u.id = o.user_id
+                WHERE  u.age > 18
+                GROUP  BY u.id, u.name
+                """;
+        System.out.println("SQL text block:");
+        System.out.println(sql);
+
+        // 4. Sequenced Collections
+        System.out.println("--- 4. Sequenced Collections ---");
+        List<Integer> list = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+        System.out.println("List: " + list);
+        System.out.println("  getFirst(): " + list.getFirst());   // 1
+        System.out.println("  getLast(): " + list.getLast());     // 5
+        list.addFirst(0);
+        list.addLast(6);
+        System.out.println("  addFirst(0) + addLast(6): " + list);
+        System.out.println("  removeFirst(): " + list.removeFirst() + " -> " + list);
+        System.out.println("  reversed(): " + list.reversed());
+
+        // LinkedHashSet
+        LinkedHashSet<String> set = new LinkedHashSet<>(List.of("a", "b", "c"));
+        System.out.println("LinkedHashSet: " + set);
+        System.out.println("  getFirst(): " + set.getFirst() + ", getLast(): " + set.getLast());
+        System.out.println("  reversed(): " + set.reversed());
+
+        // LinkedHashMap
+        LinkedHashMap<String, Integer> map = new LinkedHashMap<>();
+        map.put("one", 1); map.put("two", 2); map.put("three", 3);
+        System.out.println("LinkedHashMap: " + map);
+        System.out.println("  firstEntry(): " + map.firstEntry());
+        System.out.println("  lastEntry(): " + map.lastEntry());
+        System.out.println("  pollLastEntry(): " + map.pollLastEntry() + " -> " + map);
+        System.out.println("  reversed(): " + map.reversed());
+
+        // 5. HttpClient (async demo, may not actually hit the network)
+        System.out.println("\\n--- 5. HttpClient ---");
+        HttpClient client = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_2)
+            .connectTimeout(Duration.ofSeconds(5))
+            .build();
+        System.out.println("HttpClient created: " + client);
+        System.out.println("  Version: " + client.version());
+        System.out.println("  Connect timeout: " + client.connectTimeout().orElse(null));
+
+        // Build a request (not actually sent, sandbox may have no network)
+        HttpRequest req = HttpRequest.newBuilder()
+            .uri(URI.create("https://httpbin.org/get"))
+            .timeout(Duration.ofSeconds(10))
+            .header("Accept", "application/json")
+            .GET()
+            .build();
+        System.out.println("Request URI: " + req.uri());
+        System.out.println("Request method: " + req.method());
+        System.out.println("Request headers: " + req.headers().map());
+
+        // Async send (3-second timeout to avoid sandbox hang)
+        try {
+            CompletableFuture<HttpResponse<String>> future = client.sendAsync(
+                req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = future.get(3, TimeUnit.SECONDS);
+            System.out.println("Response status: " + resp.statusCode());
+            System.out.println("Response body (first 100 chars): "
+                + resp.body().substring(0, Math.min(100, resp.body().length())));
+        } catch (Exception e) {
+            System.out.println("(Sandbox has no network, request failed: " + e.getClass().getSimpleName() + ")");
+            System.out.println("(In a real environment, use client.send sync or sendAsync async)");
+        }
+
+        // 6. FFM API demo (reflection check, no actual native call)
+        System.out.println("\\n--- 6. Foreign Function & Memory API ---");
+        try {
+            Class<?> linkerClass = Class.forName("java.lang.foreign.Linker");
+            System.out.println("FFM API available: " + linkerClass.getName());
+            System.out.println("  Linker class exists, Java 22+ can directly call C functions");
+
+            // Demo Arena (Java 22+)
+            Class<?> arenaClass = Class.forName("java.lang.foreign.Arena");
+            System.out.println("  Arena class exists: " + arenaClass.getName());
+
+            // Actual call (only compiles on Java 22+, here only reflection check)
+            // Real code:
+            // Linker linker = Linker.nativeLinker();
+            // SymbolLookup libc = linker.defaultLookup();
+            // MethodHandle getpid = libc.find("getpid").orElseThrow();
+            // try (Arena arena = Arena.ofConfined()) {
+            //     int pid = (int) getpid.invoke();
+            //     System.out.println("PID: " + pid);
+            // }
+            System.out.println("  (On actual Java 22+ can directly call getpid/printf etc.)");
+        } catch (ClassNotFoundException e) {
+            System.out.println("FFM API not available (Java < 22)");
+            System.out.println("  Java 22+ officially supports Foreign Function & Memory API");
+        }
+
+        System.out.println("\\n=== Summary ===");
+        System.out.println("1. Interface private methods (Java 9+): reuse logic between default methods");
+        System.out.println("2. Stream enhancements (Java 9+/16+): takeWhile/dropWhile/ofNullable/toList");
+        System.out.println("3. HttpClient (Java 11+): HTTP/2, sync/async, connection pool");
+        System.out.println("4. Text Blocks (Java 15+): triple-quote multi-line strings");
+        System.out.println("5. Sequenced Collections (Java 21+): unified getFirst/getLast/reversed");
+        System.out.println("6. FFM API (Java 22+): call C without JNI, safely manipulate off-heap memory");
+    }
+}`} />
+
+> **Key observations**:
+> - **`Logger` interface's `private void log`** — three default methods reuse it; invisible from outside.
+> - **`takeWhile` vs `filter`** — the former stops at the first non-match, the latter filters everything.
+> - **`toList()` is immutable** — add throws `UnsupportedOperationException`.
+> - **Text Blocks auto-strip indentation** — the closing `"""`'s position decides how much indentation is kept.
+> - **`list.getFirst()` / `set.getLast()` / `map.firstEntry()`** — all "ordered collections" share one API.
+> - **HttpClient's `sendAsync` returns `CompletableFuture`** — connects seamlessly with the `CompletableFuture` API (Chapter 44).
+> - **The FFM API only works on Java 22+** — before Java 21 it was a preview feature.
+
+## 8. Other Notable Features
+
+Beyond the six big ones, here are some other modern features worth knowing:
+
+- **var local variable type inference** (Java 10+) — `var list = new ArrayList＜String＞()`.
+- **switch expressions** (Java 14+) — `switch` can be an expression returning a value, with the `yield` keyword.
+- **`String.isBlank()`/`strip()`/`repeat()`/`lines()`** (Java 11+) — string enhancements.
+- **`Files.readString`/`writeString`** (Java 11+) — read/write text files in one line.
+- **`Optional.isEmpty()`** (Java 11+) — symmetric to `!isPresent()`.
+- **`String.format`'s instance version `formatted`** (Java 15+) — `"%s".formatted(name)`.
+- **Record Patterns nesting** (Java 21) — covered in the previous chapter.
+- **Virtual Threads** (Java 21) — covered in Stage 7.
+- **Generational ZGC** (Java 21) — covered in the next stage.
+- **Unnamed Patterns/Variables** (Java 22) — `case Point(_, _)`, `var _ = ...`.
+- **Statements Before super/this** (Java 22) — statements before super in constructors.
+
+Java's six-month release cadence lets features "run in small steps" — every release ships a few small features, accumulating into qualitative change.
+
+## 9. Chapter Summary
+
+| Feature | Version | Key Points |
+| --- | --- | --- |
+| Interface private methods | Java 9+ | Reuse logic between default methods, not exposed to implementers |
+| `takeWhile`/`dropWhile` | Java 9+ | Stream prefix operations, stop at condition |
+| `ofNullable` | Java 9+ | null → empty stream |
+| `iterate(seed, hasNext, next)` | Java 9+ | Iterate with termination condition |
+| `teeing` | Java 12+ | Dual-downstream collector |
+| `Stream.toList()` | Java 16+ | Directly collect into immutable List |
+| HttpClient | Java 11+ | HTTP/2, sync/async, connection pool, WebSocket |
+| Text Blocks | Java 15+ | Triple-quote multi-line strings, auto-indent control |
+| Sequenced Collections | Java 21+ | Unified getFirst/getLast/reversed |
+| FFM API | Java 22+ | Call C without JNI, safe off-heap memory |
+
+**Mnemonics**:
+
+- **Interface private methods** — the "internal tool" between defaults.
+- **takeWhile takes prefix, dropWhile skips prefix** — different from filter's "filter the whole stream."
+- **toList is immutable** — for mutable, use `toCollection(ArrayList::new)`.
+- **HttpClient three-piece set** — HttpClient, HttpRequest, HttpResponse, Builder pattern.
+- **Text Blocks triple-quote** — indentation depends on the closing `"""`'s position.
+- **Sequenced Collections** — all ordered collections' `getFirst`/`getLast`/`reversed` unified.
+- **FFM** — only finalized in Java 22+, call C without JNI.
+
+## Conclusion: Stage 8 Complete — The Full Picture of Modern Java
+
+Stage 8 ends here. Looking back over these 5 chapters, modern Java's "modernization" shows on three levels:
+
+1. **Modularization (Chapter 46)** — strong encapsulation, reliable configuration, customizable JRE. Java finally has "large-scale engineering" boundary control.
+2. **Data modeling three-piece set (Chapters 47-49)** — Records + Sealed + Pattern Matching. Java can finally model ADTs as elegantly as functional languages.
+3. **API modernization (this chapter)** — HttpClient, Text Blocks, Sequenced Collections, FFM. The everyday API is finally no longer "last century."
+
+These three together let Java stay backward compatible while feeling as pleasant to write as Kotlin and Scala. If you're still on Java 8, we strongly recommend upgrading — Records + switch pattern matching + HttpClient + Text Blocks alone can cut your code volume by 30%.
+
+The next stage enters **Stage 9: JVM Deep Dive**. From syntax back to runtime — JVM memory model, garbage collection, class loading, performance tuning, bytecode basics. This is the "internal strength" final test for Java engineers — writing Java isn't special; understanding the JVM is what makes a true "Java veteran." See you in the next stage.

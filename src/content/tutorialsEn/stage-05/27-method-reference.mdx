@@ -1,0 +1,499 @@
+---
+title: "Method References and Constructor References"
+chapter: 27
+stage: "Stage 5"
+stageName: "Functional Programming"
+order: 3
+description: "Master the four method reference forms (static, instance, class, constructor) and array constructor references, understand equivalent conversions between method references and Lambdas, and when to use them"
+pubDate: 2026-07-03
+tags: ["Java", "方法引用", "Method Reference", "构造器引用", "数组引用", "函数式编程"]
+---
+
+# Method References and Constructor References
+
+Lambda is already concise enough — `s -> s.length()` is only 11 characters. But Java can go even shorter: `String::length`, 9 characters, and closer to "natural language" expression. This is the **method reference** — Lambda's "minimalist form." When the Lambda you write is just "calling an existing method," you can replace it directly with the method name.
+
+Method references are the finale of the functional programming series. They may seem like syntactic sugar, but they bring code closer to the "declarative" ideal — reading like a description of "what to do" rather than "how to do it."
+
+## 1. What Is a Method Reference
+
+A method reference uses the `::` operator to directly reference an existing method as the implementation of a functional interface.
+
+```java
+// Lambda version
+Function<String, Integer> f1 = s -> s.length();
+
+// Method reference
+Function<String, Integer> f2 = String::length;
+```
+
+Both are completely equivalent — they both mean "take a String and return its length." The only difference is the form: the method reference is more concise and emphasizes the intent to "reuse an existing method."
+
+`::` is a new operator introduced in Java 8, read as "double colon." Its left side is the "method owner" (a class name or object), and its right side is the method name.
+
+## 2. The Four Types of Method References
+
+Method references come in four forms, categorized by "who the method belongs to":
+
+| Form | Syntax | Equivalent Lambda |
+| --- | --- | --- |
+| Static method reference | `ClassName::staticMethod` | `x -＞ ClassName.staticMethod(x)` |
+| Instance method reference (specific object) | `object::method` | `x -＞ object.method(x)` |
+| Class instance method reference | `ClassName::instanceMethod` | `(obj, x) -＞ obj.method(x)` |
+| Constructor reference | `ClassName::new` | `x -＞ new ClassName(x)` |
+
+Plus a special case: **array constructor reference** `Type[]::new`.
+
+Let's go through each in detail.
+
+## 3. Static Method Reference: ClassName::staticMethod
+
+The most intuitive form — references a static method of a class.
+
+```java
+// Lambda
+Function<String, Integer> parser = s -> Integer.parseInt(s);
+
+// Method reference
+Function<String, Integer> parser = Integer::parseInt;
+```
+
+`Integer.parseInt(s)` is a static method call, so we use `Integer::parseInt`.
+
+More examples:
+
+```java
+// Math functions
+Function<Double, Double> sqrt = Math::sqrt;        // x -> Math.sqrt(x)
+UnaryOperator<Double> negate = Math::negateExact;  // x -> Math.negateExact(x)
+
+// Object to String (valueOf is a static method)
+Function<Object, String> toStr = String::valueOf;  // x -> String.valueOf(x)
+```
+
+Static method references have clear semantics: the parameter is the static method's parameter, and the return value is the static method's return value.
+
+## 4. Instance Method Reference: object::method
+
+References an instance method of a **specific object**. This object is determined when the method reference is created.
+
+```java
+String prefix = "Hello, ";
+
+// Lambda
+Consumer<String> c1 = s -> System.out.println(s);
+
+// Method reference (System.out is a specific object)
+Consumer<String> c2 = System.out::println;
+
+// Custom object
+Function<String, String> prepend = prefix::concat;   // s -> prefix.concat(s)
+System.out.println(prepend.apply("World"));   // Hello, World
+```
+
+`System.out` is a specific `PrintStream` object, and `System.out::println` references its `println` method.
+
+This form is commonly used to "pass an object's method as a function":
+
+```java
+List<String> list = new ArrayList<>(List.of("A", "B", "C"));
+
+// Use list's add method as a Consumer
+Consumer<String> adder = list::add;
+adder.accept("D");
+adder.accept("E");
+System.out.println(list);   // [A, B, C, D, E]
+```
+
+## 5. Class Instance Method Reference: ClassName::instanceMethod
+
+This is the most "mind-bending" form, but once understood, it's very powerful.
+
+### 5.1 The First Parameter Becomes the Caller
+
+When you write `ClassName::instanceMethod`, **the Lambda's first parameter becomes the method's caller**, and the remaining parameters become the method's arguments:
+
+```java
+// Lambda: two parameters, first calls toUpperCase
+BiFunction<String, Void, String> f1 = (s, v) -> s.toUpperCase();
+
+// Method reference: String::toUpperCase
+// equivalent to (s) -> s.toUpperCase()
+Function<String, String> upper = String::toUpperCase;
+```
+
+Compared to static method references — in a static method reference, all parameters are the method's parameters; in `ClassName::instanceMethod`, the **first parameter is the caller**.
+
+```java
+// Static method reference: parameter is parseInt's argument
+Function<String, Integer> f1 = Integer::parseInt;
+// equivalent to s -> Integer.parseInt(s)
+
+// Class instance method reference: first parameter is the caller
+Function<String, String> f2 = String::toUpperCase;
+// equivalent to s -> s.toUpperCase()
+```
+
+The difference: `Integer::parseInt`'s parameter is passed to parseInt; `String::toUpperCase`'s parameter is **the object that calls toUpperCase**.
+
+### 5.2 The Two-Parameter Case
+
+```java
+// Lambda: two parameters, first calls compareTo
+Comparator<String> c1 = (a, b) -> a.compareTo(b);
+
+// Method reference: first parameter a becomes the caller, second parameter b becomes compareTo's argument
+Comparator<String> c2 = String::compareTo;
+```
+
+`String::compareTo` is equivalent to `(a, b) -＞ a.compareTo(b)` — the first parameter `a` calls `compareTo`, and the second parameter `b` is passed in.
+
+This form is extremely common in comparators and string operations:
+
+```java
+// Sort lexicographically
+list.sort(String::compareTo);   // equivalent to (a, b) -> a.compareTo(b)
+
+// Contains check
+BiPredicate<String, String> contains = String::contains;
+// equivalent to (s, sub) -> s.contains(sub)
+contains.test("hello world", "world");   // true
+```
+
+### 5.3 Why This Design Exists
+
+At first glance, "the first parameter acts as the caller" seems awkward, but it solves the problem of "instance methods as functions." In object-oriented programming, methods belong to objects — `s.length()` requires an `s` to call it. But in functional programming, we want to treat it as a `String -＞ int` function. `String::length` is exactly this "freeing the method from the object" syntax — the compiler automatically treats the first parameter as the caller.
+
+## 6. Constructor Reference: ClassName::new
+
+A constructor reference uses `ClassName::new`, equivalent to `args -＞ new ClassName(args)`:
+
+```java
+// Lambda
+Supplier<List<String>> s1 = () -> new ArrayList<>();
+
+// Constructor reference
+Supplier<List<String>> s2 = ArrayList::new;
+
+// With parameter
+Function<Integer, ArrayList<String>> f1 = n -> new ArrayList<>(n);
+Function<Integer, ArrayList<String>> f2 = ArrayList::new;   // calls ArrayList(int) constructor
+```
+
+The constructor reference matches the appropriate constructor based on the "target type's" signature — `Supplier` has no parameters, so it matches the no-arg constructor; `Function＜Integer, ...＞` has one parameter, so it matches the `ArrayList(int)` constructor.
+
+### 6.1 Hands-On: Converting Stream Elements to Objects
+
+Constructor references are very useful in Streams — converting a stream of elements "into a stream of objects":
+
+```java
+// Convert a string stream into a Person stream
+List<Person> people = names.stream()
+    .map(Person::new)        // calls new Person(name)
+    .collect(Collectors.toList());
+
+// Convert a string stream into a List
+List<List<String>> lists = sizes.stream()
+    .map(ArrayList::new)     // calls new ArrayList(size)
+    .collect(Collectors.toList());
+```
+
+### 6.2 Copy Constructor
+
+```java
+// Use a copy constructor for defensive copying
+List<String> original = List.of("A", "B", "C");
+ArrayList<String> copy = original.stream()
+    .collect(Collectors.toCollection(ArrayList::new));
+// or
+ArrayList<String> copy2 = new ArrayList<>(original);   // more direct
+```
+
+## 7. Array Constructor Reference: Type[]::new
+
+Arrays are also created with `new`, so there's an "array constructor reference" too:
+
+```java
+// Lambda
+IntFunction<String[]> f1 = n -> new String[n];
+
+// Array constructor reference
+IntFunction<String[]> f2 = String[]::new;
+
+String[] arr = f2.apply(5);   // String[] of length 5
+```
+
+Array constructor references are commonly used in Stream's `toArray`:
+
+```java
+// Convert a stream to an array
+String[] arr = stream.toArray(String[]::new);
+// equivalent to stream.toArray(size -> new String[size]);
+```
+
+`toArray()` without arguments returns `Object[]`, losing type information. `toArray(String[]::new)` returns `String[]` — this is a frequently used technique.
+
+## 8. Method Reference vs Lambda: When to Use Which
+
+Method references are more concise, but **they're not always the right choice**.
+
+**Use method references when**:
+
+- The Lambda body is a single method call, and parameters correspond exactly.
+- The method name clearly expresses intent.
+
+```java
+// ✅ Clear, use method reference
+list.forEach(System.out::println);
+list.sort(String::compareTo);
+names.stream().map(String::toUpperCase).forEach(System.out::println);
+```
+
+**Use Lambda when**:
+
+- The Lambda body has additional logic (more than one method call).
+- Parameters need transformation or processing.
+- The method name doesn't clearly express intent.
+
+```java
+// ❌ Method reference would lose information here
+list.stream().map(Person::getName)            // okay, but you have to guess
+list.stream().map(p -> p.getName())           // clearer
+list.stream().map(p -> p.getName().toLowerCase())   // must use Lambda (extra operation)
+
+// When parameters don't correspond
+ToIntFunction<String> f = s -> s.length();    // Lambda
+// Can't write String::length (semantically the same but sometimes less intuitive than Lambda)
+
+// Calling a static method but needing extra processing
+ToIntFunction<String> f = s -> Integer.parseInt(s.trim());   // has trim, must use Lambda
+```
+
+**Rule of thumb**: If a method reference makes you "understand at a glance," use it; if it makes you "pause to figure it out," use a Lambda.
+
+## 9. Hands-On: Comprehensive Use of the Four Method Reference Types
+
+<CodeRunner code={`import java.util.*;
+import java.util.function.*;
+import java.util.stream.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 静态方法引用
+        System.out.println("--- 静态方法引用 ---");
+        Function<String, Integer> parser = Integer::parseInt;
+        System.out.println("parseInt(42): " + parser.apply("42"));
+
+        List<String> nums = List.of("3", "1", "2");
+        List<Integer> ints = nums.stream().map(Integer::parseInt).collect(Collectors.toList());
+        System.out.println("字符串转数字: " + ints);
+
+        // 2. 实例方法引用（特定对象）
+        System.out.println("\\n--- 实例方法引用（特定对象） ---");
+        String prefix = "Hello, ";
+        Function<String, String> greet = prefix::concat;
+        System.out.println(greet.apply("World"));   // Hello, World
+
+        Consumer<String> printer = System.out::println;
+        printer.accept("用 System.out::println 输出");
+
+        // 3. 类的实例方法引用
+        System.out.println("\\n--- 类的实例方法引用 ---");
+        List<String> names = new ArrayList<>(List.of("Charlie", "Alice", "Bob"));
+        names.sort(String::compareTo);   // 等价于 (a, b) -> a.compareTo(b)
+        System.out.println("排序: " + names);
+
+        names.replaceAll(String::toUpperCase);   // 等价于 s -> s.toUpperCase()
+        System.out.println("全大写: " + names);
+
+        BiPredicate<String, String> contains = String::contains;
+        System.out.println("hello 包含 ell? " + contains.test("hello", "ell"));
+
+        // 4. 构造器引用
+        System.out.println("\\n--- 构造器引用 ---");
+        Supplier<ArrayList<String>> factory = ArrayList::new;
+        ArrayList<String> empty = factory.get();
+        empty.add("构造器引用创建的列表");
+        System.out.println(empty);
+
+        // 把字符串流转成 Person
+        List<String> nameList = List.of("Alice", "Bob", "Charlie");
+        List<Person> people = nameList.stream()
+            .map(Person::new)
+            .collect(Collectors.toList());
+        people.forEach(System.out::println);
+
+        // 5. 数组构造引用
+        System.out.println("\\n--- 数组构造引用 ---");
+        IntFunction<String[]> arrFactory = String[]::new;
+        String[] arr = arrFactory.apply(3);
+        arr[0] = "A"; arr[1] = "B"; arr[2] = "C";
+        System.out.println(Arrays.toString(arr));
+
+        // Stream.toArray
+        String[] namesArr = nameList.stream().toArray(String[]::new);
+        System.out.println("流转数组: " + Arrays.toString(namesArr));
+
+        // 6. 方法引用的组合：分步处理
+        System.out.println("\\n--- 综合实战：数据处理 ---");
+        List<String> data = List.of("  alice  ", "  BOB  ", "  Charlie  ");
+
+        // 全部用方法引用
+        List<String> cleaned = data.stream()
+            .map(String::strip)            // 去空格
+            .map(String::toLowerCase)      // 转小写
+            .sorted(String::compareTo)     // 排序
+            .collect(Collectors.toList());
+        System.out.println("清洗后: " + cleaned);
+
+        // 7. 构造器引用做工厂
+        System.out.println("\\n--- 构造器引用做工厂 ---");
+        Map<String, Supplier<Shape>> factories = Map.of(
+            "circle", Circle::new,
+            "square", Square::new
+        );
+
+        Shape s1 = factories.get("circle").get();
+        Shape s2 = factories.get("square").get();
+        s1.draw();
+        s2.draw();
+
+        // 8. 方法引用在 Collectors 中的应用
+        System.out.println("\\n--- Collectors 中的方法引用 ---");
+        List<Person> allPeople = List.of(
+            new Person("Alice"), new Person("Bob"), new Person("Charlie")
+        );
+
+        // toList 中的 ArrayList::new
+        ArrayList<Person> list = allPeople.stream()
+            .collect(Collectors.toCollection(ArrayList::new));
+        System.out.println("toCollection: " + list);
+
+        // groupingBy + mapping
+        Map<Character, List<Person>> byFirstLetter = allPeople.stream()
+            .collect(Collectors.groupingBy(p -> p.getName().charAt(0)));
+        System.out.println("按首字母分组: " + byFirstLetter);
+    }
+}
+
+class Person {
+    private final String name;
+
+    Person() { this.name = "匿名"; }
+    Person(String name) { this.name = name; }
+
+    String getName() { return name; }
+
+    @Override
+    public String toString() {
+        return "Person(" + name + ")";
+    }
+}
+
+interface Shape { void draw(); }
+class Circle implements Shape {
+    public void draw() { System.out.println("画圆 ○"); }
+}
+class Square implements Shape {
+    public void draw() { System.out.println("画方 □"); }
+}`} />
+
+## 10. Method Reference Equivalent Conversion Cheat Sheet
+
+Translating method references to Lambdas depends on "who the method belongs to":
+
+| Method Reference | Equivalent Lambda | Notes |
+| --- | --- | --- |
+| `Integer::parseInt` | `s -＞ Integer.parseInt(s)` | Static method |
+| `System.out::println` | `s -＞ System.out.println(s)` | Specific object's method |
+| `String::length` | `s -＞ s.length()` | Class instance method (one param) |
+| `String::compareTo` | `(a, b) -＞ a.compareTo(b)` | Class instance method (two params) |
+| `ArrayList::new` | `() -＞ new ArrayList＜＞()` | No-arg constructor |
+| `ArrayList::new` | `n -＞ new ArrayList＜＞(n)` | One-arg constructor |
+| `String[]::new` | `n -＞ new String[n]` | Array constructor |
+
+Understand this rule: **For class instance method references, the first parameter is the caller, and the rest are method arguments.** The other three forms have parameters that correspond directly.
+
+## 11. Method Reference Pitfalls
+
+### 11.1 Overload Ambiguity
+
+When a class has multiple overloaded methods with the same name, a method reference can be ambiguous:
+
+```java
+// ArrayList has multiple add methods: add(E) and add(int, E)
+// This one is OK, because Consumer<String> has only one parameter
+Consumer<String> c = list::add;
+
+// But sometimes the compiler can't determine which overload to use
+// You need to write an explicit Lambda to disambiguate
+```
+
+### 11.2 Generic Method References
+
+When referencing generic methods, type inference is sometimes insufficient:
+
+```java
+// Usually OK
+Function<String, List<String>> f = ArrayList::new;
+
+// Occasionally needs explicit typing
+Function<String, List<String>> f = (Function<String, List<String>>) ArrayList::new;
+```
+
+### 11.3 Method References Can't Have Extra Logic
+
+```java
+// ❌ Can't use a method reference (has a trim operation)
+Function<String, Integer> f = s -> Integer.parseInt(s.trim());
+
+// ✅ Have to split it into two steps
+Function<String, String> trim = String::strip;
+Function<String, Integer> parse = Integer::parseInt;
+Function<String, Integer> combined = trim.andThen(parse);
+```
+
+## 12. Chapter Summary
+
+| Form | Syntax | Example | Equivalent Lambda |
+| --- | --- | --- | --- |
+| Static method reference | `ClassName::staticMethod` | `Integer::parseInt` | `s -＞ Integer.parseInt(s)` |
+| Instance method reference | `object::method` | `System.out::println` | `s -＞ System.out.println(s)` |
+| Class instance method reference | `ClassName::instanceMethod` | `String::length` | `s -＞ s.length()` |
+| Constructor reference | `ClassName::new` | `ArrayList::new` | `() -＞ new ArrayList＜＞()` |
+| Array constructor reference | `Type[]::new` | `String[]::new` | `n -＞ new String[n]` |
+
+**Core rules**:
+
+- For the first three forms, parameters correspond to method arguments.
+- For class instance method references, the **first parameter is the caller**.
+- Constructor references match constructors by target type signature.
+
+**Usage principles**:
+
+- Method references make code more concise, but **only use them when you can "understand at a glance."**
+- When there's extra logic, parameter transformation, or overload ambiguity, use Lambda.
+- Don't force method references just to "look advanced" — readability comes first.
+
+## Conclusion: The Beauty of Minimalism
+
+Method references are the "last mile" of Java functional programming. They compress Lambda further to "just the method name," making code read like prose:
+
+```java
+names.stream()
+    .map(String::toUpperCase)
+    .sorted()
+    .forEach(System.out::println);
+```
+
+Reading this line is like reading a sentence: "take the names stream, uppercase them, sort them, print them" — no `s -＞`, no `{ }`, no `return`, just "what to do." This is the ideal form of declarative programming.
+
+With this, the three chapters of Stage 5 "Functional Programming" are complete:
+
+- **Lambda Expressions** — freed functions from objects; `(x) -＞ x * x` is the new form of functions.
+- **Built-in Functional Interfaces** — `Function`, `Predicate`, `Consumer`, `Supplier` are Lambda's standard stage.
+- **Method References** — `String::length` compresses Lambda one step further, approaching the extreme of declarative style.
+
+This set of functional programming capabilities, combined with the Stream API from Stage 4, forms the "modern style" of modern Java. Master them, and your Java code will transform from "verbose imperative" to "elegant declarative" — this is the path every Java programmer should take from Java 8 to today.
+
+The Java world is vast; the Collections Framework and functional programming are just two of its cornerstones. The journey ahead still has concurrent programming, IO/NIO, JVM internals, the Spring ecosystem... but with these two cornerstones beneath you, you're standing on solid ground, ready to gaze at more distant horizons.

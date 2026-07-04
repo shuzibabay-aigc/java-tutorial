@@ -1,0 +1,486 @@
+---
+title: "Synchronization Mechanisms"
+chapter: 38
+stage: "Stage 7"
+stageName: "Concurrent Programming"
+order: 5
+description: "Deep dive into the monitor underneath synchronized, volatile visibility and reordering prohibition, ThreadLocal thread-local variables, wait/notify inter-thread communication, and the MESI cache coherence protocol"
+pubDate: 2026-07-03
+tags: ["Java", "synchronized", "volatile", "ThreadLocal", "wait", "notify", "MESI"]
+---
+
+# Synchronization Mechanisms
+
+In the previous chapter we built the theoretical framework of the JMM — visibility, ordering, atomicity, happens-before. This chapter covers the **implementation tools**: Java's three major synchronization mechanisms — `synchronized`, `volatile`, `ThreadLocal` — along with the supporting `wait`/`notify` inter-thread communication.
+
+Why is this chapter important? Because 90% of Java concurrent code uses these very keywords. `synchronized` is a high-frequency interview topic — `monitor`, `monitorenter`, `monitorexit`, lock upgrades; the "does not guarantee atomicity" of `volatile` is a classic pitfall; `ThreadLocal` is the backbone of connection pools, transaction management, and request context; and `wait`/`notify` is the foundation of the producer-consumer pattern. This chapter covers them all in one sweep.
+
+## 1. The synchronized Keyword
+
+`synchronized` is Java's built-in locking mechanism — it can decorate methods, and it can decorate code blocks.
+
+### 1.1 Three Uses
+
+```java
+public class SyncDemo {
+    // 1. Synchronized instance method — the lock is this (the current instance)
+    public synchronized void method1() { /* ... */ }
+
+    // 2. Synchronized static method — the lock is the Class object (SyncDemo.class)
+    public static synchronized void method2() { /* ... */ }
+
+    // 3. Synchronized code block — the lock is the object in parentheses
+    public void method3() {
+        synchronized(this) { /* lock this */ }
+        synchronized(SyncDemo.class) { /* lock the Class */ }
+        Object lock = new Object();
+        synchronized(lock) { /* lock any object */ }
+    }
+}
+```
+
+**Key points**:
+
+- `synchronized` locks **objects**, not code. Every Java object in the heap has an **object header**, which stores the `Mark Word` — the lock state is recorded here.
+- An instance method locks `this` — multiple `synchronized` methods on the same instance are mutually exclusive.
+- A static method locks the `Class` object — static synchronized methods on all instances of the class are mutually exclusive.
+- A synchronized code block can specify any object as the lock — more flexible, finer lock granularity.
+
+### 1.2 The Underlying Principle of synchronized: monitor
+
+Under the hood, `synchronized` is built on the **monitor**. Every Java object is associated with a monitor (implicitly).
+
+**Bytecode for a synchronized block**:
+
+```
+monitorenter      // enter the monitor, count++
+// critical section code
+monitorexit       // exit the monitor, count--
+// exception handler: another monitorexit ensures release on exception
+```
+
+Logic of `monitorenter`:
+
+1. If the monitor's counter is 0, the current thread acquires the monitor and the counter is set to 1.
+2. If the current thread already holds the monitor (**reentrant**), the counter is incremented by 1.
+3. If the monitor is held by another thread, the current thread blocks, waiting for the monitor to be released.
+
+`monitorexit` decrements the counter by 1; when it reaches zero, the monitor is released and waiting threads are woken up.
+
+**Synchronized methods** do not have `monitorenter`/`monitorexit`; instead, they add the `ACC_SYNCHRONIZED` flag in the method's `flags` — the JVM checks this flag when invoking the method and automatically locks/unlocks.
+
+### 1.3 Lock Upgrades (JDK 6 Optimization)
+
+Before JDK 6, `synchronized` was a heavyweight lock — it directly suspended threads at the OS level, which was expensive. JDK 6 introduced the "lock upgrade" mechanism, allowing `synchronized` to approach lock-free performance in low-contention scenarios:
+
+| Lock state | Trigger | Implementation | Performance |
+| --- | --- | --- | --- |
+| **Unlocked** | Object initial state | Mark Word has the unlocked flag | Fastest |
+| **Biased lock** | First thread accesses | Mark Word records the thread ID | Almost no overhead |
+| **Lightweight lock** | Multi-thread alternating access, no real contention | Spin CAS | Fast if spin succeeds |
+| **Heavyweight lock** | Real contention, spin fails | OS mutex, thread suspended | Slow but robust |
+
+Upgrades are one-way — once a heavyweight lock is reached, there is no downgrade. But biased locks can be revoked and re-biased at safepoints.
+
+> **Note**: From JDK 15, biased locking is disabled by default (`-XX:-UseBiasedLocking`), and JDK 18 deprecated it. The reason is that modern application contention patterns have changed, and the maintenance cost of biased locks outweighs the benefit. New code should not rely on biased lock optimization.
+
+## 2. The volatile Keyword
+
+`volatile` is a lightweight synchronization mechanism — it guarantees **visibility** and **ordering**, but **not atomicity**.
+
+### 2.1 Guaranteeing Visibility
+
+Reads of a `volatile` variable go directly to main memory, and writes go directly to main memory — bypassing the "working memory" delay of CPU caches.
+
+```java
+class Flag {
+    volatile boolean stop = false;   // volatile guarantees visibility
+}
+
+// Thread A: after stop = true, all threads see it immediately
+// Thread B: while(!stop) can sense the change in stop
+```
+
+### 2.2 Forbidding Instruction Reordering
+
+`volatile` inserts memory barriers (detailed in Chapter 37) to forbid reordering:
+
+- Insert StoreStore before a volatile write — all prior normal writes precede the volatile write.
+- Insert StoreLoad after a volatile write — the volatile write precedes all subsequent reads/writes.
+- Insert LoadLoad and LoadStore after a volatile read — the volatile read precedes all subsequent reads/writes.
+
+This is why "double-checked locking singleton" must add `volatile` — to forbid "allocate memory → assign reference → initialize object" from being reordered.
+
+### 2.3 volatile Does Not Guarantee Atomicity (the i++ Problem)
+
+This is `volatile`'s most classic pitfall:
+
+```java
+class Counter {
+    volatile int count = 0;
+    public void increment() {
+        count++;   // even though count is volatile, still unsafe!
+    }
+}
+```
+
+`volatile` guarantees that the read and the write of `count` are each atomic, but `count++` is "read-modify-write" in three steps — `volatile` cannot make these three steps into a single atomic operation. Multi-threading still loses updates.
+
+**Use cases for `volatile`**:
+
+- **State flags**: `volatile boolean stop` — one thread writes, multiple threads read.
+- **DCL singletons**: prevent an uninitialized object from being referenced.
+- **One-shot publication**: publish an immutable object, read-only after initialization.
+
+**Not suitable**: `count++`, compound operations, check-then-act. For these, use `synchronized` or atomic classes.
+
+## 3. CPU Cache Coherence Protocol: MESI
+
+`volatile`'s visibility is implemented by CPU cache coherence protocols — the dominant one being the **MESI protocol**.
+
+### 3.1 The Four Cache Line States
+
+| State | Meaning | Valid | Exclusive | Modified |
+| --- | --- | --- | --- | --- |
+| **M (Modified)** | Modified, inconsistent with main memory | ✓ | ✓ | ✓ |
+| **E (Exclusive)** | Exclusive, consistent with main memory | ✓ | ✓ | ✗ |
+| **S (Shared)** | Shared, multiple CPUs cache the same copy, consistent with main memory | ✓ | ✗ | ✗ |
+| **I (Invalid)** | Invalid, cache line invalidated | ✗ | — | — |
+
+### 3.2 MESI State Transitions
+
+- CPU reads a cache line:
+  - If locally M/E/S → read directly
+  - If I → send a message to other CPUs, demote the corresponding cache line to S or I, then load it locally as E or S
+- CPU writes a cache line:
+  - If locally M → write directly
+  - If E → upgrade to M, write
+  - If S → notify other CPUs to set their corresponding line to I (Invalidate), then upgrade to M
+  - If I → same as S
+
+This protocol ensures: **when one CPU modifies a cache line, the corresponding cache lines on other CPUs are invalidated** — the next read must reload from main memory (or from the modifier's cache). This is the physical foundation of volatile writes being immediately visible to other CPUs.
+
+### 3.3 Store Buffer and Invalidate Queue
+
+MESI's "notify-and-wait" has latency — when CPU A writes, it must wait for all other CPUs to confirm Invalidate before it can write. This wastes CPU cycles. Hardware introduces two buffers:
+
+- **Store Buffer**: the CPU puts the write into the Store Buffer first and continues with other work; the actual cache write happens after other CPUs confirm.
+- **Invalidate Queue**: when a CPU receives an Invalidate message, it immediately replies with an acknowledgment, but the actual cache cleanup is queued for later.
+
+These two buffers improve performance, but also introduce "memory system reordering" — the order CPU A sees for writes may differ from what CPU B sees. **Memory barriers** are instructions used to flush the Store Buffer / synchronize the Invalidate Queue, forcing visibility.
+
+## 4. ThreadLocal: Thread-Local Variables
+
+`ThreadLocal` gives each thread its own **independent copy** of a variable — there is no sharing, so naturally no races.
+
+### 4.1 Basic Usage
+
+```java
+ThreadLocal<SimpleDateFormat> fmt = ThreadLocal.withInitial(
+    () -> new SimpleDateFormat("yyyy-MM-dd"));
+
+// Each thread gets its own SimpleDateFormat
+String date = fmt.get().format(new Date());
+fmt.remove();   // clean up after use to prevent memory leaks
+```
+
+`SimpleDateFormat` is not thread-safe — sharing it across threads causes bugs. `ThreadLocal` is the classic solution: one instance per thread.
+
+### 4.2 How ThreadLocal Is Implemented
+
+Note `ThreadLocal` is not "Map＜Thread, Value＞" — instead, **the `Thread` object holds a `ThreadLocalMap`**:
+
+```
+Thread
+  └── ThreadLocalMap threadLocals
+        ├── Entry: key=ThreadLocal1 (weak ref), value=val1
+        ├── Entry: key=ThreadLocal2 (weak ref), value=val2
+        └── ...
+```
+
+- `ThreadLocal.set(value)` is actually `Thread.currentThread.threadLocals.put(this, value)`.
+- `ThreadLocal.get()` is actually `Thread.currentThread.threadLocals.get(this)`.
+
+**Why the key is a weak reference**: to prevent the `ThreadLocal` object itself from being uncollectable. But the value is a strong reference — **this is the root cause of memory leaks**.
+
+### 4.3 The Memory Leak Problem
+
+When a thread ends, `Thread.threadLocals` is reclaimed. But **threads in a thread pool are long-lived** — if a `ThreadLocal` is not `remove`-d after use, the value just hangs there, causing a memory leak.
+
+```java
+ThreadLocal<BigObject> tl = new ThreadLocal<>();
+tl.set(new BigObject());   // thread in a pool
+// ... forgot to remove
+// BigObject will never be collected until the thread dies
+```
+
+**Rule**: `ThreadLocal` must be `remove()`-d after use, ideally in `try-finally`:
+
+```java
+try {
+    tl.set(value);
+    // business logic
+} finally {
+    tl.remove();   // must clean up!
+}
+```
+
+### 4.4 Typical Applications of ThreadLocal
+
+- **Sharing SimpleDateFormat**: one instance per thread.
+- **Database connection / transaction context**: `TransactionSynchronizationManager`.
+- **Request context**: user traceId, tenant ID, etc.
+- **Request-scoped beans**: Spring's `RequestContextHolder`.
+
+## 5. Inter-Thread Communication: wait / notify / notifyAll
+
+`wait`/`notify`/`notifyAll` are methods on `Object` — every object has them. They are used for "inter-thread collaboration": one thread waits for a condition to become true, and another thread notifies it.
+
+### 5.1 Must Be Inside a synchronized Block
+
+```java
+Object lock = new Object();
+synchronized (lock) {
+    while (!condition) {   // use while, not if
+        lock.wait();       // releases the lock, enters WAITING
+    }
+    // logic after the condition is satisfied
+}
+
+// Another thread
+synchronized (lock) {
+    condition = true;
+    lock.notifyAll();      // wake up all waiting threads
+}
+```
+
+**Why it must be inside a synchronized block**:
+
+`wait` **releases the lock and blocks**, waiting to be woken up, then **re-acquires the lock** before returning. If not inside a synchronized block, there is no lock to release — it throws `IllegalMonitorStateException`.
+
+The deeper reason: checking the condition and waiting must be atomic — otherwise a "missed signal" can occur (you check the condition, then before you call `wait`, another thread calls `notify`). `synchronized` provides this atomicity.
+
+### 5.2 wait vs sleep
+
+| Dimension | `wait` | `sleep` |
+| --- | --- | --- |
+| Owner | `Object` | `Thread` |
+| Releases lock | **Yes** | No |
+| Where used | Must be in a synchronized block | Anywhere |
+| Wake-up | `notify`/`notifyAll`/timeout/interrupt | timeout/interrupt |
+| State | WAITING / TIMED_WAITING | TIMED_WAITING |
+
+### 5.3 notify vs notifyAll
+
+- **notify**: wakes up **one** waiting thread — which one is chosen by the JVM, not controllable.
+- **notifyAll**: wakes up **all** waiting threads — they compete for the lock, only one gets it, the rest wait again.
+
+**Why `notifyAll` is recommended**: `notify` may wake the wrong thread (e.g. multiple conditions sharing one lock, waking a thread waiting on the wrong condition), causing a "lost signal." `notifyAll` is safe but more expensive (waking everyone). Classic producer-consumer scenarios mostly use `notifyAll`, or use the more advanced `Condition` (Chapter 40).
+
+### 5.4 Why while Instead of if
+
+```java
+synchronized (lock) {
+    while (!condition) {   // ✓ use while
+        lock.wait();
+    }
+}
+```
+
+After a thread is woken up, **the condition may no longer be satisfied** — another thread may have grabbed the lock before you and modified the condition (spurious wakeup / competitive wake-up). Use `while` to re-check; use `if` and you skip the check — a classic bug.
+
+## 6. Hands-On: wait/notify for Producer-Consumer
+
+The example below implements the classic producer-consumer pattern using `wait`/`notifyAll` — a bounded buffer where producers wait when full and consumers wait when empty. It also demonstrates `volatile` visibility and `ThreadLocal` usage.
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.text.SimpleDateFormat;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // === 1. wait/notify producer-consumer ===
+        System.out.println("=== Producer-Consumer ===");
+        Buffer buffer = new Buffer(5);
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+
+        // 2 producers, 2 consumers
+        pool.submit(new Producer(buffer, "P1"));
+        pool.submit(new Producer(buffer, "P2"));
+        pool.submit(new Consumer(buffer, "C1"));
+        pool.submit(new Consumer(buffer, "C2"));
+
+        Thread.sleep(2000);
+        pool.shutdownNow();
+        pool.awaitTermination(2, TimeUnit.SECONDS);
+        System.out.println("Total produced: " + buffer.totalProduced
+            + ", total consumed: " + buffer.totalConsumed);
+
+        // === 2. ThreadLocal demo: SimpleDateFormat ===
+        System.out.println("\\n=== ThreadLocal Demo ===");
+        ThreadLocal<SimpleDateFormat> fmtLocal = ThreadLocal.withInitial(
+            () -> new SimpleDateFormat("HH:mm:ss.SSS"));
+
+        ExecutorService fmtPool = Executors.newFixedThreadPool(3);
+        for (int i = 0; i < 3; i++) {
+            fmtPool.submit(() -> {
+                String name = Thread.currentThread().getName();
+                String fmt = fmtLocal.get().format(new Date());
+                System.out.println(name + " time: " + fmt + ", fmt hash: "
+                    + System.identityHashCode(fmtLocal.get()));
+                fmtLocal.remove();   // must clean up
+            });
+        }
+        fmtPool.shutdown();
+        fmtPool.awaitTermination(1, TimeUnit.SECONDS);
+
+        // === 3. volatile state flag ===
+        System.out.println("\\n=== volatile State Flag ===");
+        VolatileFlag flag = new VolatileFlag();
+        Thread worker = new Thread(() -> {
+            int count = 0;
+            while (!flag.stop) {
+                count++;
+            }
+            System.out.println("worker received stop, looped " + count + " times");
+        });
+        worker.start();
+        Thread.sleep(50);
+        flag.stop = true;   // volatile guarantees visibility
+        worker.join(1000);
+
+        // === 4. synchronized lock object differences ===
+        System.out.println("\\n=== synchronized Lock Granularity ===");
+        SyncDemo demo = new SyncDemo();
+        Thread a = new Thread(() -> demo.syncMethod("A"), "T-A");
+        Thread b = new Thread(() -> demo.syncMethod("B"), "T-B");
+        a.start(); b.start();
+        a.join(); b.join();
+    }
+}
+
+// === Bounded buffer ===
+class Buffer {
+    private final Queue<Integer> queue = new LinkedList<>();
+    private final int capacity;
+    final AtomicInteger totalProduced = new java.util.concurrent.atomic.AtomicInteger();
+    final AtomicInteger totalConsumed = new java.util.concurrent.atomic.AtomicInteger();
+
+    Buffer(int capacity) { this.capacity = capacity; }
+
+    public synchronized void put(int value, String who) throws InterruptedException {
+        while (queue.size() == capacity) {
+            System.out.println(who + ": buffer full, waiting...");
+            wait();
+        }
+        queue.offer(value);
+        totalProduced.incrementAndGet();
+        System.out.println(who + " produced " + value + " (size=" + queue.size() + ")");
+        notifyAll();   // notify consumers
+    }
+
+    public synchronized int take(String who) throws InterruptedException {
+        while (queue.isEmpty()) {
+            System.out.println(who + ": buffer empty, waiting...");
+            wait();
+        }
+        int value = queue.poll();
+        totalConsumed.incrementAndGet();
+        System.out.println("  " + who + " consumed " + value + " (size=" + queue.size() + ")");
+        notifyAll();   // notify producers
+        return value;
+    }
+}
+
+class Producer implements Runnable {
+    private final Buffer buffer;
+    private final String name;
+    Producer(Buffer b, String n) { buffer = b; name = n; }
+    public void run() {
+        try {
+            int i = 0;
+            while (!Thread.currentThread().isInterrupted()) {
+                buffer.put(i++, name);
+                Thread.sleep(50);
+            }
+        } catch (InterruptedException e) {
+            // normal exit
+        }
+    }
+}
+
+class Consumer implements Runnable {
+    private final Buffer buffer;
+    private final String name;
+    Consumer(Buffer b, String n) { buffer = b; name = n; }
+    public void run() {
+        try {
+            while (!Thread.currentThread().isInterrupted()) {
+                buffer.take(name);
+                Thread.sleep(80);
+            }
+        } catch (InterruptedException e) {
+            // normal exit
+        }
+    }
+}
+
+class VolatileFlag {
+    volatile boolean stop = false;
+}
+
+class SyncDemo {
+    public synchronized void syncMethod(String tag) {
+        System.out.println(tag + " entered syncMethod, holding lock");
+        try { Thread.sleep(100); } catch (InterruptedException e) {}
+        System.out.println(tag + " releasing lock");
+    }
+}`} />
+
+> **Key observations**:
+> - **Producer-consumer**: when the buffer is full, producers `wait`; when empty, consumers `wait`; after each operation, `notifyAll` wakes the other side.
+> - **Use `while`, not `if`** — after `wait` returns, you must re-check the condition.
+> - **`notifyAll` rather than `notify`** — avoids lost signals.
+> - **`ThreadLocal`**: each thread's `SimpleDateFormat` has a different hash — independent copies. `remove` after use.
+> - **`volatile`**: the worker can sense `stop = true` and exit immediately.
+> - **`synchronized` instance methods**: T-A and T-B enter serially — synchronized methods on the same instance are mutually exclusive.
+
+## 7. Chapter Summary
+
+| Mechanism | Guarantees | Use case |
+| --- | --- | --- |
+| `synchronized` method/block | Atomic + visible + ordered | Compound operations, critical sections |
+| `volatile` variable | Visible + ordered (**not atomic**) | State flags, DCL, one-shot publication |
+| `ThreadLocal` | Isolation (no sharing) | One instance per thread (e.g. DateFormat) |
+| `wait`/`notify` | Thread collaboration | Producer-consumer, condition waiting |
+
+| Concept | Key points |
+| --- | --- |
+| monitor | Under the hood of `synchronized`; monitorenter/monitorexit; counter-based reentrancy |
+| Lock upgrade | Unlocked → biased → lightweight (spin) → heavyweight (OS mutex); biased locking disabled by default in JDK 15+ |
+| volatile barriers | StoreStore before write, StoreLoad after write, LoadLoad + LoadStore after read |
+| volatile not atomic | `i++` is still unsafe; compound operations need locks or atomic classes |
+| MESI | M/E/S/I states; writes Invalidate other cache lines |
+| ThreadLocal implementation | `Thread.threadLocals` is a `ThreadLocalMap`; key is a weak reference |
+| ThreadLocal memory leak | Under a thread pool, the value is not released; must `remove()` |
+| wait/notify must be in a sync block | Prevents missed signals; without a lock throws `IllegalMonitorStateException` |
+| while not if | Re-check the condition after `wait` returns; prevents spurious wakeups |
+
+**Mnemonics**:
+
+- **synchronized locks objects** — instance methods lock `this`, static methods lock the Class, blocks lock the object in parentheses.
+- **volatile's three guarantees** — visible, ordered, **not atomic**. `i++` is still unsafe with it.
+- **ThreadLocal is the Thread's Map** — not a global Map; key is weak reference but value is strong reference; must `remove`.
+- **wait releases the lock, sleep does not** — high-frequency interview question.
+- **wait must be inside a synchronized block** — otherwise `IllegalMonitorStateException`.
+- **Use while to check the condition** — `if` is a bug source.
+
+## Conclusion: From Synchronization to the Evolution of Locks
+
+This chapter covered Java's most basic synchronization mechanisms — `synchronized`/`volatile`/`ThreadLocal`/`wait`/`notify`. They solve most synchronization problems, but have limitations:
+
+- `synchronized` cannot "interrupt a waiting lock," "acquire with a timeout," or "try to acquire."
+- `wait`/`notify` only has one wait queue; it cannot target different conditions.
+- `volatile` does not guarantee atomicity.
+
+The next chapter covers typical concurrency problems — deadlocks, starvation, livelock, false sharing — the pits you fall into when synchronization is misused. After that, Chapter 40 brings in `Lock`/`Condition`/`ReadWriteLock`/`StampedLock` and other more powerful synchronizers, making up for the shortcomings of `synchronized`/`wait`/`notify` (such as `tryLock` to prevent deadlocks).

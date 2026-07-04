@@ -1,0 +1,419 @@
+---
+title: "并发典型问题"
+chapter: 39
+stage: "第七阶段"
+stageName: "并发编程"
+order: 6
+description: "深入死锁四个必要条件与检测预防、饥饿与公平性、活锁、嵌套监视器死锁、虚假共享与 @Contended 注解"
+pubDate: 2026-07-03
+tags: ["Java", "死锁", "饥饿", "活锁", "虚假共享", "公平锁"]
+---
+
+# 并发典型问题
+
+前面几章我们学会了"开线程"和"加锁"。但锁用得不对，会引发更隐蔽、更难调试的问题——这就是这一章的主题：**并发典型问题**。
+
+死锁、活锁、饥饿、虚假共享——这些是单线程程序永远遇不到、但并发程序家常便饭的"陷阱"。其中**死锁**最经典也最致命，曾被戏称为"并发编程的头号杀手"。一次生产环境的死锁能让整个服务停摆，日志看不出明显异常，重启就好、过段时间又复发——这种 bug 会让值班工程师彻夜难眠。
+
+## 一、死锁（Deadlock）
+
+### 1.1 死锁是什么
+
+**死锁**：两个或多个线程互相持有对方需要的锁，导致永远等待。
+
+经典场景：
+
+```
+线程 A 持有锁 1，等待锁 2
+线程 B 持有锁 2，等待锁 1
+→ 谁也不松手，永远等下去
+```
+
+代码示例：
+
+```java
+Object lock1 = new Object();
+Object lock2 = new Object();
+
+// 线程 A：先拿 lock1，再拿 lock2
+new Thread(() -> {
+    synchronized (lock1) {
+        sleep(100);
+        synchronized (lock2) { /* ... */ }
+    }
+}).start();
+
+// 线程 B：先拿 lock2，再拿 lock1
+new Thread(() -> {
+    synchronized (lock2) {
+        sleep(100);
+        synchronized (lock1) { /* ... */ }
+    }
+}).start();
+// 死锁！
+```
+
+### 1.2 死锁的四个必要条件
+
+Coffman 在 1971 年提出，**死锁发生必须同时满足**四个条件——破坏任何一个就能预防死锁：
+
+| 条件 | 含义 |
+| --- | --- |
+| **互斥（Mutual Exclusion）** | 资源同一时刻只能被一个线程持有 |
+| **占有且等待（Hold and Wait）** | 线程持有资源时，可以请求新资源 |
+| **不可抢占（No Preemption）** | 已分配的资源不能被强制剥夺，只能线程主动释放 |
+| **循环等待（Circular Wait）** | 多个线程形成"我等你、你等我"的循环链 |
+
+### 1.3 死锁的预防
+
+破坏四个条件之一：
+
+- **破坏"互斥"**：用读写锁、`StampedLock` 让读不互斥；用 CAS 无锁算法。但很多场景互斥不可避免。
+- **破坏"占有且等待"**：一次性申请所有资源——把多把锁合并成一把，或先获取"全局锁"再获取细粒度锁。
+- **破坏"不可抢占"**：用 `tryLock(timeout)` 替代阻塞 `lock`——拿不到就释放已有锁重试。
+- **破坏"循环等待"**：所有线程**按固定顺序**获取锁——这是最常用的预防策略。
+
+```java
+// 破坏循环等待：所有线程按 lock1 → lock2 顺序加锁
+synchronized (lock1) {
+    synchronized (lock2) { /* ... */ }
+}
+```
+
+### 1.4 死锁的检测
+
+JDK 自带的**死锁检测工具**——`jstack`、`jconsole`、`VisualVM` 都能自动检测死锁。代码里也可以用 `ThreadMXBean`：
+
+```java
+ThreadMXBean bean = ManagementFactory.getThreadMXBean();
+long[] deadlockedThreads = bean.findDeadlockedThreads();
+if (deadlockedThreads != null) {
+    System.out.println("检测到死锁！");
+}
+```
+
+`ThreadMXBean.findDeadlockedThreads()` 检测 monitor 死锁；`findMonitorDeadlockedThreads()` 也检测 `synchronized` 死锁。但 JUC 锁（`ReentrantLock`）的死锁需要 `findDeadlockedThreads()` 才能检测。
+
+## 二、饥饿（Starvation）与公平性（Fairness）
+
+### 2.1 饥饿
+
+**饥饿**：线程长时间拿不到资源，无法执行。
+
+典型场景：`synchronized` 是**非公平锁**——锁释放时所有等待线程"抢"，某些线程可能一直抢不到。优先级低的线程或一直被新来的线程插队时，会饿死。
+
+```java
+// 非公平锁：新来的线程可能立刻抢到，老线程一直等
+ReentrantLock lock = new ReentrantLock();   // 默认非公平
+```
+
+### 2.2 公平锁
+
+**公平锁**：线程按"先来后到"的顺序获取锁——避免饥饿。
+
+```java
+ReentrantLock lock = new ReentrantLock(true);   // 公平锁
+```
+
+公平锁的实现：内部用一个 FIFO 队列，新线程要入队等待，不能插队。
+
+**代价**：公平锁吞吐量比非公平锁低 5%-20%。因为线程切换开销大——非公平锁允许新线程"插队"立即获取锁，省去了唤醒队列线程的开销。
+
+**实践**：默认用非公平锁（吞吐量优先），只在确有饥饿问题时才用公平锁。大多数场景 `synchronized` 的非公平性不会导致明显饥饿。
+
+## 三、活锁（Livelock）
+
+**活锁**：线程没阻塞，一直在跑，但任务没进展——互相让步导致谁也做不下去。
+
+经典比喻：两个人在走廊迎面走来，都向同一边让路，结果还是撞上；再让，再撞；再让……无限循环。
+
+```java
+// 线程 A：发现冲突，后退重试
+// 线程 B：发现冲突，后退重试
+// 两人同步后退 → 同步重试 → 又冲突 → ...
+```
+
+死锁是"等死"，活锁是"忙死"——CPU 占着，事没干。活锁更难诊断，因为线程没阻塞，监控工具看不出异常。
+
+**解决方法**：
+
+- **引入随机退避**——重试时加随机延迟，错开两人的节奏。
+- **改变重试策略**——不是机械重试，而是改变行为（如选不同的资源）。
+
+以太网的 CSMA/CD 协议就是用"随机退避"解决活锁的经典案例。
+
+## 四、嵌套监视器死锁（Nested Monitor Lockout）
+
+**嵌套监视器死锁** 比普通死锁更隐蔽：线程持有锁 A，在 A 内部 wait 锁 B——锁 A 永远不释放，导致其他线程也无法唤醒它。
+
+```java
+class BadQueue {
+    Object lockA = new Object();
+    Object lockB = new Object();
+
+    public void badMethod() throws InterruptedException {
+        synchronized (lockA) {
+            synchronized (lockB) {
+                lockB.wait();   // 释放 lockB，但不释放 lockA！
+            }
+        }
+    }
+
+    public void wake() {
+        synchronized (lockA) {   // 永远拿不到 lockA
+            synchronized (lockB) {
+                lockB.notify();
+            }
+        }
+    }
+}
+```
+
+线程 1 在 `lockB.wait()` 时释放了 lockB，但 lockA 仍持有。线程 2 想 `notify` 必须先拿 lockA——拿不到，永远阻塞。线程 1 等通知，线程 2 等锁——死锁。
+
+**避免方法**：不要在持有一把锁时 wait 另一把锁。`wait` 应该在获取锁的同一对象上调用。
+
+## 五、虚假共享（False Sharing）与 @Contended
+
+### 5.1 CPU 缓存行
+
+CPU 缓存以**缓存行（Cache Line）** 为单位加载，通常是 **64 字节**。如果两个变量在同一缓存行上，一个 CPU 修改变量 A 时会让另一个 CPU 上整个缓存行失效——即使另一个 CPU 只关心变量 B。
+
+### 5.2 虚假共享
+
+```java
+class Counter {
+    volatile long a;   // 8 字节
+    volatile long b;   // 8 字节
+    // a 和 b 可能在同一缓存行
+}
+```
+
+线程 A 不断 `a++`，线程 B 不断 `b++`——逻辑上互不影响，但物理上每次写都让对方缓存失效——性能大幅下降。这就是**虚假共享**：变量之间没有共享关系，却被缓存行"硬绑定"。
+
+实测：虚假共享能让性能下降 **10-50 倍**——这是高性能并发代码必须考虑的问题。
+
+### 5.3 解决：填充（Padding）
+
+让两个变量不在同一缓存行——中间填充无用数据：
+
+```java
+class PaddedCounter {
+    volatile long a;
+    public long p1, p2, p3, p4, p5, p6, p7;   // 56 字节填充
+    volatile long b;   // 一定在另一个缓存行
+}
+```
+
+### 5.4 @Contended 注解
+
+JDK 8 引入 `@sun.misc.Contended`（JDK 9+ 是 `@jdk.internal.vm.annotation.Contended`）——让 JVM 自动填充，不用手写 padding。
+
+```java
+@Contended
+class PaddedCounter {
+    volatile long a;
+    volatile long b;
+}
+```
+
+但 `@Contended` 默认只对 JDK 内部类生效——用户代码要加 JVM 参数 `-XX:-RestrictContended` 才能使用。`AtomicLong` 内部就用了 padding——`LongAdder` 的 `Cell` 类也用了 `@Contended`。
+
+## 六、实战：演示死锁、活锁、虚假共享
+
+下面这个例子演示死锁（以及用 `jstack` 风格的线程转储）、活锁、虚假共享对性能的影响，以及死锁检测。
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.lang.management.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // === 1. 死锁演示 ===
+        System.out.println("=== 死锁演示 ===");
+        Object lock1 = new Object();
+        Object lock2 = new Object();
+
+        Thread deadA = new Thread(() -> {
+            synchronized (lock1) {
+                try { Thread.sleep(100); } catch (InterruptedException e) {}
+                synchronized (lock2) {
+                    System.out.println("A 拿到两把锁");
+                }
+            }
+        }, "deadlock-A");
+
+        Thread deadB = new Thread(() -> {
+            synchronized (lock2) {
+                try { Thread.sleep(100); } catch (InterruptedException e) {}
+                synchronized (lock1) {
+                    System.out.println("B 拿到两把锁");
+                }
+            }
+        }, "deadlock-B");
+
+        deadA.start();
+        deadB.start();
+        Thread.sleep(500);
+
+        // 死锁检测
+        ThreadMXBean bean = ManagementFactory.getThreadMXBean();
+        long[] deadlocks = bean.findDeadlockedThreads();
+        if (deadlocks != null) {
+            System.out.println("✓ 检测到死锁！线程数: " + deadlocks.length);
+            for (long tid : deadlocks) {
+                ThreadInfo info = bean.getThreadInfo(tid);
+                System.out.println("  " + info.getThreadName() + " 状态=" + info.getThreadState());
+            }
+        }
+
+        // 强制中断死锁线程（演示用，实际生产应避免死锁而非中断）
+        deadA.interrupt();
+        deadB.interrupt();
+
+        // === 2. 死锁预防：固定加锁顺序 ===
+        System.out.println("\\n=== 死锁预防：固定顺序 ===");
+        Thread safeA = new Thread(() -> safeMethod(lock1, lock2, "A"), "safe-A");
+        Thread safeB = new Thread(() -> safeMethod(lock1, lock2, "B"), "safe-B");
+        safeA.start(); safeB.start();
+        safeA.join(); safeB.join();
+        System.out.println("✓ 两个线程都完成（无死锁）");
+
+        // === 3. 活锁演示 ===
+        System.out.println("\\n=== 活锁演示 ===");
+        AtomicBoolean[] forks = { new AtomicBoolean(false), new AtomicBoolean(false) };
+        AtomicInteger retries = new AtomicInteger(0);
+
+        Thread livA = new Thread(() -> liveWork(forks, 0, retries, "A"), "livelock-A");
+        Thread livB = new Thread(() -> liveWork(forks, 1, retries, "B"), "livelock-B");
+        livA.start(); livB.start();
+        Thread.sleep(500);
+        livA.interrupt(); livB.interrupt();
+        livA.join(); livB.join();
+        System.out.println("活锁期间重试次数: " + retries.get());
+
+        // === 4. 虚假共享性能对比 ===
+        System.out.println("\\n=== 虚假共享 ===");
+        long shareTime = testFalseSharing();
+        long paddedTime = testNoFalseSharing();
+        System.out.printf("虚假共享耗时: %d ms%n", shareTime);
+        System.out.printf("填充后耗时:   %d ms%n", paddedTime);
+        if (shareTime > 0 && paddedTime > 0) {
+            System.out.printf("性能差异: %.1fx%n", (double) shareTime / paddedTime);
+        }
+    }
+
+    // 固定顺序加锁——破坏循环等待
+    static void safeMethod(Object l1, Object l2, String name) {
+        synchronized (l1) {
+            try { Thread.sleep(50); } catch (InterruptedException e) { return; }
+            synchronized (l2) {
+                System.out.println(name + " 拿到两把锁");
+            }
+        }
+    }
+
+    // 活锁：两人同步抢、同步退
+    static void liveWork(AtomicBoolean[] forks, int idx, AtomicInteger retries, String name) {
+        try {
+            while (!Thread.currentThread().isInterrupted()) {
+                if (forks[idx].compareAndSet(false, true)) {
+                    Thread.sleep(10);
+                    if (forks[(idx + 1) % 2].compareAndSet(false, true)) {
+                        System.out.println(name + " 拿到两把叉，开吃！");
+                        forks[idx].set(false);
+                        forks[(idx + 1) % 2].set(false);
+                        return;
+                    } else {
+                        forks[idx].set(false);   // 让步
+                        retries.incrementAndGet();
+                    }
+                }
+                Thread.sleep(10);
+            }
+        } catch (InterruptedException e) {
+            // 退出
+        }
+    }
+
+    // 虚假共享：两个 volatile long 挨着
+    static class Shared {
+        volatile long a;
+        volatile long b;
+    }
+
+    static long testFalseSharing() throws Exception {
+        Shared s = new Shared();
+        Thread t1 = new Thread(() -> {
+            for (long i = 0; i < 100_000_000L; i++) s.a = i;
+        });
+        Thread t2 = new Thread(() -> {
+            for (long i = 0; i < 100_000_000L; i++) s.b = i;
+        });
+        long start = System.nanoTime();
+        t1.start(); t2.start();
+        t1.join(); t2.join();
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+
+    // 填充避免虚假共享
+    @jdk.internal.vm.annotation.Contended
+    static class Padded {
+        volatile long a;
+        volatile long b;
+    }
+
+    static long testNoFalseSharing() throws Exception {
+        Padded p = new Padded();
+        Thread t1 = new Thread(() -> {
+            for (long i = 0; i < 100_000_000L; i++) p.a = i;
+        });
+        Thread t2 = new Thread(() -> {
+            for (long i = 0; i < 100_000_000L; i++) p.b = i;
+        });
+        long start = System.nanoTime();
+        t1.start(); t2.start();
+        t1.join(); t2.join();
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+}`} />
+
+> **观察重点**：
+> - **死锁检测**：`ThreadMXBean.findDeadlockedThreads()` 返回死锁线程 ID，能精确诊断。
+> - **固定加锁顺序**：safeA 和 safeB 都按 lock1→lock2 顺序，不会循环等待。
+> - **活锁**：两个线程可能一直让步（重试次数飙升），需要随机退避或改变策略。
+> - **虚假共享**：`@Contended` 让 a 和 b 不在同一缓存行，性能差异可能达到数倍（具体取决于 JVM 是否允许用户类使用 @Contended，沙箱环境可能没生效）。
+
+> **注意**：`@jdk.internal.vm.annotation.Contended` 在标准 JVM 上需要 `--add-exports` 才能编译/运行，且需要 `-XX:-RestrictContended` 才对用户类生效。在线沙箱可能不支持——这种情况下两版本性能可能相近。生产环境可用手工 padding 替代。
+
+## 七、本章小结
+
+| 问题 | 描述 | 解决 |
+| --- | --- | --- |
+| **死锁** | 互持对方需要的锁，永久等待 | 破坏四条件之一（最常用：固定加锁顺序） |
+| **饥饿** | 线程长期拿不到锁 | 公平锁（但吞吐量下降） |
+| **活锁** | 不阻塞但没进展，互相让步 | 随机退避、改变策略 |
+| **嵌套监视器死锁** | 持 A 锁 wait B，A 不释放 | 不要在持锁时 wait 另一把锁 |
+| **虚假共享** | 同缓存行的变量互相影响 | Padding 或 `@Contended` |
+
+| 概念 | 核心要点 |
+| --- | --- |
+| 死锁四条件 | 互斥/占有等待/不可抢占/循环等待——破坏任一可预防 |
+| 检测工具 | `jstack`、`jconsole`、`ThreadMXBean.findDeadlockedThreads()` |
+| 公平锁 | `new ReentrantLock(true)`——按 FIFO，避免饥饿但吞吐量低 |
+| @Contended | JVM 自动 padding，需 `-XX:-RestrictContended` |
+| 缓存行 | 通常 64 字节，CPU 缓存加载单位 |
+
+**记忆口诀**：
+
+- **死锁四条件全满足才会发生**——破坏任一即可，最常用"固定顺序加锁"。
+- **死锁用 jstack 一查就知道**——`ManagementFactory.getThreadMXBean()` 还能代码内查。
+- **公平锁防饥饿但有性能代价**——默认非公平，确有需要才换。
+- **活锁是"忙死"不是"等死"**——随机退避是经典解药。
+- **虚假共享是 CPU 缓存的暗坑**——性能杀手，padding 来救。
+
+## 结语：知道陷阱才能避开陷阱
+
+并发典型问题这一章讲的不是"怎么做"，而是"别掉坑"——它们是反面教材。死锁、活锁、饥饿、虚假共享，每一个都曾让无数生产系统翻车。理解它们的成因和预防，是写出健壮并发代码的必修课。
+
+下一章我们讲**锁与同步器**——`ReentrantLock`、`ReadWriteLock`、`StampedLock`、`Condition`、`Semaphore`、`CountDownLatch`、`CyclicBarrier`、`Phaser`、`Exchanger`。它们是 `synchronized`/`wait`/`notify` 的"加强版"，提供了超时获取、可中断、公平锁、读写分离、多条件队列等更强大的能力——也是规避本章这些问题的利器（如 `tryLock` 防死锁）。

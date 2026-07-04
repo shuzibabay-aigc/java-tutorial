@@ -1,0 +1,558 @@
+---
+title: "Locks and Synchronizers"
+chapter: 40
+stage: "Stage 7"
+stageName: "Concurrent Programming"
+order: 7
+description: "Master the Lock interface and ReentrantLock, read-write locks, StampedLock, Condition, Semaphore, CountDownLatch, CyclicBarrier, Phaser, and Exchanger — their principles and usage"
+pubDate: 2026-07-03
+tags: ["Java", "ReentrantLock", "ReadWriteLock", "StampedLock", "Semaphore", "CountDownLatch", "CyclicBarrier"]
+---
+
+# Locks and Synchronizers
+
+`synchronized`/`wait`/`notify` are the "basic tools" of Java concurrency, but they have limits:
+
+- You cannot "acquire a lock with a timeout" — if you cannot get it, you wait forever.
+- You cannot "try to acquire a lock" — there is no `tryLock`.
+- You cannot "interrupt a thread waiting for a lock" — `synchronized` does not respond to interrupt.
+- There is only one wait queue — multiple conditions share the same queue, and `notify` may wake the wrong thread.
+- You cannot "separate reads and writes" — performance suffers in read-heavy, write-light scenarios.
+
+The "advanced locks and synchronizers" in this chapter fill these gaps. `ReentrantLock` makes locks controllable, `ReadWriteLock` makes reads non-exclusive, `StampedLock` adds optimistic reads, `Condition` provides multiple condition queues, and `Semaphore`/`CountDownLatch`/`CyclicBarrier`/`Phaser`/`Exchanger` are the "traffic lights" for coordinating multiple threads.
+
+## 1. The Lock Interface and ReentrantLock
+
+### 1.1 The Lock Interface
+
+`java.util.concurrent.locks.Lock` is the top-level interface of JUC locks:
+
+```java
+public interface Lock {
+    void lock();                    // blocking acquire (does not respond to interrupt)
+    void lockInterruptibly();       // blocking acquire, interruptible
+    boolean tryLock();              // try to acquire, returns true/false immediately
+    boolean tryLock(long time, TimeUnit unit);  // timed acquire
+    void unlock();                  // release the lock
+    Condition newCondition();       // create a condition queue
+}
+```
+
+Compared with `synchronized`:
+
+| Capability | `synchronized` | `Lock` |
+| --- | --- | --- |
+| Timed acquire | ❌ | ✓ `tryLock(time)` |
+| Try acquire | ❌ | ✓ `tryLock()` |
+| Interruptible | ❌ | ✓ `lockInterruptibly` |
+| Fair lock | ❌ | ✓ `new ReentrantLock(true)` |
+| Multiple condition queues | ❌ (single wait/notify) | ✓ `newCondition()` |
+| Auto release | ✓ (released on block exit) | ❌ (must `unlock` manually, recommend finally) |
+
+### 1.2 ReentrantLock
+
+`ReentrantLock` is the primary implementation of `Lock` — a **reentrant exclusive lock**. "Reentrant" means the same thread can acquire the same lock multiple times; each acquisition increments a counter, each `unlock` decrements it, and the lock is truly released only when it reaches zero.
+
+```java
+ReentrantLock lock = new ReentrantLock();   // non-fair by default
+lock.lock();
+try {
+    // critical section
+} finally {
+    lock.unlock();   // finally is mandatory!
+}
+```
+
+**Key points**:
+
+- **You must release the lock in `finally`** — `synchronized` releases automatically on exception, `ReentrantLock` does not; skipping finally leaks the lock.
+- **Do not let code before `lock()` throw** — the lock has not been acquired yet, and `unlock` in finally would throw `IllegalMonitorStateException`.
+- **`lock()` does not respond to interrupt** — for an interruptible variant use `lockInterruptibly()`.
+
+### 1.3 tryLock to Prevent Deadlock
+
+`tryLock(timeout)` is a powerful deadlock prevention tool — if you cannot get it, release what you already hold and retry:
+
+```java
+while (true) {
+    if (lock1.tryLock()) {
+        try {
+            if (lock2.tryLock()) {
+                try {
+                    // got both locks, do the work
+                    return;
+                } finally {
+                    lock2.unlock();
+                }
+            }
+        } finally {
+            lock1.unlock();
+        }
+    }
+    Thread.sleep(randomTime);   // random backoff to prevent livelock
+}
+```
+
+## 2. ReentrantReadWriteLock — Read-Write Lock
+
+**Read-write lock**: reads share with reads, read/write are mutually exclusive, write/write are mutually exclusive. In read-heavy, write-light scenarios it can dramatically boost performance.
+
+```java
+ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+ReentrantReadWriteLock.ReadLock readLock = rwLock.readLock();
+ReentrantReadWriteLock.WriteLock writeLock = rwLock.writeLock();
+
+// read
+readLock.lock();
+try { /* read operation */ } finally { readLock.unlock(); }
+
+// write
+writeLock.lock();
+try { /* write operation */ } finally { writeLock.unlock(); }
+```
+
+| Operation | Read lock held | Write lock held |
+| --- | --- | --- |
+| Acquire read lock | ✓ allowed | ✗ mutually exclusive |
+| Acquire write lock | ✗ mutually exclusive | ✗ mutually exclusive |
+
+**Use cases**: caches, configuration, and other "read-heavy, write-light" scenarios — 10 threads can read simultaneously without waiting for each other.
+
+**Limitation**: write-lock starvation risk — if readers never stop coming, writers cannot acquire the lock. `ReentrantReadWriteLock` is non-fair by default, so writers may starve. You can use fair mode, but throughput drops.
+
+## 3. StampedLock (Java 8+)
+
+`StampedLock` is the "enhanced version" of `ReentrantReadWriteLock` — it introduces **optimistic reads** so that reads need no lock at all.
+
+```java
+StampedLock sl = new StampedLock();
+
+// optimistic read (acquires no lock, highest performance)
+long stamp = sl.tryOptimisticRead();      // grab a "stamp"
+int x = this.x, y = this.y;                // read fields
+if (!sl.validate(stamp)) {                 // verify no write happened during the read
+    // optimistic read failed, degrade to pessimistic read
+    stamp = sl.readLock();
+    try { x = this.x; y = this.y; }
+    finally { sl.unlockRead(stamp); }
+}
+
+// pessimistic read
+long s = sl.readLock();
+try { /* ... */ } finally { sl.unlockRead(s); }
+
+// write
+long ws = sl.writeLock();
+try { this.x = newX; this.y = newY; }
+finally { sl.unlockWrite(ws); }
+```
+
+**Key points**:
+
+- **Optimistic read does not block writes** — but after reading you call `validate` to check whether a write happened during the read; if so, degrade to a pessimistic read and re-read.
+- **Not reentrant** — the same thread cannot acquire the same `StampedLock` twice, or it will deadlock.
+- **10%-30% faster than `ReentrantReadWriteLock`** — the advantage is clearest with read-heavy, write-light workloads and short critical sections.
+
+**Note**: `StampedLock`'s `tryOptimisticRead`/`validate` use tricky memory semantics; do not casually mix `readLock`/`writeLock`/`tryOptimisticRead` — it is error-prone. **Prefer `ReentrantReadWriteLock`; only consider `StampedLock` when you hit a performance bottleneck.**
+
+## 4. Condition: Multiple Condition Queues
+
+`Condition` is the "enhanced version" of `wait`/`notify` — one lock can host multiple `Condition`s, and each `Condition` is an independent wait queue.
+
+```java
+Lock lock = new ReentrantLock();
+Condition notFull = lock.newCondition();   // buffer not full
+Condition notEmpty = lock.newCondition();  // buffer not empty
+
+// producer
+lock.lock();
+try {
+    while (queue.size() == capacity) notFull.await();   // wait for not-full
+    queue.offer(x);
+    notEmpty.signal();   // notify not-empty
+} finally { lock.unlock(); }
+
+// consumer
+lock.lock();
+try {
+    while (queue.isEmpty()) notEmpty.await();   // wait for not-empty
+    queue.poll();
+    notFull.signal();   // notify not-full
+} finally { lock.unlock(); }
+```
+
+Compared with `wait`/`notify`:
+
+| Capability | `wait`/`notify` | `Condition` |
+| --- | --- | --- |
+| Multiple condition queues | ❌ | ✓ |
+| Timed wait | `wait(ms)` | `await(time)` / `awaitNanos` |
+| Uninterruptible wait | `wait` (interruptible) | `awaitUninterruptibly` |
+| Wait until a deadline | ❌ | `awaitUntil(deadline)` |
+
+The `BlockingQueue` implementations (`ArrayBlockingQueue` and so on) are built on `Condition` — they have separate `notFull`/`notEmpty` condition queues and wake the right party precisely.
+
+## 5. Semaphore: Permits
+
+**`Semaphore`** controls how many threads can access a resource simultaneously — think of it as "issuing permits."
+
+```java
+Semaphore sem = new Semaphore(3);   // 3 permits
+
+sem.acquire();   // acquire a permit (blocking)
+try {
+    // at most 3 threads here at the same time
+} finally {
+    sem.release();   // release the permit
+}
+```
+
+**Typical uses**:
+
+- Rate limiting — allow only N requests to hit the database at once.
+- Limiting concurrent connections — connection pools.
+- Resource pooling — allocate a fixed number of resources.
+
+`Semaphore` can also be fair: `new Semaphore(3, true)`.
+
+## 6. CountDownLatch: Wait for N Completions
+
+**`CountDownLatch`**: a one-shot "countdown counter" — `countDown()` decrements by 1, `await()` waits until it reaches zero.
+
+```java
+CountDownLatch latch = new CountDownLatch(3);
+
+// three worker threads
+for (int i = 0; i < 3; i++) {
+    new Thread(() -> {
+        doWork();
+        latch.countDown();   // decrement when done
+    }).start();
+}
+
+latch.await();   // main thread waits for all to finish
+System.out.println("All done");
+```
+
+**Characteristics**:
+
+- **Not resettable** — once the counter hits zero it cannot be reused; one-shot.
+- **`await(timeout)`** supports timeout.
+- **`getCount()`** returns the remaining count.
+
+Typical scenarios: wait for all microservices to be ready, wait for all players to finish loading, aggregate parallel tasks.
+
+## 7. CyclicBarrier: N Threads Wait for Each Other
+
+**`CyclicBarrier`**: N threads **wait for each other** to arrive, then all are released together — and it can be reused cyclically.
+
+```java
+CyclicBarrier barrier = new CyclicBarrier(3, () -> {
+    System.out.println("Three people arrived, meeting starts!");
+});
+
+for (int i = 0; i < 3; i++) {
+    new Thread(() -> {
+        System.out.println(Thread.currentThread().getName() + " arrived");
+        barrier.await();   // wait for the others
+        System.out.println(Thread.currentThread().getName() + " continues");
+    }).start();
+}
+```
+
+**Characteristics**:
+
+- **Reusable** (that is what "Cyclic" means) — once a synchronization round completes, it can be used again.
+- **Can specify a barrier action** — executed by the last thread to arrive, after all threads have arrived.
+- The number of threads must equal `parties`, otherwise they wait forever.
+
+**CountDownLatch vs CyclicBarrier**:
+
+| Dimension | CountDownLatch | CyclicBarrier |
+| --- | --- | --- |
+| Count direction | Down to 0 | Up to N |
+| Reset | No | Yes (automatic) |
+| Who waits | One thread waits for N | N threads wait for each other |
+| Exception handling | Does not affect others | If one thread throws, all threads get `BrokenBarrierException` |
+
+## 8. Phaser: A Phased Synchronizer
+
+**`Phaser`** (JDK 7) is a strengthened `CyclicBarrier` — it supports **multi-phase** synchronization and **dynamic addition/removal of parties**.
+
+```java
+Phaser phaser = new Phaser(3);   // 3 parties
+
+for (int i = 0; i < 3; i++) {
+    new Thread(() -> {
+        phaser.arriveAndAwaitAdvance();   // phase 1 sync
+        phase1Work();
+        phaser.arriveAndAwaitAdvance();   // phase 2 sync
+        phase2Work();
+        phaser.arriveAndDeregister();     // exit
+    }).start();
+}
+```
+
+Characteristics:
+
+- **Multi-phase** — any number of phases can be specified.
+- **Dynamic** — `register()`/`arriveAndDeregister()` add or remove parties.
+- **Hierarchical** — `Phaser` can have parent-child relationships to build tree-shaped synchronization.
+
+Good for "multi-phase parallel computation" — for example, processing data in batches and synchronizing a check after each batch.
+
+## 9. Exchanger: Two Threads Swap Data
+
+**`Exchanger＜V＞`** lets two threads **swap data** at a rendezvous point.
+
+```java
+Exchanger<String> exchanger = new Exchanger<>();
+
+new Thread(() -> {
+    String received = exchanger.exchange("from-A");
+    System.out.println("A received: " + received);
+}).start();
+
+new Thread(() -> {
+    String received = exchanger.exchange("from-B");
+    System.out.println("B received: " + received);
+}).start();
+// A received from-B, B received from-A
+```
+
+Classic applications: genetic algorithms, pipelines (one thread fills a buffer, another drains it, they swap buffers).
+
+## 10. Hands-On: Comprehensive Demo
+
+The example below demonstrates `ReentrantLock`/`tryLock`, `ReadWriteLock`, `Semaphore`, `CountDownLatch`, and `CyclicBarrier`.
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.locks.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // === 1. ReentrantLock + tryLock to prevent deadlock ===
+        System.out.println("=== ReentrantLock + tryLock ===");
+        ReentrantLock l1 = new ReentrantLock();
+        ReentrantLock l2 = new ReentrantLock();
+
+        Thread a = new Thread(() -> tryLockBoth(l1, l2, "A"), "T-A");
+        Thread b = new Thread(() -> tryLockBoth(l2, l1, "B"), "T-B");  // reverse order
+        a.start(); b.start();
+        a.join(3000); b.join(3000);
+        System.out.println("A state: " + a.getState() + ", B state: " + b.getState());
+
+        // === 2. ReadWriteLock cache ===
+        System.out.println("\\n=== ReadWriteLock cache ===");
+        ReadWriteCache cache = new ReadWriteCache();
+        ExecutorService pool = Executors.newFixedThreadPool(6);
+
+        // 5 readers + 1 writer
+        for (int i = 0; i < 5; i++) {
+            final int idx = i;
+            pool.submit(() -> System.out.println("Reader " + idx + " read: " + cache.get("key")));
+        }
+        pool.submit(() -> {
+            cache.put("key", "value-v1");
+            System.out.println("Writer wrote key=value-v1");
+        });
+        pool.shutdown();
+        pool.awaitTermination(2, TimeUnit.SECONDS);
+
+        // === 3. Semaphore rate limiting ===
+        System.out.println("\\n=== Semaphore rate limiting (3 permits) ===");
+        Semaphore sem = new Semaphore(3);
+        ExecutorService semPool = Executors.newFixedThreadPool(10);
+        for (int i = 0; i < 10; i++) {
+            final int idx = i;
+            semPool.submit(() -> {
+                try {
+                    sem.acquire();
+                    System.out.println("  Task " + idx + " got permit, start");
+                    Thread.sleep(200);
+                    System.out.println("  Task " + idx + " released");
+                } catch (InterruptedException e) {
+                } finally {
+                    sem.release();
+                }
+            });
+        }
+        semPool.shutdown();
+        semPool.awaitTermination(3, TimeUnit.SECONDS);
+
+        // === 4. CountDownLatch ===
+        System.out.println("\\n=== CountDownLatch ===");
+        int N = 3;
+        CountDownLatch latch = new CountDownLatch(N);
+        for (int i = 0; i < N; i++) {
+            final int idx = i;
+            new Thread(() -> {
+                try {
+                    Thread.sleep(100 * (idx + 1));
+                    System.out.println("  worker " + idx + " done");
+                } catch (InterruptedException e) {
+                } finally {
+                    latch.countDown();
+                }
+            }).start();
+        }
+        System.out.println("Main thread waiting for " + N + " workers...");
+        latch.await();
+        System.out.println("All done, main thread continues");
+
+        // === 5. CyclicBarrier ===
+        System.out.println("\\n=== CyclicBarrier ===");
+        CyclicBarrier barrier = new CyclicBarrier(3, () ->
+            System.out.println("  >> Three people arrived, meeting starts!"));
+        for (int i = 0; i < 3; i++) {
+            final int idx = i;
+            new Thread(() -> {
+                try {
+                    Thread.sleep(100 * (idx + 1));
+                    System.out.println("  " + idx + " reached the meeting room");
+                    barrier.await();
+                    System.out.println("  " + idx + " meeting over, leaving");
+                } catch (Exception e) {}
+            }).start();
+        }
+        Thread.sleep(1000);
+
+        // === 6. Condition-based blocking queue ===
+        System.out.println("\\n=== Condition blocking queue ===");
+        SimpleBlockingQueue<Integer> queue = new SimpleBlockingQueue<>(2);
+        ExecutorService qPool = Executors.newFixedThreadPool(2);
+        qPool.submit(() -> {
+            try {
+                for (int i = 1; i <= 3; i++) {
+                    queue.put(i);
+                    System.out.println("  produced " + i);
+                }
+            } catch (InterruptedException e) {}
+        });
+        qPool.submit(() -> {
+            try {
+                for (int i = 0; i < 3; i++) {
+                    Thread.sleep(200);
+                    System.out.println("  consumed " + queue.take());
+                }
+            } catch (InterruptedException e) {}
+        });
+        qPool.shutdown();
+        qPool.awaitTermination(2, TimeUnit.SECONDS);
+    }
+
+    // Use tryLock to prevent deadlock — give up if cannot get both
+    static void tryLockBoth(ReentrantLock a, ReentrantLock b, String name) {
+        try {
+            while (true) {
+                if (a.tryLock(100, TimeUnit.MILLISECONDS)) {
+                    try {
+                        if (b.tryLock(100, TimeUnit.MILLISECONDS)) {
+                            try {
+                                System.out.println(name + " got both locks, working");
+                                return;
+                            } finally { b.unlock(); }
+                        }
+                    } finally { a.unlock(); }
+                }
+                Thread.sleep(ThreadLocalRandom.current().nextInt(50));
+            }
+        } catch (InterruptedException e) {}
+    }
+}
+
+// Read-write lock based cache
+class ReadWriteCache {
+    private final Map<String, String> map = new HashMap<>();
+    private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+
+    public String get(String key) {
+        rwLock.readLock().lock();
+        try {
+            return map.get(key);
+        } finally {
+            rwLock.readLock().unlock();
+        }
+    }
+
+    public void put(String key, String value) {
+        rwLock.writeLock().lock();
+        try {
+            map.put(key, value);
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+}
+
+// A simple blocking queue built with Condition
+class SimpleBlockingQueue<T> {
+    private final Queue<T> queue = new LinkedList<>();
+    private final int capacity;
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition notFull = lock.newCondition();
+    private final Condition notEmpty = lock.newCondition();
+
+    SimpleBlockingQueue(int capacity) { this.capacity = capacity; }
+
+    public void put(T item) throws InterruptedException {
+        lock.lock();
+        try {
+            while (queue.size() == capacity) notFull.await();
+            queue.offer(item);
+            notEmpty.signal();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public T take() throws InterruptedException {
+        lock.lock();
+        try {
+            while (queue.isEmpty()) notEmpty.await();
+            T item = queue.poll();
+            notFull.signal();
+            return item;
+        } finally {
+            lock.unlock();
+        }
+    }
+}`} />
+
+> **What to watch for**:
+> - **`tryLock(timeout)`**: A and B lock in reverse order but **do not deadlock** — they give up and retry.
+> - **Read-write lock**: 5 readers can read concurrently; the writer is exclusive.
+> - **`Semaphore`**: 3 permits — only 3 tasks run at once, the rest queue up.
+> - **`CountDownLatch`**: the main thread awaits; only after 3 workers finish does it continue.
+> - **`CyclicBarrier`**: 3 threads wait for each other; once all arrive the barrier action runs, then each continues.
+> - **`Condition`**: `notFull`/`notEmpty` are two condition queues, waking the producer or consumer precisely.
+
+## 11. Chapter Summary
+
+| Tool | Use | Key point |
+| --- | --- | --- |
+| `ReentrantLock` | Controllable exclusive lock | `tryLock`/`lockInterruptibly`/fair lock; must `finally unlock` |
+| `ReentrantReadWriteLock` | Read-write separation | Reads share, read/write and write/write exclude; good for read-heavy |
+| `StampedLock` | Optimistic read lock | `tryOptimisticRead`+`validate`; not reentrant |
+| `Condition` | Multiple condition queues | `await`/`signal`/`signalAll`; replaces `wait`/`notify` |
+| `Semaphore` | Rate limiting | `acquire`/`release`; can be fair |
+| `CountDownLatch` | One-shot wait for N | Not resettable; `await`/`countDown` |
+| `CyclicBarrier` | N wait for each other | Reusable; if one throws, the barrier breaks |
+| `Phaser` | Multi-phase sync | Dynamic add/remove parties |
+| `Exchanger` | Two-thread swap | `exchange(v)` |
+
+**Mnemonics**:
+
+- **`ReentrantLock` must use finally** — exceptions do not auto-release it.
+- **`tryLock` is the deadlock-killer** — give up and retry if you cannot get it.
+- **Read-heavy, write-light? Use a read-write lock** — non-exclusive reads perform well.
+- **`StampedLock`'s optimistic read is fastest** — but not reentrant, use with care.
+- **`Condition` beats `wait`/`notify`** — multiple condition queues, precise wakeup.
+- **`CountDownLatch` is one-shot, `CyclicBarrier` is reusable** — don't mix them up.
+
+## Closing: From "Can Lock" to "Knows How to Lock"
+
+`synchronized` is a "point-and-shoot camera" — ready to use but inflexible. `ReentrantLock`/`ReadWriteLock`/`StampedLock` are "SLR cameras" — more parameters, but better photos. Synchronizers (`Semaphore`/`CountDownLatch` and friends) are the "traffic lights" and "batons" that coordinate multiple threads.
+
+But locks are not cheap — suspend/wake, context switches, cache invalidation. Can we achieve concurrency safety "without locks"? The answer is in Chapter 41 — **atomic classes and CAS**. `AtomicInteger`/`LongAdder` use hardware-level CAS instructions for lock-free concurrency, a higher-performance choice. The next chapter dives into CAS principles, the ABA problem, and the segmented design of `LongAdder`.

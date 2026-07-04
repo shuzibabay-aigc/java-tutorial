@@ -1,0 +1,455 @@
+---
+title: "Strings"
+chapter: 13
+stage: "Stage 3"
+stageName: "Java Core Libraries"
+order: 1
+description: "Deeply understand String's immutability and the string pool, and master common methods, StringBuilder, StringJoiner, text blocks, and character encoding"
+pubDate: 2026-07-03
+tags: ["Java", "String", "字符串", "StringBuilder", "文本块"]
+---
+
+# Strings
+
+If the world of Java were a city, strings would be its busiest street — there's hardly a program that doesn't deal with text. Logins validate usernames, payments assemble order numbers, chats parse emoji, logs format timestamps. `String` is one of the most frequently used types in Java.
+
+Yet strings look simple while hiding a great deal of elegant design underneath: **immutability**, the **String Pool**, **compile-time optimizations**... Only by understanding these can you write code that is both efficient and correct. In this chapter, we'll lift the veil on `String`.
+
+## 1. String Immutability
+
+### 1.1 A class "carved in stone"
+
+Let's start with what looks like an everyday phenomenon:
+
+```java
+String s = "hello";
+s = s + " world";
+System.out.println(s);   // hello world
+```
+
+The value of `s` changed — but did `s` really "change"? No. The original `"hello"` object is untouched; `s + " world"` creates a **brand-new** `"hello world"` object, and the reference `s` then points to this new object. The old `"hello"` is still sitting in memory (perhaps in the string pool).
+
+This is the core property of String: **immutability**. Once created, its character sequence cannot be modified. Every "mutating" method (`concat`, `replace`, `substring`, `toUpperCase`) does not rewrite in place — it returns a **new String object**.
+
+### 1.2 How immutability is enforced
+
+Open the source of `java.lang.String` and you'll see:
+
+```java
+public final class String implements java.io.Serializable,
+                                      Comparable<String>, CharSequence {
+    private final char[] value;   // Java 8 and earlier
+    // private final byte[] value;  // Java 9+ (Compact Strings)
+    ...
+}
+```
+
+Immutability is guaranteed by three "locks":
+
+1. **The class is `final`** — it cannot be subclassed, ruling out subclasses quietly adding mutable methods.
+2. **The `value` field is `final`** — once construction completes, the reference never changes.
+3. **No public mutator methods** — `value` is `private`, so outsiders have no way in.
+
+> 💡 **The Java 9 change**: Starting with Java 9 (JEP 254: Compact Strings), String's internal storage switched from `char[]` to `byte[]`, with an added `coder` field marking the encoding (LATIN1 or UTF16). Because most strings only use Latin-1 characters (ASCII and friends), storing one character per byte saves nearly half the memory. But the core design of immutability is unchanged.
+
+### 1.3 Why design String to be immutable
+
+This wasn't a snap decision — it's a carefully considered trade-off:
+
+- **Security**: Strings are constantly passed as parameters — file paths, database URLs, network addresses. If String were mutable, you might verify a path is safe before opening a file, only for someone to silently change it afterward — a security hole. Immutability makes "checked means valid."
+- **Thread safety**: Immutable objects are inherently thread-safe — multiple threads reading the same String never need locking, because it can never be changed.
+- **The String Pool**: Precisely because strings are immutable, the JVM dares to let multiple references share the same String object (see below), saving memory.
+- **hashCode caching**: String's `hashCode` is cached after its first computation. Immutability guarantees the cache is always valid, making String an excellent candidate for HashMap keys.
+
+## 2. The String Pool
+
+### 2.1 Two ways to create
+
+```java
+String a = "abc";              // literal form
+String b = "abc";              // literal form
+String c = new String("abc");  // new form
+```
+
+Do `a` and `b` point to the same object? Yes. `a == b` is `true`.
+
+`new String("abc")` is different — it **creates a new** object on the heap, so `c == a` is `false` (even though the content is the same).
+
+### 2.2 How the string pool works
+
+The JVM maintains a **string pool** (String Pool). When you create a string with the literal `"abc"`, the JVM first checks the pool: if it's there, return the reference; if not, put it in the pool and then return it. That's why all `"abc"` literals share the same object.
+
+`new String("abc")` does two things: first it checks whether `"abc"` is in the pool (adding it if absent), then it new's up a fresh object on the heap — so it may create up to two objects.
+
+> 📍 As of Java 7, the string pool was moved from the method area (permanent generation) into the **heap**, avoiding permanent generation overflow.
+
+### 2.3 The intern() method
+
+`intern()` is String's manual pooling method: when called, if an equal string is already in the pool, it returns the pooled object; otherwise it puts the current object into the pool and returns it.
+
+```java
+String s1 = new String("hello");   // new object on the heap
+String s2 = "hello";               // object in the pool
+System.out.println(s1 == s2);      // false
+
+String s3 = s1.intern();           // returns the pooled object
+System.out.println(s3 == s2);      // true
+System.out.println(s3 == s1);      // false（s1 is still a heap object）
+```
+
+In day-to-day development `intern()` is rarely used, but when handling large numbers of duplicate strings (such as logs, cache keys), it can save significant memory.
+
+## 3. Common String Methods
+
+String ships with a vast library of methods. Below are the most frequently used groups.
+
+### 3.1 Basic queries
+
+| Method | Purpose |
+| --- | --- |
+| `length()` | String length (number of characters) |
+| `charAt(int i)` | Return the i-th character |
+| `isEmpty()` | Whether the length is 0 |
+| `isBlank()` | Whether empty or all whitespace (Java 11+) |
+| `indexOf(String s)` | Find the first occurrence of a substring |
+| `lastIndexOf(String s)` | Find the last occurrence of a substring |
+| `contains(CharSequence s)` | Whether it contains a substring |
+| `startsWith(String s)` | Whether it starts with the given prefix |
+| `endsWith(String s)` | Whether it ends with the given suffix |
+
+```java
+String s = "Hello, Java";
+System.out.println(s.length());          // 11
+System.out.println(s.charAt(1));         // e
+System.out.println(s.indexOf("Java"));   // 7
+System.out.println(s.contains("ell"));   // true
+System.out.println(s.startsWith("He"));  // true
+System.out.println("  ".isBlank());      // true（Java 11+）
+```
+
+### 3.2 Slicing and transforming
+
+| Method | Purpose |
+| --- | --- |
+| `substring(int begin)` | Slice from begin to the end |
+| `substring(int b, int e)` | Slice [b, e) |
+| `toUpperCase()` / `toLowerCase()` | Convert to uppercase / lowercase |
+| `trim()` | Strip leading/trailing ASCII whitespace (U+0020 and below) |
+| `strip()` | Strip leading/trailing Unicode whitespace (Java 11+) |
+| `replace(old, new)` | Replace all matches |
+| `replaceAll(regex, new)` | Replace using a regex |
+| `split(regex)` | Split by regex |
+| `join(delim, elems)` | Join with a delimiter |
+| `repeat(int n)` | Repeat n times (Java 11+) |
+
+The difference between `trim()` and `strip()` is worth noting: `trim()` only removes ASCII whitespace (space and control characters such as `\t\n\r\f`, code points ≤ U+0020), while `strip()` (Java 11+) uses `Character.isWhitespace` for the check and can recognize Unicode whitespace characters like the fullwidth space.
+
+```java
+String s = "  Hello World  ";
+System.out.println("[" + s.trim() + "]");    // [Hello World]
+System.out.println("[" + s.strip() + "]");   // [Hello World]
+
+// Chinese fullwidth space \u3000
+String full = "\u3000Hello\u3000";
+System.out.println("[" + full.trim() + "]");   // [　Hello　]（trim can't strip it）
+System.out.println("[" + full.strip() + "]");  // [Hello]（strip can strip it）
+```
+
+### 3.3 Splitting and joining
+
+```java
+String csv = "Java,Python,Go,Rust";
+String[] langs = csv.split(",");
+for (String lang : langs) {
+    System.out.println(lang);
+}
+
+// Join with String.join
+String result = String.join(" | ", "Java", "Python", "Go");
+System.out.println(result);   // Java | Python | Go
+
+// repeat
+String line = "=" .repeat(20);
+System.out.println(line);     // ====================
+```
+
+> ⚠️ The argument to `split` is a **regular expression**. If your delimiter is `.`, `|`, `$`, or another regex special character, you must escape it: `split("\\.")`.
+
+## 4. StringBuilder and StringBuffer
+
+### 4.1 Why we need a mutable character sequence
+
+Consider this code:
+
+```java
+String s = "";
+for (int i = 0; i < 1000; i++) {
+    s = s + i;   // Each iteration new's up a fresh String!
+}
+```
+
+This snippet creates about 1000 String objects, and each concatenation has to copy all the characters that came before — the time complexity is O(n²), a staggering waste.
+
+`StringBuilder` is the antidote. It's a **mutable character sequence**; `append` operations modify its internal array directly and produce no new objects:
+
+```java
+StringBuilder sb = new StringBuilder();
+for (int i = 0; i < 1000; i++) {
+    sb.append(i);
+}
+String result = sb.toString();
+```
+
+### 4.2 StringBuilder vs StringBuffer
+
+The two have nearly identical APIs; the difference is **thread safety**:
+
+| Class | Thread-safe | Performance | Use case |
+| --- | --- | --- | --- |
+| `StringBuilder` | No | Fast | Single-threaded concatenation (the vast majority of cases) |
+| `StringBuffer` | Yes (synchronized) | Slower | Shared multi-threaded concatenation (rare) |
+
+In practice you'll use `StringBuilder` 99% of the time — it's faster in single-threaded scenarios, and in multi-threaded ones you typically wouldn't share a single builder anyway; each thread builds its own and then merges.
+
+```java
+StringBuilder sb = new StringBuilder("Hello");
+sb.append(", ").append("World");     // method chaining
+sb.insert(5, " Java");
+sb.delete(5, 10);
+sb.reverse();
+System.out.println(sb);              // dlroW ,olleH
+```
+
+> 💡 There's a compiler optimization: literal concatenations like `"a" + "b" + "c"` are automatically rewritten to use StringBuilder at compile time (or even folded into a constant). But `+=` inside a loop new's a StringBuilder every iteration, so manual optimization is still needed there.
+
+## 5. StringJoiner
+
+`StringJoiner` (Java 8+) is a tool built specifically for "delimiter-joined concatenation," and is especially handy when you want optional prefixes and suffixes:
+
+```java
+import java.util.StringJoiner;
+
+StringJoiner sj = new StringJoiner(", ", "[", "]");
+sj.add("Java");
+sj.add("Python");
+sj.add("Go");
+System.out.println(sj);   // [Java, Python, Go]
+```
+
+It most often shows up behind Stream's `Collectors.joining`:
+
+```java
+import java.util.List;
+import java.util.stream.Collectors;
+
+String joined = List.of("Java", "Python", "Go")
+    .stream()
+    .collect(Collectors.joining(", ", "[", "]"));
+System.out.println(joined);   // [Java, Python, Go]
+```
+
+## 6. Text Blocks (Java 15+)
+
+Writing multi-line strings used to be a pain for Java programmers. You'd either concatenate with `\n` or use `String.join`, which was especially ugly for SQL, JSON, and HTML. Java 15 officially introduced **text blocks**, using triple quotes `"""` to solve this problem.
+
+### 6.1 Basic syntax
+
+```java
+String json = """
+        {
+            "name": "Alice",
+            "age": 30
+        }
+        """;
+System.out.println(json);
+```
+
+Key rules:
+
+- After the opening `"""` you **must break to a new line**; content starts on the next line.
+- The closing `"""` can sit on its own line or follow the last content line.
+- **Indentation is determined by the position of the closing `"""`**: the compiler strips "incidental" leading whitespace from all lines, preserving only the indentation you deliberately chose.
+
+### 6.2 Indentation control
+
+```java
+String s = """
+        Hello
+          World
+        """;
+// The actual content is "Hello\n  World\n"
+// The closing """ is preceded by 8 spaces, so 8 leading spaces are removed from each line
+```
+
+If you move the closing `"""` to the left, the content's indentation shrinks; to the right, it grows. This design lets you freely control the final indentation level of the string.
+
+### 6.3 Special escapes
+
+Inside a text block you can still use escapes like `\n` and `\t`. There are also two escapes exclusive to text blocks:
+
+- `\＜newline＞` (a backslash at the end of a line): a **line continuation**, removing the line break.
+- `\s`: preserve a single space (protecting it from trailing-whitespace trimming).
+
+```java
+String sql = """
+        SELECT * \
+        FROM users \
+        WHERE age > 18\
+        """;
+// The actual content is "SELECT * FROM users WHERE age > 18"
+System.out.println(sql);
+
+String colors = """
+        red  \s
+        green\s
+        blue \s
+        """;
+// \s preserves the trailing space on each line
+```
+
+## 7. Strings and Character Encoding
+
+### 7.1 Java's internal character representation
+
+Java's `char` is a 16-bit unsigned integer using **UTF-16** encoding. This means:
+
+- Characters in the Basic Multilingual Plane (BMP) (such as ASCII, common Chinese characters) take up one `char`.
+- Supplementary characters (such as the emoji 😀, code point U+1F600) require **two chars** (a surrogate pair).
+
+```java
+String emoji = "😀";
+System.out.println(emoji.length());        // 2（two chars!）
+System.out.println(emoji.codePointCount(0, emoji.length()));  // 1（one code point）
+```
+
+So `length()` returns the number of UTF-16 code units, not the number of "characters." When handling supplementary characters like emoji, you need to use `codePointCount`.
+
+### 7.2 Bytes and encoding
+
+A `String` lives in memory as UTF-16, but when stored to a file or transmitted over a network it must be turned into a byte sequence — and that's where **character encoding** (Charset) comes in. Common encodings: UTF-8, UTF-16, GBK, ISO-8859-1.
+
+```java
+String s = "你好";
+
+byte[] utf8 = s.getBytes("UTF-8");       // 6 bytes (3 bytes per Chinese character)
+byte[] gbk = s.getBytes("GBK");          // 4 bytes (2 bytes per Chinese character)
+
+// Restore with the specified encoding
+String restored = new String(utf8, "UTF-8");
+System.out.println(restored);            // 你好
+```
+
+> ⚠️ The no-argument `getBytes()` uses the **platform's default encoding** — which varies from machine to machine and is a frequent culprit behind garbled text. **Always specify the encoding explicitly**, or use `StandardCharsets.UTF_8`.
+
+```java
+import java.nio.charset.StandardCharsets;
+
+byte[] bytes = "你好".getBytes(StandardCharsets.UTF_8);
+String back = new String(bytes, StandardCharsets.UTF_8);
+```
+
+## 8. Hands-On Practice
+
+Let's tie the chapter together with two small exercises.
+
+### 8.1 String reversal and word frequency counting
+
+<CodeRunner code={`import java.util.LinkedHashMap;
+import java.util.Map;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. Reverse a string (three ways)
+        String original = "Hello, 世界!";
+        System.out.println("原串: " + original);
+
+        // Way 1: StringBuilder.reverse
+        String r1 = new StringBuilder(original).reverse().toString();
+        System.out.println("反转1: " + r1);
+
+        // Way 2: manual reverse concatenation
+        StringBuilder sb = new StringBuilder();
+        for (int i = original.length() - 1; i >= 0; i--) {
+            sb.append(original.charAt(i));
+        }
+        System.out.println("反转2: " + sb);
+
+        // Way 3: recursion
+        System.out.println("反转3: " + reverseRec(original));
+
+        System.out.println();
+
+        // 2. Word frequency count
+        String text = "the quick brown fox jumps over the lazy dog the end";
+        Map<String, Integer> freq = countWords(text);
+        System.out.println("词频统计:");
+        freq.forEach((w, c) -> System.out.println("  " + w + " => " + c));
+    }
+
+    static String reverseRec(String s) {
+        if (s.isEmpty()) return s;
+        return reverseRec(s.substring(1)) + s.charAt(0);
+    }
+
+    static Map<String, Integer> countWords(String text) {
+        Map<String, Integer> map = new LinkedHashMap<>();
+        // Split on whitespace (regex \\\\s+ matches one or more whitespace characters)
+        String[] words = text.split("\\\\s+");
+        for (String w : words) {
+            // Count after lowercasing
+            String key = w.toLowerCase();
+            map.merge(key, 1, Integer::sum);
+        }
+        return map;
+    }
+}`} />
+
+### 8.2 Efficiently assembling SQL with StringBuilder
+
+<CodeRunner code={`import java.util.List;
+
+public class Main {
+    public static void main(String[] args) {
+        // Simulate: generate an IN clause from a list of user IDs
+        List<Integer> userIds = List.of(1001, 1002, 1003, 1004);
+
+        // Wrong approach: String concatenation (new's up every iteration)
+        // String inClause = "";
+        // for (Integer id : userIds) { inClause += id + ","; }
+
+        // Right approach: StringBuilder
+        StringBuilder sb = new StringBuilder("SELECT * FROM orders WHERE user_id IN (");
+        for (int i = 0; i < userIds.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(userIds.get(i));
+        }
+        sb.append(") ORDER BY created_at DESC");
+        System.out.println(sb);
+
+        // Even cleaner: StringJoiner
+        var sj = new java.util.StringJoiner(", ", "SELECT * FROM orders WHERE user_id IN (", ")");
+        for (Integer id : userIds) sj.add(id.toString());
+        System.out.println(sj);
+    }
+}`} />
+
+## 9. Chapter Summary
+
+| Topic | Key points |
+| --- | --- |
+| Immutability | String is a final class with a final internal array; every "modification" returns a new object |
+| Benefits of immutability | Security, thread safety, support for the string pool, cacheable hashCode |
+| String pool | Literals are shared; `new String` is not; `intern()` pools manually |
+| Common methods | length/charAt/substring/indexOf/replace/split/strip/repeat |
+| trim vs strip | trim removes only ASCII whitespace; strip removes Unicode whitespace |
+| StringBuilder | A mutable character sequence; the first choice for single-threaded concatenation, avoids O(n²) |
+| StringBuffer | The thread-safe version, for rare multi-threaded scenarios |
+| StringJoiner | Joining with a delimiter plus prefix/suffix |
+| Text blocks | `"""` triple quotes, auto-managed indentation, `\＜newline＞` for continuation, `\s` to preserve a space |
+| Encoding | Internal UTF-16; use a Charset for transmission; always specify UTF-8 explicitly |
+
+## Conclusion
+
+Strings are Java's "most familiar stranger" — everyone uses them, yet few truly understand the design behind them. Master immutability and the string pool, and you'll write memory-friendly code; make good use of StringBuilder and StringJoiner, and your concatenation logic will become far more elegant; understand character encoding, and you can finally bid farewell to garbled text.
+
+In the next chapter, we turn from strings to the world of numbers — **wrapper classes and math utilities**. There you'll see how Java uses a "safe box" to protect primitive types, and how BigDecimal rescues the precision of financial calculations.

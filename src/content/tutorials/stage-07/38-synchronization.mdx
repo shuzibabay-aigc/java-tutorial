@@ -1,0 +1,486 @@
+---
+title: "同步机制"
+chapter: 38
+stage: "第七阶段"
+stageName: "并发编程"
+order: 5
+description: "深入 synchronized 底层 monitor 原理、volatile 可见性与禁止重排、ThreadLocal 线程本地变量、wait/notify 线程间通信与 MESI 缓存一致性协议"
+pubDate: 2026-07-03
+tags: ["Java", "synchronized", "volatile", "ThreadLocal", "wait", "notify", "MESI"]
+---
+
+# 同步机制
+
+上一章我们建立了 JMM 的理论框架——可见性、有序性、原子性、happens-before。这一章讲**落地工具**：Java 提供的三大同步机制——`synchronized`、`volatile`、`ThreadLocal`，以及配套的 `wait`/`notify` 线程间通信。
+
+为什么这一章重要？因为 90% 的 Java 并发代码都在用这几个关键字。`synchronized` 是面试高频——`monitor`、`monitorenter`、`monitorexit`、锁升级；`volatile` 的"不保证原子性"是经典坑；`ThreadLocal` 是连接池、事务管理、请求上下文的核心；`wait`/`notify` 是生产者-消费者模型的基石。这一章把它们一网打尽。
+
+## 一、synchronized 关键字
+
+`synchronized` 是 Java 内建的锁机制——可以修饰方法，也可以修饰代码块。
+
+### 1.1 三种用法
+
+```java
+public class SyncDemo {
+    // 1. 同步实例方法——锁是 this（当前实例）
+    public synchronized void method1() { /* ... */ }
+
+    // 2. 同步静态方法——锁是 Class 对象（SyncDemo.class）
+    public static synchronized void method2() { /* ... */ }
+
+    // 3. 同步代码块——锁是括号里的对象
+    public void method3() {
+        synchronized(this) { /* 锁 this */ }
+        synchronized(SyncDemo.class) { /* 锁 Class */ }
+        Object lock = new Object();
+        synchronized(lock) { /* 锁任意对象 */ }
+    }
+}
+```
+
+**关键点**：
+
+- `synchronized` 锁的是**对象**，不是代码。每个 Java 对象在堆里都有一个**对象头**，里面存着 `Mark Word`——锁状态就记在这里。
+- 实例方法锁 `this`——同一实例的多个 `synchronized` 方法互斥。
+- 静态方法锁 `Class` 对象——类的所有实例的静态同步方法都互斥。
+- 同步代码块可以指定任意对象作锁——更灵活，减小锁粒度。
+
+### 1.2 synchronized 底层原理：monitor
+
+` synchronized` 的底层是 **monitor**（管程/监视器）。每个 Java 对象都关联一个 monitor（隐式）。
+
+**同步代码块的字节码**：
+
+```
+monitorenter      // 进入 monitor，count++
+// 临界区代码
+monitorexit       // 退出 monitor，count--
+// 异常处理：再有一个 monitorexit 保证异常时也能释放
+```
+
+`monitorenter` 的逻辑：
+
+1. 如果 monitor 的计数器为 0，当前线程获取 monitor，计数器设为 1。
+2. 如果当前线程已持有 monitor（**可重入**），计数器加 1。
+3. 如果 monitor 被其他线程持有，当前线程阻塞，等待 monitor 释放。
+
+`monitorexit` 把计数器减 1，归零时释放 monitor，唤醒等待的线程。
+
+**同步方法**没有 `monitorenter`/`monitorexit`，而是在方法的 `flags` 里加 `ACC_SYNCHRONIZED` 标志——JVM 调用方法时检查这个标志，自动加锁/解锁。
+
+### 1.3 锁升级（JDK 6 优化）
+
+JDK 6 之前 `synchronized` 是重量级锁——直接挂起线程到 OS 层面，开销大。JDK 6 引入了"锁升级"机制，让 `synchronized` 在低争用场景下接近无锁性能：
+
+| 锁状态 | 触发条件 | 实现 | 性能 |
+| --- | --- | --- | --- |
+| **无锁** | 对象初始 | Mark Word 无锁标记 | 最快 |
+| **偏向锁** | 第一个线程访问 | Mark Word 记录线程 ID | 几乎无开销 |
+| **轻量级锁** | 多线程交替访问，无实质争用 | 自旋 CAS | 自旋成功则快 |
+| **重量级锁** | 实质争用，自旋失败 | OS 互斥量，线程挂起 | 慢但稳妥 |
+
+升级是单向的——一旦升级到重量级锁就不会降级。但偏向锁在 safepoint 时可被撤销重偏向。
+
+> **注意**：JDK 15 起偏向锁默认禁用（`-XX:-UseBiasedLocking`），JDK 18 已废弃。理由是现代应用争用模式变了，偏向锁维护成本超过收益。新代码不要再依赖偏向锁优化。
+
+## 二、volatile 关键字
+
+`volatile` 是轻量级同步机制——保证**可见性**和**有序性**，但**不保证原子性**。
+
+### 2.1 保证可见性
+
+`volatile` 变量的读直接从主内存读，写直接刷新到主内存——绕过 CPU 缓存的"工作内存"延迟。
+
+```java
+class Flag {
+    volatile boolean stop = false;   // volatile 保证可见性
+}
+
+// 线程 A：stop = true 后所有线程立刻看到
+// 线程 B：while(!stop) 能感知到 stop 变化
+```
+
+### 2.2 禁止指令重排
+
+`volatile` 通过插入内存屏障（第 37 章详述）禁止重排：
+
+- volatile 写之前插入 StoreStore——前面所有普通写先于 volatile 写。
+- volatile 写之后插入 StoreLoad——volatile 写先于后续所有读写。
+- volatile 读之后插入 LoadLoad、LoadStore——volatile 读先于后续读写。
+
+这是"双重检查锁单例"必须加 `volatile` 的原因——禁止"分配内存→赋值引用→初始化对象"被重排。
+
+### 2.3 volatile 不保证原子性（i++ 问题）
+
+这是 `volatile` 最经典的坑：
+
+```java
+class Counter {
+    volatile int count = 0;
+    public void increment() {
+        count++;   // 即使 count 是 volatile，仍不安全！
+    }
+}
+```
+
+`volatile` 保证 `count` 的读和写各自是原子的，但 `count++` 是"读-改-写"三步——`volatile` 不能把这三步变成原子操作。多线程下仍会丢更新。
+
+**`volatile` 的适用场景**：
+
+- **状态标志位**：`volatile boolean stop`——一个线程写，多个线程读。
+- **DCL 单例**：防止对象未初始化完成被引用。
+- **一次性发布**：发布不可变对象，初始化后只读。
+
+**不适合**：`count++`、复合操作、check-then-act。这些场景要用 `synchronized` 或原子类。
+
+## 三、CPU 缓存一致性协议：MESI
+
+`volatile` 的可见性靠 CPU 缓存一致性协议实现——主流是 **MESI 协议**。
+
+### 3.1 四种缓存行状态
+
+| 状态 | 含义 | 是否有效 | 是否独占 | 是否修改过 |
+| --- | --- | --- | --- | --- |
+| **M（Modified）** | 已修改，与主内存不一致 | ✓ | ✓ | ✓ |
+| **E（Exclusive）** | 独占，与主内存一致 | ✓ | ✓ | ✗ |
+| **S（Shared）** | 共享，多 CPU 缓存同一份，与主内存一致 | ✓ | ✗ | ✗ |
+| **I（Invalid）** | 无效，缓存行作废 | ✗ | — | — |
+
+### 3.2 MESI 状态转换
+
+- CPU 读一个缓存行：
+  - 若在本地是 M/E/S → 直接读
+  - 若是 I → 发消息给其他 CPU，把对应缓存行降级到 S 或 I，自己加载为 E 或 S
+- CPU 写一个缓存行：
+  - 若在本地是 M → 直接写
+  - 若是 E → 升级到 M，写
+  - 若是 S → 通知其他 CPU 把对应行置为 I（Invalidate），自己升级到 M
+  - 若是 I → 同 S
+
+这套协议保证了：**一个 CPU 修改缓存行时，其他 CPU 的对应缓存行被作废**——下次读必须从主内存（或修改方的缓存）重新加载。这就是 `volatile` 写对其他 CPU 立即可见的物理基础。
+
+### 3.3 Store Buffer 与 Invalidate Queue
+
+MESI 的"通知-等待"有延迟——CPU A 写时，要等其他 CPU 都确认 Invalidate 后才能写。这浪费 CPU 周期。硬件引入两个缓冲区：
+
+- **Store Buffer**：CPU 把写先放进 Store Buffer，继续干别的，等其他 CPU 确认后再真正写入缓存。
+- **Invalidate Queue**：CPU 收到 Invalidate 消息时立即回复确认，但实际清理缓存放进队列稍后做。
+
+这两个缓冲提升了性能，但也引入了"内存系统重排"——CPU A 看到的写顺序与 CPU B 看到的不一致。**内存屏障**就是用来清空 Store Buffer / 同步 Invalidate Queue 的指令，强制可见性。
+
+## 四、ThreadLocal：线程本地变量
+
+`ThreadLocal` 让每个线程拥有变量的**独立副本**——根本不共享，自然没有竞态。
+
+### 4.1 基本用法
+
+```java
+ThreadLocal<SimpleDateFormat> fmt = ThreadLocal.withInitial(
+    () -> new SimpleDateFormat("yyyy-MM-dd"));
+
+// 每个线程拿到的都是自己的 SimpleDateFormat
+String date = fmt.get().format(new Date());
+fmt.remove();   // 用完清理，防止内存泄漏
+```
+
+`SimpleDateFormat` 不是线程安全的——多线程共享会出 bug。`ThreadLocal` 是经典解法：每个线程一个实例。
+
+### 4.2 ThreadLocal 的实现原理
+
+注意 `ThreadLocal` 不是"Map＜Thread, Value＞"——而是 **`Thread` 对象里有一个 `ThreadLocalMap`**：
+
+```
+Thread
+  └── ThreadLocalMap threadLocals
+        ├── Entry: key=ThreadLocal1 (弱引用), value=val1
+        ├── Entry: key=ThreadLocal2 (弱引用), value=val2
+        └── ...
+```
+
+- `ThreadLocal.set(value)` 实际是 `Thread.currentThread.threadLocals.put(this, value)`。
+- `ThreadLocal.get()` 实际是 `Thread.currentThread.threadLocals.get(this)`。
+
+**为什么 key 用弱引用**：防止 `ThreadLocal` 对象本身被回收不掉。但 value 是强引用——**这就是内存泄漏的根源**。
+
+### 4.3 内存泄漏问题
+
+线程结束后 `Thread.threadLocals` 会被回收。但**线程池里的线程是长生命的**——`ThreadLocal` 用完不 `remove`，value 就一直挂着，导致内存泄漏。
+
+```java
+ThreadLocal<BigObject> tl = new ThreadLocal<>();
+tl.set(new BigObject());   // 线程池里的线程
+// ...忘了 remove
+// BigObject 永远不会被回收，直到线程销毁
+```
+
+**规则**：`ThreadLocal` 用完必须 `remove()`，最好在 `try-finally` 里：
+
+```java
+try {
+    tl.set(value);
+    // 业务逻辑
+} finally {
+    tl.remove();   // 必须清理！
+}
+```
+
+### 4.4 ThreadLocal 的典型应用
+
+- **SimpleDateFormat 共享**：每个线程一个实例。
+- **数据库连接/事务上下文**：`TransactionSynchronizationManager`。
+- **请求上下文**：用户的 traceId、租户 ID 等。
+- **请求作用域 Bean**：Spring 的 `RequestContextHolder`。
+
+## 五、线程间通信：wait / notify / notifyAll
+
+`wait`/`notify`/`notifyAll` 是 `Object` 的方法——任何对象都有。它们用于"线程间协作"：一个线程等某个条件满足，另一个线程通知它。
+
+### 5.1 必须在 synchronized 块内
+
+```java
+Object lock = new Object();
+synchronized (lock) {
+    while (!condition) {   // 用 while 不用 if
+        lock.wait();       // 释放锁，进入 WAITING
+    }
+    // condition 满足后的逻辑
+}
+
+// 另一个线程
+synchronized (lock) {
+    condition = true;
+    lock.notifyAll();      // 唤醒所有等待的线程
+}
+```
+
+**为什么必须在 synchronized 块内**：
+
+`wait` 会**释放锁并阻塞**，等待被唤醒后**重新获取锁**才返回。如果不在 synchronized 块内，没有锁可释放——抛 `IllegalMonitorStateException`。
+
+更深层原因：检查 condition 和 wait 之间必须原子——否则可能"检查通过但还没 wait，另一个线程就 notify 了"，导致 missed signal。synchronized 保证了这种原子性。
+
+### 5.2 wait vs sleep
+
+| 维度 | `wait` | `sleep` |
+| --- | --- | --- |
+| 所属 | `Object` | `Thread` |
+| 是否释放锁 | **释放** | 不释放 |
+| 使用位置 | 必须在 synchronized 块 | 任意 |
+| 唤醒方式 | `notify`/`notifyAll`/超时/中断 | 超时/中断 |
+| 状态 | WAITING / TIMED_WAITING | TIMED_WAITING |
+
+### 5.3 notify vs notifyAll
+
+- **notify**：唤醒**一个**等待线程——选哪个由 JVM 决定，不可控。
+- **notifyAll**：唤醒**所有**等待线程——它们竞争锁，只有一个能拿到，其他继续等。
+
+**为什么推荐 `notifyAll`**：`notify` 可能选错线程（比如多个条件用同一个锁，唤醒的是错误条件的线程），导致"信号丢失"。`notifyAll` 安全但开销大（叫醒所有人）。生产者-消费者等经典场景多用 `notifyAll`，或用更高级的 `Condition`（第 40 章）。
+
+### 5.4 为什么用 while 而不是 if
+
+```java
+synchronized (lock) {
+    while (!condition) {   // ✓ 用 while
+        lock.wait();
+    }
+}
+```
+
+线程被唤醒后**条件不一定还满足**——别的线程可能在你之前拿到了锁并修改了条件（虚假唤醒 / 竞争唤醒）。用 `while` 重新检查，用 `if` 就跳过了检查——这是经典 bug。
+
+## 六、实战：wait/notify 实现生产者-消费者
+
+下面这个例子用 `wait`/`notifyAll` 实现经典的生产者-消费者模型——一个有限缓冲区，生产者满了就 wait，消费者空了就 wait。还演示 `volatile` 可见性和 `ThreadLocal` 用法。
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.text.SimpleDateFormat;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // === 1. wait/notify 实现生产者-消费者 ===
+        System.out.println("=== 生产者-消费者 ===");
+        Buffer buffer = new Buffer(5);
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+
+        // 2 个生产者，2 个消费者
+        pool.submit(new Producer(buffer, "P1"));
+        pool.submit(new Producer(buffer, "P2"));
+        pool.submit(new Consumer(buffer, "C1"));
+        pool.submit(new Consumer(buffer, "C2"));
+
+        Thread.sleep(2000);
+        pool.shutdownNow();
+        pool.awaitTermination(2, TimeUnit.SECONDS);
+        System.out.println("总生产: " + buffer.totalProduced
+            + ", 总消费: " + buffer.totalConsumed);
+
+        // === 2. ThreadLocal 演示：SimpleDateFormat ===
+        System.out.println("\\n=== ThreadLocal 演示 ===");
+        ThreadLocal<SimpleDateFormat> fmtLocal = ThreadLocal.withInitial(
+            () -> new SimpleDateFormat("HH:mm:ss.SSS"));
+
+        ExecutorService fmtPool = Executors.newFixedThreadPool(3);
+        for (int i = 0; i < 3; i++) {
+            fmtPool.submit(() -> {
+                String name = Thread.currentThread().getName();
+                String fmt = fmtLocal.get().format(new Date());
+                System.out.println(name + " 时间: " + fmt + ", fmt 哈希: "
+                    + System.identityHashCode(fmtLocal.get()));
+                fmtLocal.remove();   // 必须清理
+            });
+        }
+        fmtPool.shutdown();
+        fmtPool.awaitTermination(1, TimeUnit.SECONDS);
+
+        // === 3. volatile 状态标志 ===
+        System.out.println("\\n=== volatile 状态标志 ===");
+        VolatileFlag flag = new VolatileFlag();
+        Thread worker = new Thread(() -> {
+            int count = 0;
+            while (!flag.stop) {
+                count++;
+            }
+            System.out.println("worker 收到 stop, 共循环 " + count + " 次");
+        });
+        worker.start();
+        Thread.sleep(50);
+        flag.stop = true;   // volatile 保证可见
+        worker.join(1000);
+
+        // === 4. synchronized 锁对象区别 ===
+        System.out.println("\\n=== synchronized 锁粒度 ===");
+        SyncDemo demo = new SyncDemo();
+        Thread a = new Thread(() -> demo.syncMethod("A"), "T-A");
+        Thread b = new Thread(() -> demo.syncMethod("B"), "T-B");
+        a.start(); b.start();
+        a.join(); b.join();
+    }
+}
+
+// === 有限缓冲区 ===
+class Buffer {
+    private final Queue<Integer> queue = new LinkedList<>();
+    private final int capacity;
+    final AtomicInteger totalProduced = new java.util.concurrent.atomic.AtomicInteger();
+    final AtomicInteger totalConsumed = new java.util.concurrent.atomic.AtomicInteger();
+
+    Buffer(int capacity) { this.capacity = capacity; }
+
+    public synchronized void put(int value, String who) throws InterruptedException {
+        while (queue.size() == capacity) {
+            System.out.println(who + ": 缓冲区满，等待...");
+            wait();
+        }
+        queue.offer(value);
+        totalProduced.incrementAndGet();
+        System.out.println(who + " 生产 " + value + " (size=" + queue.size() + ")");
+        notifyAll();   // 通知消费者
+    }
+
+    public synchronized int take(String who) throws InterruptedException {
+        while (queue.isEmpty()) {
+            System.out.println(who + ": 缓冲区空，等待...");
+            wait();
+        }
+        int value = queue.poll();
+        totalConsumed.incrementAndGet();
+        System.out.println("  " + who + " 消费 " + value + " (size=" + queue.size() + ")");
+        notifyAll();   // 通知生产者
+        return value;
+    }
+}
+
+class Producer implements Runnable {
+    private final Buffer buffer;
+    private final String name;
+    Producer(Buffer b, String n) { buffer = b; name = n; }
+    public void run() {
+        try {
+            int i = 0;
+            while (!Thread.currentThread().isInterrupted()) {
+                buffer.put(i++, name);
+                Thread.sleep(50);
+            }
+        } catch (InterruptedException e) {
+            // 正常退出
+        }
+    }
+}
+
+class Consumer implements Runnable {
+    private final Buffer buffer;
+    private final String name;
+    Consumer(Buffer b, String n) { buffer = b; name = n; }
+    public void run() {
+        try {
+            while (!Thread.currentThread().isInterrupted()) {
+                buffer.take(name);
+                Thread.sleep(80);
+            }
+        } catch (InterruptedException e) {
+            // 正常退出
+        }
+    }
+}
+
+class VolatileFlag {
+    volatile boolean stop = false;
+}
+
+class SyncDemo {
+    public synchronized void syncMethod(String tag) {
+        System.out.println(tag + " 进入 syncMethod, 持有锁");
+        try { Thread.sleep(100); } catch (InterruptedException e) {}
+        System.out.println(tag + " 释放锁");
+    }
+}`} />
+
+> **观察重点**：
+> - **生产者-消费者**：缓冲区满时生产者 `wait`，空时消费者 `wait`，每次操作后 `notifyAll` 唤醒对方。
+> - **用 `while` 不用 `if`**——`wait` 返回后必须重新检查条件。
+> - **`notifyAll` 而非 `notify`**——避免信号丢失。
+> - **`ThreadLocal`**：每个线程的 `SimpleDateFormat` 哈希值不同——独立副本。用完 `remove`。
+> - **`volatile`**：worker 能感知 `stop = true` 立即退出。
+> - **`synchronized` 实例方法**：T-A 和 T-B 串行进入——同实例的同步方法互斥。
+
+## 七、本章小结
+
+| 机制 | 保证 | 适用 |
+| --- | --- | --- |
+| `synchronized` 方法/块 | 原子+可见+有序 | 复合操作、临界区 |
+| `volatile` 变量 | 可见+有序（**不保证原子**） | 状态标志、DCL、一次性发布 |
+| `ThreadLocal` | 隔离（不共享） | 每线程一份实例（如 DateFormat） |
+| `wait`/`notify` | 线程协作 | 生产者-消费者、条件等待 |
+
+| 概念 | 核心要点 |
+| --- | --- |
+| monitor | `synchronized` 的底层，monitorenter/monitorexit，计数器实现可重入 |
+| 锁升级 | 无锁→偏向→轻量级（自旋）→重量级（OS 互斥量），JDK 15+ 偏向锁默认禁用 |
+| volatile 屏障 | 写前 StoreStore、写后 StoreLoad、读后 LoadLoad+LoadStore |
+| volatile 不保证原子 | `i++` 仍不安全，复合操作要用锁或原子类 |
+| MESI | M/E/S/I 四态，写时 Invalidate 其他缓存行 |
+| ThreadLocal 实现 | `Thread.threadLocals` 是 `ThreadLocalMap`，key 是弱引用 |
+| ThreadLocal 内存泄漏 | 线程池下 value 不释放，必须 `remove()` |
+| wait/notify 必须在 sync 块 | 防止 missed signal，没有锁会抛 `IllegalMonitorStateException` |
+| while 不 if | `wait` 返回后重新检查条件，防止虚假唤醒 |
+
+**记忆口诀**：
+
+- **synchronized 锁对象**——实例方法锁 this，静态方法锁 Class，代码块锁括号里。
+- **volatile 三保证**——可见、有序、**不原子**。`i++` 用它仍不安全。
+- **ThreadLocal 是 Thread 的 Map**——不是全局 Map，key 是弱引用但 value 是强引用，必须 `remove`。
+- **wait 释放锁，sleep 不释放**——面试高频。
+- **wait 必须在 synchronized 块**——否则 `IllegalMonitorStateException`。
+- **while 检查条件**——`if` 是 bug 源。
+
+## 结语：从同步到锁的进化
+
+这一章讲的是 Java 最基础的同步机制——`synchronized`/`volatile`/`ThreadLocal`/`wait`/`notify`。它们解决了大部分同步问题，但也有局限：
+
+- `synchronized` 不能"中断等待的锁"、"超时获取"、"尝试获取"。
+- `wait`/`notify` 只能有一个等待队列，不能针对不同条件。
+- `volatile` 不保证原子性。
+
+下一章讲并发典型问题——死锁、饥饿、活锁、虚假共享，那些用错了同步机制会掉进去的坑。再之后的第 40 章，`Lock`/`Condition`/`ReadWriteLock`/`StampedLock` 等更强大的同步器登场，弥补 `synchronized`/`wait`/`notify` 的不足。

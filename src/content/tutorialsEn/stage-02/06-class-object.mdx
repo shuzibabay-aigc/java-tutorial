@@ -1,0 +1,435 @@
+---
+title: "Classes and Objects"
+chapter: 6
+stage: "Stage 2"
+stageName: "Object-Oriented Programming"
+order: 1
+description: "Start from object-oriented thinking, master class definition, object creation, the this keyword, method overloading and varargs, and design a Hero class"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "类", "对象", "重载"]
+---
+
+# Classes and Objects
+
+If the first five chapters taught us about "coffee beans" — variables, operators, control flow, and arrays — then starting from this chapter, we will grind them, extract them, and serve a complete drink. This is **Object-Oriented Programming** (OOP).
+
+Imagine a barista. She not only knows "what coffee beans are", but also knows "how to turn beans into a latte". In the object-oriented world, we no longer focus only on "data" and "steps" — we focus on "who does what". Data and the methods that operate on that data are rolled together into a single unit, and that is an **Object**.
+
+This chapter is the starting point of our object-oriented journey. We will start from the underlying philosophy, understand the essence of classes and objects, learn to define our own types, and ultimately design a "Hero" that can fight.
+
+## 1. The Object-Oriented Mindset: An Overview of the Three Pillars
+
+In the era of procedural programming, a program was a sequence of "do this first, then do that" instructions. This approach is clear and intuitive for small programs, but as software scales, the code turns into a tangled mess — a piece of data gets freely modified by dozens of functions, and bugs hide like dust in a spiderweb, hard to spot.
+
+Object-oriented thinking offers a brand-new way to organize code: **treat a program as a set of collaborating objects**. Each object has its own data (state) and behavior (methods), and they collaborate through message passing. This approach is closer to how humans perceive the world — we see "a red car is accelerating", not "first set the color variable, then call the accelerate function".
+
+Object-oriented programming has three core pillars, which will run through the next several chapters:
+
+- **Encapsulation**: Hide data inside objects and expose only the necessary interfaces. Just like the internal wiring of a coffee machine is enclosed in a metal shell — you only need to press a button; you don't need to understand the circuitry. Encapsulation prevents an object's state from being tampered with arbitrarily, improving security.
+
+- **Inheritance**: A subclass can inherit fields and methods from its parent class, avoiding reinventing the wheel. Just like a latte inherits the base recipe of "coffee + milk" and then adds its own unique foam art.
+
+- **Polymorphism**: The same method call exhibits different behavior on different objects. Just like the same instruction "please serve a cup" makes a barista, a bartender, and a tea master produce completely different drinks.
+
+In this chapter we will focus on "classes and objects" themselves. Encapsulation, inheritance, and polymorphism will each be explored in depth in the chapters that follow.
+
+## 2. Classes and Objects: Blueprint and House
+
+### 2.1 A Vivid Analogy
+
+Imagine an architect. She draws a house design on paper — how many bedrooms, how many bathrooms, where the doors and windows go. This **blueprint** is a **Class**: it is a "template" or "blueprint" that describes the common features of a certain kind of thing.
+
+The actual house built from the blueprint is an **Object** — also called an **Instance**. The same blueprint can be used to build many houses; they share the same structure, but their furniture and occupants differ.
+
+```
+Class (blueprint)       Object (instance)
+  House        →    House@1a2b (your house)
+                 →    House@3c4d (your neighbor's house)
+                 →    House@5e6f (another one)
+```
+
+A class is an abstract "concept"; an object is a concrete "existence". **Defining a class allocates no memory — only when you `new` an object is it created in heap memory.**
+
+### 2.2 Defining a Class
+
+A Java class typically contains three kinds of members:
+
+- **Field**: The state/attributes of an object, sometimes called a member variable.
+- **Method**: The behavior/functionality of an object.
+- **Constructor**: Used to create and initialize an object.
+
+```java
+public class Coffee {
+    // Fields (attributes)
+    String name;       // 名字
+    int size;          // 杯型（毫升）
+    boolean hasMilk;   // 是否加奶
+
+    // Constructor: same name as the class, no return type
+    public Coffee(String name, int size, boolean hasMilk) {
+        this.name = name;
+        this.size = size;
+        this.hasMilk = hasMilk;
+    }
+
+    // Method (behavior)
+    public void describe() {
+        String milk = hasMilk ? "加奶" : "不加奶";
+        System.out.println(name + "，" + size + "ml，" + milk);
+    }
+}
+```
+
+### 2.3 Creating and Using Objects
+
+Use the `new` keyword to call the constructor and create an object in heap memory:
+
+```java
+Coffee c1 = new Coffee("拿铁", 350, true);  // Create the object
+c1.describe();                              // Call the method: 拿铁，350ml，加奶
+System.out.println(c1.size);                // Access the field: 350
+```
+
+This single line does three things:
+
+1. `new Coffee(...)` allocates memory in the **heap** and initializes the fields.
+2. The constructor is called, assigning values to the fields.
+3. The object's **reference** (address) is assigned to the stack variable `c1`.
+
+> ⚠️ Note: In Java, object variables hold a "reference", not the object itself. `Coffee c1 = c2;` does not copy the object — it makes `c1` and `c2` point to the same object.
+
+Let's run it all and see what happens:
+
+<CodeRunner code={`public class Main {
+    // 定义一个 Coffee 类
+    static class Coffee {
+        String name;
+        int size;
+        boolean hasMilk;
+
+        // 构造方法
+        public Coffee(String name, int size, boolean hasMilk) {
+            this.name = name;
+            this.size = size;
+            this.hasMilk = hasMilk;
+        }
+
+        // 方法
+        public void describe() {
+            String milk = hasMilk ? "加奶" : "不加奶";
+            System.out.println(name + "，" + size + "ml，" + milk);
+        }
+    }
+
+    public static void main(String[] args) {
+        Coffee c1 = new Coffee("拿铁", 350, true);
+        Coffee c2 = new Coffee("美式", 400, false);
+
+        c1.describe();
+        c2.describe();
+
+        // 修改字段
+        c2.size = 500;
+        c2.describe();
+    }
+}`} />
+
+## 3. The this Keyword: Pointing to "the Current Object"
+
+You may have noticed the `this.name = name;` pattern inside the constructor. What is `this`?
+
+### 3.1 this Refers to the Current Object
+
+**`this` is an implicit parameter that represents "the current object that is calling this method"**. When a field name collides with a parameter name, `this.name` refers to the field while `name` refers to the parameter — `this` plays a disambiguating role.
+
+```java
+public Coffee(String name, int size, boolean hasMilk) {
+    this.name = name;          // this.name is the field, name is the parameter
+    this.size = size;
+    this.hasMilk = hasMilk;
+}
+```
+
+If you omit `this`, you end up with `name = name;` — assigning the parameter to itself, leaving the field at its default value (`null`/`0`/`false`). This is a classic pitfall for newcomers.
+
+### 3.2 this Inside Regular Methods
+
+Inside a regular method, `this` refers to the object on which the method was invoked:
+
+```java
+public void describe() {
+    // this.name is equivalent to name; this can be omitted
+    System.out.println(this.name + "，" + this.size + "ml");
+}
+```
+
+When a field name does not collide with a local variable, `this` is usually omitted; the compiler fills it in for you.
+
+### 3.3 this Calling Another Constructor
+
+`this(...)` lets one constructor call another constructor in the same class, avoiding duplicated initialization code. Note: **`this(...)` must be the first statement of a constructor**.
+
+```java
+public class Coffee {
+    String name;
+    int size;
+
+    // Main constructor
+    public Coffee(String name, int size) {
+        this.name = name;
+        this.size = size;
+    }
+
+    // Overloaded constructor: default 350ml
+    public Coffee(String name) {
+        this(name, 350);   // Calls the constructor above
+    }
+}
+```
+
+## 4. Method Overloading: One Name, Many Bodies
+
+### 4.1 Why Overloading Is Needed
+
+Imagine a coffee shop's ordering system. A customer might say "a latte", or "a latte, large", or even "a latte, large, light ice". If every phrasing required a different method name — `orderLatte()`, `orderLatteWithSize()`, `orderLatteWithSizeAndIce()` — the names would explode.
+
+**Method Overloading** allows multiple **same-named** methods to coexist in the same class, as long as their **parameter lists differ** (in number, type, or order of parameters). The compiler automatically picks the right method based on the arguments you pass.
+
+### 4.2 The Rules of Overloading
+
+- The method name must be the **same**.
+- The parameter list must be **different** (at least one of: number, type, or order).
+- Return type and access modifier **do not affect** overloading (you cannot distinguish overloads by return type alone).
+
+```java
+public class CoffeeMaker {
+    // Overload 1: no parameters
+    public void make() {
+        System.out.println("做一杯默认咖啡");
+    }
+
+    // Overload 2: one String parameter
+    public void make(String name) {
+        System.out.println("做一杯" + name);
+    }
+
+    // Overload 3: String + int parameters
+    public void make(String name, int size) {
+        System.out.println("做一杯" + size + "ml 的" + name);
+    }
+
+    // Overload 4: int + String (different order, still overloading)
+    public void make(int size, String name) {
+        System.out.println(size + "ml 的" + name + "做好了");
+    }
+}
+```
+
+When calling, the compiler matches the most appropriate method based on the argument types and count:
+
+```java
+maker.make();                  // Calls overload 1
+maker.make("拿铁");            // Calls overload 2
+maker.make("拿铁", 350);       // Calls overload 3
+maker.make(350, "拿铁");       // Calls overload 4
+```
+
+> 💡 **Overloading vs Overriding**: Overloading happens **within the same class** and is compile-time polymorphism; Overriding happens **between parent and child classes** and is runtime polymorphism. Don't confuse the two — overriding is covered in detail in a later chapter.
+
+## 5. Varargs: Flexible Parameter Counts
+
+### 5.1 Syntax
+
+Sometimes we cannot know in advance how many arguments will be passed — for example "tally up the sales over these days" might be 3 days, or 10. Java 5 introduced **variable arguments** (varargs):
+
+```java
+type... parameterName
+```
+
+For example, `int... nums` says we accept any number (including zero) of `int` arguments. Inside the method, `nums` is treated as an **array**.
+
+```java
+public int sum(int... nums) {
+    int total = 0;
+    for (int n : nums) {
+        total += n;
+    }
+    return total;
+}
+```
+
+You can pass any number of arguments when calling it:
+
+```java
+sum();                // 0
+sum(1, 2, 3);         // 6
+sum(10, 20, 30, 40);  // 100
+sum(new int[]{1, 2}); // You can also pass an array directly
+```
+
+### 5.2 Rules for Varargs
+
+- A method can have **at most one** varargs parameter.
+- The varargs parameter must be the **last** one in the parameter list.
+
+```java
+// Correct: varargs last
+public void log(String tag, String... messages) { ... }
+
+// Compile error: varargs not last
+// public void log(String... messages, String tag) { ... }
+```
+
+### 5.3 The Essence of Varargs
+
+Varargs is essentially **syntactic sugar**. The compiler turns it into an array — at the bytecode level, `int... nums` is just `int[] nums`. `sum(1, 2, 3)` is effectively `sum(new int[]{1, 2, 3})`. Many Java APIs use varargs, including `String.format`, `System.out.printf`, `List.of`, and `Set.of`.
+
+> ⚠️ **The varargs + overloading trap**: When an overload set contains both a varargs version and a fixed-args version, the compiler prefers the fixed-args version. For example, if both `make(String name)` and `make(String... names)` exist, calling `make("拿铁")` matches the former. If only the varargs version exists, `make()` is also a legal call (zero arguments), which can sometimes cause surprising behavior.
+
+## 6. Hands-On: Designing a Hero Class
+
+Putting everything together, let's design a "Hero" class for a game. A hero has a name, hit points, and attack power, and can launch attacks.
+
+### 6.1 Design Outline
+
+- **Fields**: `name`, `hp` (hit points), `attack` (attack power).
+- **Constructor**: Initialize the hero's attributes.
+- **Methods**:
+  - `attack(Hero target)`: Attack another hero, reducing their HP.
+  - `isAlive()`: Check whether the hero is still alive.
+  - `showStatus()`: Display the hero's status.
+- **Overloading**: `rest()` (restore a fixed amount of HP) and `rest(int amount)` (restore a specified amount).
+
+### 6.2 Complete Implementation
+
+<CodeRunner code={`public class Main {
+    // 英雄类
+    static class Hero {
+        String name;
+        int hp;        // 血量
+        int attack;    // 攻击力
+
+        // 构造方法
+        public Hero(String name, int hp, int attack) {
+            this.name = name;
+            this.hp = hp;
+            this.attack = attack;
+        }
+
+        // 攻击另一个英雄
+        public void attack(Hero target) {
+            if (!this.isAlive()) {
+                System.out.println(name + " 已倒下，无法攻击！");
+                return;
+            }
+            if (!target.isAlive()) {
+                System.out.println(target.name + " 已倒下，无需攻击。");
+                return;
+            }
+            System.out.println(name + " 攻击了 " + target.name + "，造成 " + attack + " 点伤害！");
+            target.hp -= this.attack;
+            if (target.hp < 0) target.hp = 0;
+        }
+
+        // 重载：休息恢复 50 血
+        public void rest() {
+            this.hp += 50;
+            System.out.println(name + " 休息了一下，恢复了 50 点血量（当前：" + hp + "）");
+        }
+
+        // 重载：休息恢复指定血量
+        public void rest(int amount) {
+            this.hp += amount;
+            System.out.println(name + " 休息了一下，恢复了 " + amount + " 点血量（当前：" + hp + "）");
+        }
+
+        // 判断是否存活
+        public boolean isAlive() {
+            return hp > 0;
+        }
+
+        // 显示状态
+        public void showStatus() {
+            String status = isAlive() ? "存活" : "阵亡";
+            System.out.printf("[%s] 血量=%d, 攻击力=%d, 状态=%s%n", name, hp, attack, status);
+        }
+    }
+
+    public static void main(String[] args) {
+        Hero arthur = new Hero("亚瑟", 500, 80);
+        Hero luban = new Hero("鲁班七号", 300, 120);
+
+        System.out.println("=== 初始状态 ===");
+        arthur.showStatus();
+        luban.showStatus();
+
+        System.out.println("\\n=== 第一回合 ===");
+        arthur.attack(luban);
+        luban.attack(arthur);
+
+        System.out.println("\\n=== 第二回合 ===");
+        arthur.attack(luban);
+        arthur.attack(luban);   // 鲁班血量已为 0
+        luban.attack(arthur);   // 鲁班倒下，无法攻击
+
+        System.out.println("\\n=== 鲁班尝试休息恢复 ===");
+        luban.rest(100);        // 调用重载方法
+
+        System.out.println("\\n=== 最终状态 ===");
+        arthur.showStatus();
+        luban.showStatus();
+    }
+}`} />
+
+### 6.3 Code Highlights
+
+- The constructor `Hero(String, int, int)` initializes the object.
+- `this.name`, `this.hp`, and `this.attack` use `this` to distinguish fields from parameters.
+- `rest()` and `rest(int)` form a **method overload** — the compiler picks one based on the argument count.
+- `attack(Hero target)` accepts a `Hero` object as an argument — objects can be passed as method arguments and return values; what gets passed is the reference.
+- `isAlive()` returns a `boolean`, illustrating the benefit of "encapsulating logic in methods": the caller doesn't need to worry about the details of `hp ＞ 0`.
+
+## 7. The Memory Picture of Classes and Objects
+
+Understanding memory layout helps you avoid many beginner pitfalls.
+
+```java
+Hero arthur = new Hero("亚瑟", 500, 80);
+```
+
+What happens in memory after this line executes?
+
+1. A local variable `arthur` is created on the **stack**.
+2. A block of memory is allocated on the **heap** to hold the `Hero` object, with fields initialized to `name="亚瑟"`, `hp=500`, `attack=80`.
+3. `arthur` stores the address (reference) of the object in the heap.
+
+```
+Stack                     Heap
+arthur ──────────────►  Hero object
+                        name = "亚瑟"
+                        hp = 500
+                        attack = 80
+```
+
+If you execute `Hero luban = arthur;`, then `luban` and `arthur` point to **the same object** — modifying `luban.hp` also affects `arthur.hp`. This is the defining characteristic of reference types.
+
+> ⚠️ **The special case of strings**: As of Java 7, `String` objects also live on the heap (previously in the string constant pool in the method area). String literals (like `"亚瑟"`) are placed in the constant pool for reuse, while `new String("亚瑟")` always creates a new object on the heap. These details will be discussed further in later chapters.
+
+## 8. Chapter Summary
+
+| Concept | Key Point |
+| --- | --- |
+| Class | Template/blueprint that defines fields, methods, and constructors |
+| Object | An instance of a class, created on the heap via `new` |
+| Constructor | Same name as the class, no return type, used to initialize objects |
+| `this` | Refers to the current object; `this(...)` calls another constructor in the same class |
+| Method overloading | Same method name with different parameter lists; resolved at compile time |
+| Varargs | `type... name`, essentially an array, must be the last parameter |
+
+## Conclusion
+
+In this chapter we stepped from the old world of "procedural programming" into the new world of "object-oriented programming". We learned to define our own types with classes, create objects with `new`, refer to ourselves with `this`, and let one name carry many responsibilities through overloading.
+
+But our current `Hero` class has a problem: its fields are `public`, so anyone can write `arthur.hp = -999` and make the hero mysteriously "negative HP". This kind of data insecurity is exactly what the next chapter, "Encapsulation", will solve. Encapsulation is the first line of defense among the three pillars of OOP, and the cornerstone of writing robust code.
+
+Let's take the "hero" story with us and march into the world of encapsulation.

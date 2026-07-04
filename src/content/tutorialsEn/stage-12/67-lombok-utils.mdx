@@ -1,0 +1,723 @@
+---
+title: "Lombok and Common Utility Libraries"
+chapter: 67
+stage: "Stage 12"
+stageName: "Engineering and Ecosystem"
+order: 5
+description: "Master Lombok (@Data/@Getter/@Setter/@Builder/@Slf4j/@AllArgsConstructor), Apache Commons Lang/Collections, Guava (Collections/Cache/EventBus), the Hutool utility toolkit, and Vavr functional utilities"
+pubDate: 2026-07-03
+tags: ["Java", "Lombok", "Guava", "Apache Commons", "Hutool", "Utility Libraries"]
+---
+
+# Lombok and Common Utility Libraries
+
+The most headache-inducing part of writing Java is **boilerplate code** — a single POJO needs getter/setter/toString/equals/hashCode, adding up to dozens of lines; every class has to declare a logger manually; constructors pile up in overloads. You can't skip this code, but writing it is tedious. **Lombok** was born to eliminate boilerplate — one annotation replaces dozens of lines.
+
+But Lombok is just the tip of the utility-library iceberg. The Java ecosystem also has Apache Commons, Guava, Hutool, Vavr, and more, covering strings, collections, caching, IO, functional programming, and everything in between. This chapter walks through all of them at once.
+
+## 1. Lombok
+
+**Lombok** is the "code-generation magic" open-sourced in 2009 — it uses an **annotation processor** to inject methods into bytecode at compile time. You only write annotations, and the compiled `.class` file contains the full getter/setter.
+
+### 1.1 Installation
+
+```xml
+<dependency>
+    <groupId>org.projectlombok</groupId>
+    <artifactId>lombok</artifactId>
+    <version>1.18.30</version>
+    <scope>provided</scope>
+</dependency>
+```
+
+IDEA needs the Lombok plugin (built into newer versions), and so does Eclipse. The annotation processor does its work at compile time; if the IDE doesn't recognize it, it'll mark everything red.
+
+### 1.2 @Data: One Annotation Covers All
+
+```java
+import lombok.*;
+
+@Data                   // Equivalent to @Getter + @Setter + @ToString + @EqualsAndHashCode + @RequiredArgsConstructor
+public class User {
+    private Long id;
+    private String name;
+    private Integer age;
+}
+```
+
+A single `@Data` line replaces five — it auto-generates:
+
+- getter/setter for all fields
+- `toString()`
+- `equals()` / `hashCode()`
+- `@RequiredArgsConstructor` (constructor for final fields)
+
+### 1.3 Common Annotations
+
+| Annotation | What it generates |
+| --- | --- |
+| `@Getter` / `@Setter` | getter/setter |
+| `@ToString` | `toString` |
+| `@EqualsAndHashCode` | `equals` / `hashCode` |
+| `@NoArgsConstructor` | No-arg constructor |
+| `@AllArgsConstructor` | All-args constructor |
+| `@RequiredArgsConstructor` | Constructor for final/@NonNull fields (recommended for dependency injection) |
+| `@Data` | Combination of the above five |
+| `@Builder` | Builder pattern |
+| `@Slf4j` | `private static final Logger log = ...` |
+| `@Log` | Uses `java.util.logging` |
+| `@SneakyThrows` | Sneaky-throws checked exceptions (don't overuse) |
+| `@Value` | Immutable class (all final fields) |
+| `@NonNull` | Auto null check |
+| `@Cleanup` | Auto close (shorthand for try-with-resources) |
+
+### 1.4 @Builder: Fluent Construction
+
+```java
+@Builder
+@Data
+public class User {
+    private Long id;
+    private String name;
+    private Integer age;
+}
+
+// Usage
+User u = User.builder()
+    .id(1L)
+    .name("Alice")
+    .age(20)
+    .build();
+```
+
+The Builder pattern's advantage — optional parameters combine freely, and many parameters stay readable. Lombok's `@Builder` auto-generates the Builder inner class, saving you from writing dozens of lines of template by hand.
+
+### 1.5 @Slf4j: Auto-Declare the Logger
+
+```java
+@Slf4j
+public class UserService {
+    public void login(String name) {
+        log.info("User {} logged in", name);   // Use log directly
+    }
+}
+```
+
+No need to write `private static final Logger log = LoggerFactory.getLogger(...)` in every class — one `@Slf4j` handles it.
+
+### 1.6 @RequiredArgsConstructor: Constructor Injection
+
+Spring recommends **constructor injection** (instead of `@Autowired` field injection), and Lombok makes it one line:
+
+```java
+@Service
+@RequiredArgsConstructor
+public class UserService {
+    private final UserRepository userRepo;     // final -> goes into the constructor
+    private final EmailService emailService;
+    private final CacheService cacheService;
+    // Lombok auto-generates a 3-arg constructor; Spring auto-injects
+}
+```
+
+`final` fields are included in the constructor by `@RequiredArgsConstructor` — Spring sees the constructor and injects automatically.
+
+### 1.7 @SneakyThrows and @Cleanup
+
+```java
+// @SneakyThrows: no try-catch and no throws needed
+@SneakyThrows
+public String read(String path) {
+    return Files.readString(Path.of(path));   // No need to declare IOException
+}
+
+// @Cleanup: auto close
+public void copy(String src, String dst) throws IOException {
+    @Cleanup InputStream in = new FileInputStream(src);
+    @Cleanup OutputStream out = new FileOutputStream(dst);
+    in.transferTo(out);
+    // Auto in.close() / out.close()
+}
+```
+
+These two are rather "magical" — `@SneakyThrows` uses bytecode tricks to sneakily throw checked exceptions (bypassing compiler checks); overuse hurts readability. `@Cleanup` isn't as standardized as `try-with-resources`; use with caution.
+
+## 2. Apache Commons
+
+Apache Commons is a collection of utility libraries from the Apache Software Foundation, split into multiple modules. The most useful are **Lang** and **Collections**.
+
+### 2.1 Commons Lang
+
+```xml
+<dependency>
+    <groupId>org.apache.commons</groupId>
+    <artifactId>commons-lang3</artifactId>
+    <version>3.13.0</version>
+</dependency>
+```
+
+```java
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.Validate;
+
+// Strings
+StringUtils.isBlank("  ");              // true (whitespace)
+StringUtils.isEmpty("");                // true
+StringUtils.isBlank(null);              // true (null-safe)
+StringUtils.split("a,b,,c", ",");       // ["a", "b", "c"] (skips empties)
+StringUtils.repeat("-", 5);             // "-----"
+StringUtils.leftPad("1", 3, '0');       // "001"
+StringUtils.substringBetween("a[b]c", "[", "]");  // "b"
+
+// Object utilities
+ObjectUtils.defaultIfNull(null, "default");   // "default"
+ObjectUtils.firstNonNull(null, null, "a"); // "a"
+
+// Validation
+Validate.notNull(arg, "arg must not be null");
+Validate.isTrue(i > 0, "i must be positive");
+```
+
+The difference between `StringUtils.isBlank` and `String.isEmpty` — `isBlank` treats pure whitespace as blank (`"  "` is blank), while `isEmpty` doesn't. Front-ends often send a bunch of spaces, so `isBlank` is safer.
+
+### 2.2 Commons Collections
+
+```java
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.ListUtils;
+
+// Collection operations
+CollectionUtils.isEmpty(list);        // null-safe emptiness check
+CollectionUtils.isNotEmpty(list);
+ListUtils.union(list1, list2);        // Union
+ListUtils.intersection(list1, list2); // Intersection
+ListUtils.subtract(list1, list2);     // Difference
+```
+
+## 3. Guava: Google's Utility Library
+
+**Guava** is Google's open-source Java utility library — more modern than Commons, with a more elegant API.
+
+```xml
+<dependency>
+    <groupId>com.google.guava</groupId>
+    <artifactId>guava</artifactId>
+    <version>32.1.3-jre</version>
+</dependency>
+```
+
+### 3.1 Collection Enhancements
+
+```java
+import com.google.common.collect.*;
+
+// Immutable collections (highly recommended!)
+ImmutableList<String> colors = ImmutableList.of("red", "green", "blue");
+ImmutableMap<String, Integer> prices = ImmutableMap.of(
+    "apple", 5, "banana", 3, "orange", 4);
+
+// Multimap (one key, multiple values)
+ListMultimap<String, String> multimap = ArrayListMultimap.create();
+multimap.put("fruit", "apple");
+multimap.put("fruit", "banana");
+multimap.get("fruit");   // [apple, banana]
+
+// BiMap (reverse-lookup value -> key)
+BiMap<String, Integer> biMap = HashBiMap.create();
+biMap.put("one", 1);
+biMap.inverse().get(1);   // "one"
+
+// Table (two-dimensional table)
+Table<String, String, Integer> table = HashBasedTable.create();
+table.put("Beijing", "population", 21000000);
+table.row("Beijing");   // {population=21000000}
+
+// Lists/Sets factories
+List<String> list = Lists.newArrayList("a", "b", "c");
+Set<String> set = Sets.newHashSet("a", "b");
+
+// Set operations
+Sets.union(set1, set2);          // Union
+Sets.intersection(set1, set2);   // Intersection
+Sets.difference(set1, set2);     // Difference
+```
+
+Immutable collections are the essence of Guava — `ImmutableList`/`ImmutableMap` can't be modified after creation, are thread-safe, prevent accidental mutation, and save memory. They're more thorough than `Collections.unmodifiableList` (the latter is only a view; if the underlying collection changes, so does the view).
+
+### 3.2 Cache: Local Cache
+
+```java
+import com.google.common.cache.*;
+
+Cache<String, User> cache = CacheBuilder.newBuilder()
+    .maximumSize(1000)                          // At most 1000 entries
+    .expireAfterWrite(10, TimeUnit.MINUTES)     // Expire 10 minutes after write
+    .expireAfterAccess(5, TimeUnit.MINUTES)     // Expire 5 minutes after access
+    .recordStats()                              // Record statistics
+    .build();
+
+// Write
+cache.put("user:1", new User(1, "Alice"));
+
+// Read (auto-load)
+User u = cache.get("user:1", () -> loadFromDb(1));   // If absent, call lambda to load
+
+// Stats
+CacheStats stats = cache.stats();
+stats.hitRate();        // Hit rate
+stats.evictionCount();  // Eviction count
+```
+
+`LoadingCache` goes one step further — specify a `CacheLoader` at build time to auto-load on demand:
+
+```java
+LoadingCache<String, User> loadingCache = CacheBuilder.newBuilder()
+    .maximumSize(1000)
+    .build(new CacheLoader<String, User>() {
+        @Override
+        public User load(String key) {
+            return loadFromDb(key);   // Auto-called on cache miss
+        }
+    });
+
+User u = loadingCache.get("user:1");   // Auto-loads
+```
+
+### 3.3 EventBus: In-Process Events
+
+```java
+import com.google.common.eventbus.*;
+
+EventBus bus = new EventBus();
+
+// Subscribe
+class OrderEventHandler {
+    @Subscribe
+    public void onOrder(OrderEvent event) {
+        System.out.println("Handle order: " + event);
+    }
+}
+bus.register(new OrderEventHandler());
+
+// Publish
+bus.post(new OrderEvent("ORD-001", 99.5));
+// Auto-calls onOrder
+```
+
+EventBus implements "publish-subscribe" — publishers don't need to know who subscribes; loosely coupled.
+
+### 3.4 Other Handy Utilities
+
+```java
+// Joiner / Splitter (more powerful than the JDK's)
+Joiner.on(",").join(list);                      // Doesn't throw NPE
+Splitter.on(",").trimResults().omitEmptyStrings().split("a, b,, c");
+// -> [a, b, c]
+
+// Preconditions (pre-validation)
+Preconditions.checkNotNull(arg, "arg must not be null");
+Preconditions.checkArgument(i > 0, "i must be positive, got %s", i);
+Preconditions.checkState(state == READY, "Wrong state");
+
+// StopWatch (timing)
+Stopwatch sw = Stopwatch.createStarted();
+// ... business logic
+sw.stop();
+sw.elapsed(TimeUnit.MILLISECONDS);
+
+// Optional (Guava had it first; after Java 8 use java.util.Optional)
+Optional<User> maybe = Optional.fromNullable(user);
+```
+
+## 4. Hutool: A Chinese-Origin Utility Toolkit
+
+**Hutool** is a utility toolkit contributed by Chinese developers — its API uses Chinese-style naming, is feature-complete, and feels friendly to use.
+
+```xml
+<dependency>
+    <groupId>cn.hutool</groupId>
+    <artifactId>hutool-all</artifactId>
+    <version>5.8.24</version>
+</dependency>
+```
+
+```java
+import cn.hutool.core.util.StrUtil;
+import cn.hutool.core.collection.CollUtil;
+import cn.hutool.core.date.DateUtil;
+import cn.hutool.core.io.FileUtil;
+import cn.hutool.crypto.SecureUtil;
+import cn.hutool.http.HttpUtil;
+import cn.hutool.json.JSONUtil;
+
+// Strings
+StrUtil.isBlank("  ");                 // true
+StrUtil.format("User {}'s age {}", "Alice", 20);  // Parameterized
+
+// Collections
+CollUtil.newArrayList("a", "b");
+CollUtil.isEmpty(list);
+
+// Dates
+DateUtil.now();                        // Current time string
+DateUtil.formatDateTime(new Date());
+DateUtil.parse("2024-01-15");
+
+// Files
+FileUtil.readUtf8String("config.yml");
+FileUtil.writeUtf8String("content", "out.txt");
+
+// HTTP
+String resp = HttpUtil.get("https://example.com");
+HttpUtil.post(url, jsonBody);
+
+// JSON
+JSONUtil.toJsonStr(obj);
+JSONUtil.parseObj(json).getStr("name");
+
+// Crypto
+SecureUtil.md5("password");            // MD5
+SecureUtil.sha1("password");
+```
+
+Hutool's strength is "out of the box" — HTTP, JSON, crypto, Excel, regex, caching all included; it's very popular in Chinese projects.
+
+## 5. Vavr: Functional Utilities
+
+**Vavr** (formerly Javaslang) brings Scala-style functional utilities to Java — `Option`/`Try`/`Tuple`/`Stream`/functional collections.
+
+```xml
+<dependency>
+    <groupId>io.vavr</groupId>
+    <artifactId>vavr</artifactId>
+    <version>0.10.4</version>
+</dependency>
+```
+
+```java
+import io.vavr.control.Try;
+import io.vavr.control.Option;
+import io.vavr.collection.List;
+import io.vavr.Tuple;
+
+// Try: replaces try-catch, handles exceptions functionally
+Try<Integer> result = Try.of(() -> 1 / 0);
+result.isFailure();           // true
+result.getOrElse(-1);         // -1
+result.recover(e -> -1);      // On failure, return -1
+
+// Option: replaces null, more functional than java.util.Optional
+Option<String> name = Option.of(null);
+name.getOrElse("anonymous");   // "anonymous"
+
+// Functional collections (immutable, more powerful than Stream)
+List.range(0, 5);             // List(0,1,2,3,4)
+List.of(1, 2, 3)
+    .map(x -> x * 2)
+    .filter(x -> x > 2)
+    .sum();                   // 10
+
+// Tuple (Java has no tuples; Vavr provides them)
+var t = Tuple.of("Alice", 20, true);
+t._1;   // "Alice"
+t._2;   // 20
+```
+
+`Try` is the essence of Vavr — treats exceptions as values, chains recover/transform, and avoids try-catch everywhere. But Vavr's style is aggressive; if the team isn't comfortable with functional programming, use with caution.
+
+## 6. Hands-On: Common Utility Library Features
+
+Since the Piston environment doesn't have the above third-party dependencies, below we use pure Java SE to simulate the **core features** of these utility libraries — showing what problems they solve. In a real local project, the API style is essentially identical.
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.function.*;
+import java.time.*;
+
+// === 迷你工具库 (模拟 Lombok/Guava/Hutool 核心功能) ===
+
+// 1. 不可变集合 (模拟 Guava ImmutableList)
+class ImmutableList<E> {
+    private final List<E> data;
+    private ImmutableList(List<E> data) { this.data = List.copyOf(data); }
+    public static <E> ImmutableList<E> of(E... items) {
+        return new ImmutableList<>(Arrays.asList(items));
+    }
+    public E get(int i) { return data.get(i); }
+    public int size() { return data.size(); }
+    public ImmutableList<E> append(E e) {
+        List<E> n = new ArrayList<>(data);
+        n.add(e);
+        return new ImmutableList<>(n);
+    }
+    @Override public String toString() { return data.toString(); }
+}
+
+// 2. 多值 Map (模拟 Guava Multimap)
+class ListMultimap<K, V> {
+    private final Map<K, List<V>> map = new LinkedHashMap<>();
+    public void put(K key, V val) {
+        map.computeIfAbsent(key, k -> new ArrayList<>()).add(val);
+    }
+    public List<V> get(K key) { return map.getOrDefault(key, Collections.emptyList()); }
+    public Set<K> keySet() { return map.keySet(); }
+    @Override public String toString() { return map.toString(); }
+}
+
+// 3. 双向 Map (模拟 Guava BiMap)
+class BiMap<K, V> {
+    private final Map<K, V> forward = new HashMap<>();
+    private final Map<V, K> inverse = new HashMap<>();
+    public void put(K key, V val) {
+        forward.put(key, val);
+        inverse.put(val, key);
+    }
+    public V get(K key) { return forward.get(key); }
+    public K inverseGet(V val) { return inverse.get(val); }
+}
+
+// 4. 本地缓存 (模拟 Guava Cache)
+class MiniCache<K, V> {
+    private final ConcurrentHashMap<K, V> data = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<K, Long> expireAt = new ConcurrentHashMap<>();
+    private final long ttlMs;
+    private final Function<K, V> loader;
+    private final AtomicInteger hits = new AtomicInteger();
+    private final AtomicInteger misses = new AtomicInteger();
+
+    public MiniCache(long ttlMs, Function<K, V> loader) {
+        this.ttlMs = ttlMs; this.loader = loader;
+    }
+
+    public V get(K key) {
+        Long exp = expireAt.get(key);
+        if (exp != null && System.currentTimeMillis() < exp) {
+            V v = data.get(key);
+            if (v != null) { hits.incrementAndGet(); return v; }
+        }
+        // 加载
+        misses.incrementAndGet();
+        V v = loader.apply(key);
+        data.put(key, v);
+        expireAt.put(key, System.currentTimeMillis() + ttlMs);
+        return v;
+    }
+
+    public int hits() { return hits.get(); }
+    public int misses() { return misses.get(); }
+    public double hitRate() {
+        int total = hits.get() + misses.get();
+        return total == 0 ? 0 : (double) hits.get() / total;
+    }
+}
+
+// 5. EventBus (模拟 Guava EventBus)
+class EventBus {
+    private final Map<Class<?>, List<Consumer<?>>> subscribers = new ConcurrentHashMap<>();
+    public <T> void subscribe(Class<T> eventType, Consumer<T> handler) {
+        subscribers.computeIfAbsent(eventType, k -> new CopyOnWriteArrayList<>()).add(handler);
+    }
+    @SuppressWarnings("unchecked")
+    public void publish(Object event) {
+        List<Consumer<?>> handlers = subscribers.get(event.getClass());
+        if (handlers != null) {
+            for (Consumer<?> h : handlers) ((Consumer<Object>) h).accept(event);
+        }
+    }
+}
+
+// 6. StringUtils (模拟 Commons Lang / Hutool)
+class StringUtils {
+    public static boolean isBlank(String s) {
+        if (s == null) return true;
+        return s.trim().isEmpty();
+    }
+    public static boolean isNotBlank(String s) { return !isBlank(s); }
+    public static String repeat(String s, int n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) sb.append(s);
+        return sb.toString();
+    }
+    public static String leftPad(String s, int len, char pad) {
+        if (s.length() >= len) return s;
+        return repeat(String.valueOf(pad), len - s.length()) + s;
+    }
+    public static String format(String tpl, Object... args) {
+        StringBuilder sb = new StringBuilder();
+        int idx = 0;
+        for (int i = 0; i < tpl.length(); i++) {
+            if (i < tpl.length() - 1 && tpl.charAt(i) == '{' && tpl.charAt(i + 1) == '}') {
+                if (idx < args.length) sb.append(args[idx++]);
+                else sb.append("{}");
+                i++;
+            } else {
+                sb.append(tpl.charAt(i));
+            }
+        }
+        return sb.toString();
+    }
+}
+
+// === 业务类 (Lombok @Data 风格, 这里手写以演示其作用) ===
+class User {
+    private Long id;
+    private String name;
+    private Integer age;
+    public User() {}
+    public User(Long id, String name, Integer age) {
+        this.id = id; this.name = name; this.age = age;
+    }
+    // Lombok @Data 自动生成下面这些 ↓
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public Integer getAge() { return age; }
+    public void setAge(Integer age) { this.age = age; }
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof User u)) return false;
+        return Objects.equals(id, u.id) && Objects.equals(name, u.name)
+            && Objects.equals(age, u.age);
+    }
+    @Override
+    public int hashCode() { return Objects.hash(id, name, age); }
+    @Override
+    public String toString() { return "User(id=" + id + ", name=" + name + ", age=" + age + ")"; }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== 工具库实战 ===\\n");
+
+        // 1. Lombok 演示: 看手写的样板代码 vs @Data
+        System.out.println("--- 1. Lombok 演示 (上面 User 类手写了 30+ 行样板) ---");
+        System.out.println("Lombok @Data 一行注解 = 自动生成 getter/setter/toString/equals/hashCode");
+        System.out.println("@Builder 一行 = Builder 模式");
+        System.out.println("@Slf4j 一行 = 自动 logger");
+        User u = new User(1L, "张三", 20);
+        System.out.println("User 实例: " + u);
+        System.out.println("equals 相同对象: " + u.equals(new User(1L, "张三", 20)));
+
+        // 2. StringUtils
+        System.out.println("\\n--- 2. StringUtils ---");
+        System.out.println("isBlank('  '): " + StringUtils.isBlank("  "));
+        System.out.println("isBlank(null): " + StringUtils.isBlank(null));
+        System.out.println("repeat('-', 5): " + StringUtils.repeat("-", 5));
+        System.out.println("leftPad('1', 3, '0'): " + StringUtils.leftPad("1", 3, '0'));
+        System.out.println("format: " + StringUtils.format("用户 {} 年龄 {}", "张三", 20));
+
+        // 3. Guava Collections
+        System.out.println("\\n--- 3. Guava Collections ---");
+        ImmutableList<String> colors = ImmutableList.of("red", "green", "blue");
+        System.out.println("ImmutableList: " + colors);
+        ImmutableList<String> more = colors.append("yellow");
+        System.out.println("append 后新列表: " + more + " (原列表不变: " + colors + ")");
+
+        ListMultimap<String, String> mmap = new ListMultimap<>();
+        mmap.put("fruit", "apple");
+        mmap.put("fruit", "banana");
+        mmap.put("fruit", "orange");
+        mmap.put("veg", "carrot");
+        System.out.println("Multimap fruit: " + mmap.get("fruit"));
+
+        BiMap<String, Integer> bi = new BiMap<>();
+        bi.put("one", 1); bi.put("two", 2);
+        System.out.println("BiMap get('one'): " + bi.get("one"));
+        System.out.println("BiMap inverseGet(2): " + bi.inverseGet(2));
+
+        // 4. Cache
+        System.out.println("\\n--- 4. Guava Cache ---");
+        MiniCache<String, String> cache = new MiniCache<>(2000, key -> {
+            try { Thread.sleep(50); } catch (Exception e) {}
+            return "DB:" + key;
+        });
+        long t1 = System.currentTimeMillis();
+        cache.get("user:1");   // miss, 加载 50ms
+        long t2 = System.currentTimeMillis();
+        cache.get("user:1");   // hit, 几乎 0ms
+        long t3 = System.currentTimeMillis();
+        cache.get("user:1");   // hit
+        long t4 = System.currentTimeMillis();
+        System.out.printf("第一次 (miss): %d ms%n", t2 - t1);
+        System.out.printf("第二次 (hit):  %d ms%n", t3 - t2);
+        System.out.printf("第三次 (hit):  %d ms%n", t4 - t3);
+        System.out.printf("命中率: %.2f%%%n", cache.hitRate() * 100);
+
+        // 5. EventBus
+        System.out.println("\\n--- 5. Guava EventBus ---");
+        EventBus bus = new EventBus();
+        bus.subscribe(String.class, e -> System.out.println("  [字符串订阅者] 收到: " + e));
+        bus.subscribe(String.class, e -> System.out.println("  [日志订阅者] 记录: " + e));
+        bus.subscribe(Integer.class, e -> System.out.println("  [数字订阅者] 收到: " + e));
+        bus.publish("Hello");   // 触发两个字符串订阅者
+        bus.publish(42);        // 触发数字订阅者
+
+        System.out.println("\\n=== 工具库总结 ===");
+        System.out.println("Lombok: 注解消灭样板代码 (@Data/@Builder/@Slf4j)");
+        System.out.println("Commons Lang: StringUtils/ObjectUtils/Validate");
+        System.out.println("Guava: 不可变集合/Cache/EventBus/Preconditions");
+        System.out.println("Hutool: 国产, API 中文化, HTTP/JSON/加密全包");
+        System.out.println("Vavr: 函数式 Try/Option/Tuple/不可变集合");
+        System.out.println("\\n原则: 不重复造轮子, 但也别把所有库都引进来");
+    }
+}`} />
+
+> **Key observations**:
+> - **The `User` class has 30+ lines of boilerplate written by hand** — Lombok's single `@Data` generates it all, cutting more than half the code.
+> - **`ImmutableList.append` returns a new list; the original is unchanged** — the core property of immutability, thread-safe.
+> - **`Multimap` maps one key to multiple values** — more convenient than `Map＜K, List＜V＞＞`.
+> - **The first cache access is a miss taking 50ms, the next two are hits at nearly 0ms** — the value of caching is visible at a glance.
+> - **EventBus publishers don't need to know subscribers** — loosely coupled event-driven design.
+
+## 7. Choosing Utility Libraries
+
+Utility libraries are great, but more isn't always better:
+
+1. **Don't overlap** — one StringUtils is enough (Commons or Hutool); don't pull in three at once.
+2. **Mind the size** — Guava is 5MB+, Hutool 2MB+; weigh this for mobile/containerized scenarios.
+3. **JDK first** — Java 8+'s `List.of`/`Map.of`/`Optional`/`Stream` have replaced parts of Guava. If the JDK can do it, don't pull in a library.
+4. **Maintainability** — pick actively maintained libraries. Commons Lang still updates but is less active than Guava.
+5. **Team familiarity** — if nobody on the team knows Vavr, introducing it is a burden.
+
+**Practical advice**:
+
+- Backend project standard kit: Lombok + Commons Lang3 + Guava (or Hutool).
+- Spring Boot ships with Logback, Jackson, Hibernate Validator — no need to add them.
+- Prefer JDK's `List.of`/`Map.of` for immutable collections; reach for Guava only in complex scenarios.
+- For caching, use Guava/Caffeine on a single machine, Redis for distributed.
+
+## 8. Chapter Summary
+
+| Utility Library | Core Capabilities |
+| --- | --- |
+| Lombok | `@Data`/`@Builder`/`@Slf4j`/`@RequiredArgsConstructor` eliminate boilerplate |
+| Commons Lang | `StringUtils`/`ObjectUtils`/`Validate` |
+| Commons Collections | `CollectionUtils`/`ListUtils` |
+| Guava | Immutable collections/Multimap/BiMap/Cache/EventBus/Preconditions |
+| Hutool | Chinese-style API; HTTP/JSON/crypto/Excel all-in-one |
+| Vavr | `Try`/`Option`/`Tuple`/functional collections |
+
+**Mnemonic**:
+
+- **One Lombok `@Data` equals 30 lines** — getter/setter/toString/equals/hashCode all automatic.
+- **Guava immutable collections** — `ImmutableList.of(...)`, thread-safe.
+- **Guava Cache auto-loads** — `LoadingCache` calls the loader automatically on miss.
+- **Hutool is a Chinese all-in-one bundle** — HTTP/JSON/crypto/IO in one stop.
+- **If the JDK can do it, don't pull in a library** — `List.of`/`Optional`/`Stream` are already powerful.
+- **Don't pull overlapping libraries** — pick one StringUtils, not three.
+
+## Conclusion: End of Stage 12
+
+This chapter looked at the Java ecosystem's "toolbox" — Lombok eliminates boilerplate, Guava/Commons/Hutool provide common utilities, and Vavr brings a functional style. Looking back at Stage 12:
+
+- **Chapter 63 Maven/Gradle** — build tools, organizing code into projects.
+- **Chapter 64 Git** — version control, keeping multi-person collaboration orderly.
+- **Chapter 65 Testing** — JUnit + Mockito, quality assurance.
+- **Chapter 66 Logging Frameworks** — SLF4J + Logback, the production black box.
+- **Chapter 67 Lombok and Utility Libraries (this chapter)** — eliminate boilerplate, write less code.
+
+These five chapters are the cornerstone of engineering — moving you from "can write Java" to "can engineer Java delivery". The next stage enters Java's "main battlefield" — **Java Web and the Spring ecosystem**, from the HTTP protocol to Spring Boot, enabling you to build real web applications.

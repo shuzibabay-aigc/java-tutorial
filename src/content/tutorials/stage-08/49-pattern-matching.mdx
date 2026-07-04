@@ -1,0 +1,574 @@
+---
+title: "Pattern Matching 模式匹配"
+chapter: 49
+stage: "第八阶段"
+stageName: "现代 Java 特性"
+order: 4
+description: "掌握 instanceof 模式匹配、switch 模式匹配、类型模式、Record 模式、when 守卫子句，实战重构复杂 if-else 链为 switch 模式匹配"
+pubDate: 2026-07-03
+tags: ["Java", "Pattern Matching", "模式匹配", "instanceof", "switch", "JDK 21"]
+---
+
+# Pattern Matching 模式匹配
+
+这一章是现代 Java 三件套（Records + Sealed + Pattern Matching）的"最后一公里"——**Pattern Matching（模式匹配）**。它是 Java 21（2023 年 9 月）正式发布的特性（JEP 441），把 `instanceof` 和 `switch` 都"武装到了牙齿"，让 Java 终于能像 Scala、Rust 一样优雅地处理类型分支和数据解构。
+
+## 一、为什么需要模式匹配：if-else 链的丑陋
+
+### 1.1 传统 instanceof 的样板代码
+
+```java
+Object obj = "hello";
+if (obj instanceof String) {
+    String s = (String) obj;   // 强转, 多余
+    System.out.println(s.length());
+}
+```
+
+明明 `instanceof String` 已经告诉我们 `obj` 是 String 了，还要写一次 `String s = (String) obj`——这是纯粹的样板。三行代码干一件事：判断 + 强转 + 使用。
+
+### 1.2 复杂 if-else 链的灾难
+
+处理多种类型时更惨：
+
+```java
+String describe(Object obj) {
+    if (obj instanceof String) {
+        String s = (String) obj;
+        return "字符串: " + s;
+    } else if (obj instanceof Integer) {
+        Integer i = (Integer) obj;
+        return "整数: " + i;
+    } else if (obj instanceof List) {
+        List<?> list = (List<?>) obj;
+        return "列表: " + list.size() + " 项";
+    } else if (obj == null) {
+        return "空";
+    } else {
+        return "未知: " + obj.getClass();
+    }
+}
+```
+
+四个 `instanceof` + 四次强转 + 四个 `else if`——又长又重复，眼花缭乱。这就是 Java 老牌框架（Struts、Spring MVC 的 handler）写起来啰嗦的根源之一。
+
+### 1.3 模式匹配要解决什么
+
+Pattern Matching 让"判断 + 强转 + 绑定变量"一步到位：
+
+```java
+String describe(Object obj) {
+    return switch (obj) {
+        case null -> "空";
+        case String s -> "字符串: " + s;
+        case Integer i -> "整数: " + i;
+        case List<?> l -> "列表: " + l.size() + " 项";
+        default -> "未知: " + obj.getClass();
+    };
+}
+```
+
+判断和强转合一、变量自动绑定、`switch` 表达式直接返回——这就是模式匹配的威力。
+
+## 二、instanceof 模式匹配（Java 16+）
+
+最基础的模式匹配——`instanceof` 后面跟"类型 + 变量名"，匹配成功自动绑定：
+
+### 2.1 基本用法
+
+```java
+Object obj = "hello";
+if (obj instanceof String s) {
+    System.out.println(s.length());   // s 已绑定, 不用强转
+}
+// s 在这里不可见 (作用域只在 if 内)
+```
+
+`s` 是**模式变量（pattern variable）**——只在"匹配成功的分支"里有效。这叫"流敏感作用域（flow-sensitive scope）"。
+
+### 2.2 流敏感作用域
+
+模式变量的作用域不是简单的"花括号内"，而是"逻辑上一定能匹配到的路径"：
+
+```java
+Object obj = "hello";
+if (!(obj instanceof String s)) {
+    return;   // 这里 s 还没绑定
+}
+// 这里 s 已绑定 (因为 obj 不是 String 早就 return 了)
+System.out.println(s.length());   // 合法!
+```
+
+```java
+Object obj = Math.random() > 0.5 ? "hello" : Integer.valueOf(42);
+if (obj instanceof String s && s.length() > 3) {
+    // s 在 && 右侧已绑定, 可以用
+    System.out.println(s);
+}
+```
+
+编译器做"反向数据流分析"——只要某条路径上 `instanceof` 必然成功，变量就绑定。这让模式变量比普通局部变量更智能。
+
+### 2.3 重构 equals
+
+`instanceof` 模式匹配最常见的应用就是简化 `equals`：
+
+```java
+// 老写法
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;
+    if (!(o instanceof Point)) return false;
+    Point p = (Point) o;
+    return p.x == this.x && p.y == this.y;
+}
+
+// 新写法
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;
+    if (!(o instanceof Point p)) return false;   // 强转 + 绑定一步到位
+    return p.x == this.x && p.y == this.y;
+}
+```
+
+少一行，少一次"看走眼"的机会。
+
+## 三、switch 模式匹配（Java 21）
+
+`switch` 模式匹配是 Pattern Matching 的"重头戏"——`case` 不再只能匹配常量，可以匹配**类型**、**Record 结构**、**null** 等。
+
+### 3.1 类型模式
+
+```java
+String format(Object obj) {
+    return switch (obj) {
+        case null -> "null";
+        case String s -> "字符串 \"" + s + "\"";
+        case Integer i when i > 0 -> "正整数 " + i;
+        case Integer i -> "非正整数 " + i;
+        case int[] arr -> "int 数组, 长度 " + arr.length;
+        case List<?> l when l.isEmpty() -> "空列表";
+        case List<?> l -> "列表, 长度 " + l.size();
+        default -> "其他类型: " + obj.getClass().getSimpleName();
+    };
+}
+```
+
+要点：
+
+- `case String s` —— 类型模式，匹配 String 且绑定到 `s`。
+- `case null` —— 终于能匹配 null 了！传统 switch 遇到 null 直接 NPE，现在可以优雅处理。
+- `when` —— **守卫子句（guard）**，附加条件。
+- 多个 case 顺序敏感——上面的优先匹配，`Integer i when i ＞ 0` 必须在 `Integer i` 前面。
+
+### 3.2 守卫子句 when
+
+`when` 给 case 加"附加条件"——类型匹配后，再判断条件：
+
+```java
+return switch (obj) {
+    case Integer i when i > 100 -> "大整数";
+    case Integer i when i < 0 -> "负整数";
+    case Integer i -> "普通整数";   // 兜底
+    ...
+};
+```
+
+`when` 的判断在类型匹配**之后**——所以 `i` 在 `when` 里已绑定可用。这比传统 switch 的"嵌套 if"优雅得多。
+
+### 3.3 case null：传统 switch 的痛点
+
+传统 `switch` 遇到 `null` 直接抛 NPE——因为 `obj.hashCode()` 在 `switch (obj)` 时就崩了。模式匹配的 `switch` 解决了这点：
+
+```java
+String s = switch (obj) {
+    case null -> "null";        // 显式处理 null
+    case String str -> str;
+    default -> "其他";
+};
+```
+
+如果不写 `case null`，遇到 null 还是会 NPE（保持向后兼容），但你可以**显式选择**处理它。
+
+## 四、Record 模式：解构 Record
+
+Record 模式（JEP 440，Java 21）让你直接在 case 里"解构"Record 的组件：
+
+### 4.1 基本 Record 模式
+
+```java
+record Point(int x, int y) {}
+
+String describe(Object obj) {
+    return switch (obj) {
+        case Point(int x, int y) -> "点 (" + x + ", " + y + ")";
+        default -> "非点";
+    };
+}
+```
+
+`case Point(int x, int y)` 直接把 `Point` 的两个组件解构到 `x`、`y`——不用 `((Point) obj).x()`。
+
+### 4.2 嵌套 Record 模式
+
+```java
+record Point(int x, int y) {}
+record Rectangle(Point topLeft, Point bottomRight) {}
+
+int area(Object obj) {
+    return switch (obj) {
+        case Rectangle(Point(int x1, int y1), Point(int x2, int y2)) ->
+            Math.abs((x2 - x1) * (y2 - y1));
+        default -> 0;
+    };
+}
+```
+
+两层嵌套一次解构——这是函数式语言的"模式匹配"在 Java 里的实现。在 AST 处理、JSON 解析树遍历里特别好用。
+
+### 4.3 Record 模式 + when
+
+```java
+return switch (shape) {
+    case Circle(double r) when r > 0 -> Math.PI * r * r;
+    case Circle(double r) -> 0;   // 半径非正, 面积 0
+    case Rectangle(double w, double h) when w > 0 && h > 0 -> w * h;
+    case Rectangle(double w, double h) -> 0;
+    ...
+};
+```
+
+### 4.4 Record 模式 + 类型推断
+
+如果 Record 组件类型已知（如 `record Box＜T＞(T value)`），模式变量类型可推断：
+
+```java
+record Box<T>(T value) {}
+
+String open(Box<String> box) {
+    return switch (box) {
+        case Box(String s) -> "字符串: " + s;   // T 推断为 String
+    };
+}
+```
+
+## 五、穷举检查：sealed 的礼物
+
+`switch` 模式匹配配合 **Sealed Classes**（上一章讲过），可以**省略 default**——编译器检查"是否穷举所有子类"：
+
+```java
+sealed interface Shape permits Circle, Rectangle, Triangle {}
+record Circle(double r) implements Shape {}
+record Rectangle(double w, double h) implements Shape {}
+record Triangle(double a, double b, double c) implements Shape {}
+
+double area(Shape s) {
+    return switch (s) {
+        case Circle(double r) -> Math.PI * r * r;
+        case Rectangle(double w, double h) -> w * h;
+        case Triangle(double a, double b, double c) -> {
+            double p = (a + b + c) / 2;
+            yield Math.sqrt(p * (p - a) * (p - b) * (p - c));
+        }
+        // 不需要 default! 编译器知道只有这三种
+    };
+}
+```
+
+未来加 `case Pentagon` 到 `Shape.permits`，所有 `switch(Shape)` 都会编译警告——逼迫你处理新情况。这是 ADT + Pattern Matching 的"编译期保证"。
+
+如果没写 `case null`，编译器还会问"要不要处理 null"——比传统 switch 更友好。
+
+## 六、模式匹配的优先级和顺序
+
+switch 模式匹配的 case 是**顺序匹配**的——从上到下，第一个匹配的 case 生效。所以顺序很重要：
+
+```java
+return switch (obj) {
+    case Integer i when i > 100 -> "大整数";   // 1. 先匹配具体条件
+    case Integer i -> "其他整数";               // 2. 再匹配类型兜底
+    case Number n -> "其他数字";                // 3. 再匹配父类型
+    default -> "非数字";                         // 4. 最后默认
+};
+```
+
+如果反过来写 `case Integer i` 在前，`i ＞ 100` 永远不会匹配——编译器会警告"case 永远不会执行"。
+
+**规则**：**子类型在前，父类型在后；带 when 的在前，不带 when 的在后。**
+
+## 七、实战：重构复杂 if-else 链
+
+下面的例子展示用 Pattern Matching 重构一个"消息处理器"——传统 if-else 链 vs switch 模式匹配的对比。
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    // === 消息类型 ADT ===
+    public sealed interface Message permits TextMsg, ImageMsg, VideoMsg, SystemMsg {}
+    public record TextMsg(String from, String content) implements Message {}
+    public record ImageMsg(String from, String url, int width, int height) implements Message {}
+    public record VideoMsg(String from, String url, int duration) implements Message {}
+    public record SystemMsg(String type, int code) implements Message {}
+
+    public static void main(String[] args) {
+        System.out.println("=== Pattern Matching 模式匹配演示 ===\\n");
+
+        // 1. instanceof 模式匹配
+        System.out.println("--- 1. instanceof 模式匹配 ---");
+        Object[] objs = {"hello", 42, List.of(1, 2, 3), 3.14, null};
+        for (Object o : objs) {
+            String desc = describeInstance(o);
+            System.out.println("  " + desc);
+        }
+
+        // 2. switch 类型模式 + when 守卫
+        System.out.println("\\n--- 2. switch 类型模式 + when ---");
+        Object[] nums = {100, -5, 0, 9999, "abc", List.of(), List.of(1, 2)};
+        for (Object o : nums) {
+            System.out.println("  " + o + " -> " + describeNumber(o));
+        }
+
+        // 3. switch 处理 Message ADT (穷举)
+        System.out.println("\\n--- 3. switch 处理 Message ADT ---");
+        List<Message> msgs = List.of(
+            new TextMsg("Alice", "你好"),
+            new ImageMsg("Bob", "https://x.com/cat.jpg", 800, 600),
+            new VideoMsg("Carol", "https://x.com/v.mp4", 30),
+            new SystemMsg("LOGIN", 200)
+        );
+        for (Message m : msgs) {
+            System.out.println("  " + handleMessage(m));
+        }
+
+        // 4. Record 模式解构
+        System.out.println("\\n--- 4. Record 模式解构 ---");
+        record Point(int x, int y) {}
+        record Line(Point start, Point end) {}
+        record TriangleShape(Point a, Point b, Point c) {}
+
+        Object[] shapes = {
+            new Point(3, 4),
+            new Line(new Point(0, 0), new Point(5, 5)),
+            new TriangleShape(new Point(0,0), new Point(3,0), new Point(0,4))
+        };
+        for (Object s : shapes) {
+            System.out.println("  " + describeShape(s));
+        }
+
+        // 5. 嵌套 Record 模式 + when
+        System.out.println("\\n--- 5. 嵌套 Record 模式 + when ---");
+        record Box(String label, int weight) {}
+        Object[] boxes = {
+            new Box("轻", 2),
+            new Box("重", 50),
+            new Box("空", 0)
+        };
+        for (Object b : boxes) {
+            System.out.println("  " + describeBox(b));
+        }
+
+        // 6. 重构对比: 传统 if-else vs switch 模式匹配
+        System.out.println("\\n--- 6. 重构对比: 传统 vs 模式匹配 ---");
+        Object test = "hello world";
+        System.out.println("  传统写法: " + oldStyleDescribe(test));
+        System.out.println("  新写法:   " + newStyleDescribe(test));
+
+        // 7. 穷举检查演示
+        System.out.println("\\n--- 7. 穷举检查 (sealed 配合) ---");
+        System.out.println("  Message 是 sealed, handleMessage 不需要 default");
+        System.out.println("  Message.permits: " + Arrays.toString(
+            Message.class.getPermittedSubclasses()).replace("class ", ""));
+
+        // 8. 模式变量的流敏感作用域
+        System.out.println("\\n--- 8. 流敏感作用域 ---");
+        Object obj = "test";
+        if (obj instanceof String s && s.length() > 2) {
+            System.out.println("  s 在 && 右侧可用: " + s.toUpperCase());
+        }
+        if (!(obj instanceof Integer i)) {
+            System.out.println("  obj 不是 Integer, 跳过");
+        } else {
+            System.out.println("  i 在 else 可用: " + i);   // 这里 i 已绑定
+        }
+
+        System.out.println("\\n=== 总结 ===");
+        System.out.println("1. instanceof 模式匹配: if (o instanceof String s)");
+        System.out.println("2. switch 类型模式: case String s ->");
+        System.out.println("3. switch Record 模式: case Point(int x, int y) ->");
+        System.out.println("4. when 守卫: case Integer i when i > 0 ->");
+        System.out.println("5. case null: 显式处理 null");
+        System.out.println("6. sealed + switch: 编译期穷举检查, 不需要 default");
+    }
+
+    // instanceof 模式匹配
+    static String describeInstance(Object o) {
+        if (o == null) return "null";
+        if (o instanceof String s) return "字符串 \"" + s + "\", 长度 " + s.length();
+        if (o instanceof Integer i) return "整数 " + i;
+        if (o instanceof List<?> l) return "列表, 长度 " + l.size();
+        if (o instanceof Number n) return "其他数字 " + n;
+        return "其他: " + o.getClass().getSimpleName();
+    }
+
+    // switch 类型模式 + when 守卫
+    static String describeNumber(Object o) {
+        return switch (o) {
+            case null -> "null";
+            case Integer i when i > 1000 -> "大整数 " + i;
+            case Integer i when i < 0 -> "负整数 " + i;
+            case Integer i when i == 0 -> "零";
+            case Integer i -> "普通整数 " + i;
+            case String s -> "字符串: " + s;
+            case List<?> l when l.isEmpty() -> "空列表";
+            case List<?> l -> "非空列表, 长度 " + l.size();
+            default -> "其他: " + o.getClass().getSimpleName();
+        };
+    }
+
+    // switch 处理 Message ADT - 穷举, 不需要 default
+    static String handleMessage(Message m) {
+        return switch (m) {
+            case TextMsg(String from, String content) ->
+                "文本[" + from + "]: " + content;
+            case ImageMsg(String from, String url, int w, int h) ->
+                "图片[" + from + "]: " + url + " (" + w + "x" + h + ")";
+            case VideoMsg(String from, String url, int dur) ->
+                "视频[" + from + "]: " + url + " " + dur + "秒";
+            case SystemMsg(String type, int code) ->
+                "系统[" + type + "] code=" + code;
+        };
+    }
+
+    // Record 模式解构
+    static String describeShape(Object s) {
+        return switch (s) {
+            case Point(int x, int y) -> "点 (" + x + ", " + y + ")";
+            case Line(Point(int x1, int y1), Point(int x2, int y2)) ->
+                "线段 (" + x1 + "," + y1 + ")->(" + x2 + "," + y2 + ") 长度 "
+                + Math.sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1));
+            case TriangleShape(Point a, Point b, Point c) ->
+                "三角形 " + a + " " + b + " " + c;
+            default -> "未知形状";
+        };
+    }
+
+    // 嵌套 Record 模式 + when
+    static String describeBox(Object o) {
+        return switch (o) {
+            case Box(String label, int w) when w == 0 -> "空箱子[" + label + "]";
+            case Box(String label, int w) when w < 10 -> "轻箱子[" + label + "] " + w + "kg";
+            case Box(String label, int w) when w < 50 -> "中箱子[" + label + "] " + w + "kg";
+            case Box(String label, int w) -> "重箱子[" + label + "] " + w + "kg";
+            default -> "非箱子";
+        };
+    }
+
+    // 老写法: 一堆 instanceof + 强转
+    static String oldStyleDescribe(Object obj) {
+        if (obj == null) return "null";
+        if (obj instanceof String) {
+            String s = (String) obj;
+            if (s.length() > 5) {
+                return "长字符串: " + s;
+            } else {
+                return "短字符串: " + s;
+            }
+        } else if (obj instanceof Integer) {
+            Integer i = (Integer) obj;
+            if (i > 0) {
+                return "正整数: " + i;
+            } else {
+                return "非正整数: " + i;
+            }
+        } else if (obj instanceof List) {
+            List<?> l = (List<?>) obj;
+            return "列表: " + l.size() + " 项";
+        }
+        return "未知: " + obj.getClass().getSimpleName();
+    }
+
+    // 新写法: switch 模式匹配
+    static String newStyleDescribe(Object obj) {
+        return switch (obj) {
+            case null -> "null";
+            case String s when s.length() > 5 -> "长字符串: " + s;
+            case String s -> "短字符串: " + s;
+            case Integer i when i > 0 -> "正整数: " + i;
+            case Integer i -> "非正整数: " + i;
+            case List<?> l -> "列表: " + l.size() + " 项";
+            default -> "未知: " + obj.getClass().getSimpleName();
+        };
+    }
+
+    // 局部 Record, 给 describeShape 用
+    public record Point(int x, int y) {}
+    public record Line(Point start, Point end) {}
+    public record TriangleShape(Point a, Point b, Point c) {}
+    public record Box(String label, int weight) {}
+}`} />
+
+> **观察重点**：
+> - **`describeInstance` 用 `if instanceof`**——比传统少一行强转。
+> - **`describeNumber` 的 case 顺序**——`Integer i when i ＞ 1000` 必须在 `Integer i` 前，否则永远不匹配。
+> - **`handleMessage` 没有 `default`**——`Message` 是 sealed，编译器知道只有 4 种。
+> - **`describeShape` 嵌套 Record 解构**——`Line(Point(...), Point(...))` 一行拆两层。
+> - **`oldStyleDescribe` vs `newStyleDescribe`**——同样的逻辑，模式匹配版本代码量减半，可读性翻倍。
+> - **流敏感作用域**——`if (o instanceof String s && s.length() ＞ 2)`，`s` 在 `&&` 右侧已绑定。
+
+## 八、模式匹配的适用场景
+
+| 场景 | 例子 |
+| --- | --- |
+| 替代 if-else 类型分支 | 消息分发、事件处理 |
+| 解构 Record | AST 遍历、配置解析、JSON/SQL 解析树 |
+| 处理 sealed ADT | 状态机、领域建模的"封闭枚举" |
+| 简化 equals | `if (!(o instanceof X x)) return false;` |
+| 替代 visitor 模式 | 不用再写 Visitor 模式，switch 模式匹配更直接 |
+| 优雅处理 null | `case null -＞` 显式处理 |
+
+## 九、模式匹配的限制
+
+当前 Java 21 的模式匹配还有一些限制（部分会在未来版本改进）：
+
+- **不支持数组模式**——`case int[]{int a, int b, int rest}` 还不能用（JEP 432 提案中）。
+- **不支持集合模式**——`case List(first, second, ...rest)` 还不能用（未来的 JEP）。
+- **`when` 不能引用 case 外的局部变量**——如果会和外层变量冲突，编译错。
+- **不支持解构普通类**——只有 Record 能解构，普通类不能用 `case Foo(int x)`（除非自定义解构方法，未来 JEP）。
+
+但即便是当前版本，Pattern Matching 已经大幅提升了 Java 的表达力。
+
+## 十、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| `instanceof X x` | 类型匹配 + 变量绑定，省去强转 |
+| 流敏感作用域 | 模式变量在"必然匹配"的路径上有效 |
+| `switch` 类型模式 | `case String s -＞`，替代 if-else 链 |
+| `switch` Record 模式 | `case Point(int x, int y) -＞`，解构 Record |
+| `when` 守卫 | `case Integer i when i ＞ 0`，附加条件 |
+| `case null` | 显式处理 null，不再 NPE |
+| 穷举检查 | sealed + switch 可省略 default |
+| 顺序敏感 | 子类型在前，父类型在后；带 when 在前 |
+
+**记忆口诀**：
+
+- **instanceof + 变量**——判断即绑定，少写一行强转。
+- **switch case 类型**——if-else 链的终结者。
+- **Record 模式解构**——一行拆出组件。
+- **when 加条件**——类型 + 条件双重过滤。
+- **case null 显式处理**——告别 NPE。
+- **sealed 配合**——穷举检查，省 default。
+- **顺序敏感**——具体在前，通用在后。
+
+## 结语：Java 的现代数据建模三件套完成
+
+到这里，现代 Java 数据建模三件套全部讲完了：
+
+- **Records（第 47 章）** —— 不可变值对象，积类型。
+- **Sealed Classes（第 48 章）** —— 封闭继承层次，和类型。
+- **Pattern Matching（本章）** —— 解构 + 穷举，让 ADT 真正可用。
+
+这三者协同，让 Java 第一次能像 Scala、Haskell、Rust 一样优雅地建模代数数据类型。写一个 AST 解析器、状态机、领域模型，从过去的"Visitor 模式 + 一堆 if-else"变成"sealed + record + switch 模式匹配"——代码量减半，可读性翻倍，编译器还能帮你检查穷举。
+
+下一章是第八阶段的收官——**其他现代特性速览**。我们一口气看完接口私有方法、Stream 增强、HttpClient、Text Blocks、序列化集合、FFM API 这些"小而美"的特性。它们没有三件套那么革命性，但每一个都在悄悄让 Java 更好用——我们下一章见。

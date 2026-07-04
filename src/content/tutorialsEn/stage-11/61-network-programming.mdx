@@ -1,0 +1,456 @@
+---
+title: "Network Programming"
+chapter: 61
+stage: "Stage 11"
+stageName: "Database and Networking"
+order: 3
+description: "Master networking basics (TCP/IP/UDP/ports), InetAddress, TCP communication with Socket and ServerSocket, UDP communication with DatagramSocket, and implement a multithreaded Echo server and client"
+pubDate: 2026-07-03
+tags: ["Java", "网络编程", "Socket", "TCP", "UDP", "ServerSocket"]
+---
+
+# Network Programming
+
+What is the essence of the internet? Processes on two machines sending each other byte streams. This chapter uses Java's **Socket API** — the `java.net` package — to deal directly with TCP/UDP. This is the foundation of HTTP, RPC, database connections, message queues… every form of "network communication."
+
+Why learn this? Frameworks (Spring, Netty) wrap network communication elegantly, but when things go wrong — hung connections, packet loss, sticky packets, half-open connections — you need to drill down to the Socket layer to diagnose. Understand Sockets, and you truly "know networking."
+
+## 1. Networking Basics
+
+### 1.1 TCP/IP vs UDP
+
+| Protocol | Characteristics | Use Cases |
+| --- | --- | --- |
+| **TCP** | Connection-oriented, reliable, ordered, byte stream | HTTP, databases, email |
+| **UDP** | Connectionless, unreliable, datagram, fast | DNS, video streaming, gaming, heartbeats |
+
+**TCP** is like a phone call — first dial to establish a connection (three-way handshake), then talk both ways, then hang up (four-way wave). Lost packets in between get retransmitted, guaranteeing the other side receives them.
+
+**UDP** is like mailing a postcard — you address it, drop it in, and walk away. It may get lost, arrive out of order, or be duplicated — but it's fast, with no handshake mechanism.
+
+Why need both? Reliability has a price: TCP's handshake, acknowledgements, and retransmissions are all time-consuming. A video call doesn't care about losing a frame or two, but needs low latency — so it uses UDP. A bank transfer can't afford a single wrong byte — it must use TCP.
+
+### 1.2 IP and Ports
+
+- **IP address** — identifies a machine on the network (e.g., `192.168.1.100`).
+- **Port** — identifies a process on the machine (0–65535).
+
+A machine has only one IP, but may simultaneously run an HTTP service (80), a database (3306), and SSH (22) — distinguished by port. **The IP is the address; the port is the door number.**
+
+- Ports 0–1023 are well-known ports, requiring administrator privileges.
+- 1024–49151 are registered ports.
+- 49152–65535 are dynamic/ephemeral ports.
+
+### 1.3 TCP Three-Way Handshake and Four-Way Wave
+
+**Establishing a connection (three-way handshake)**:
+
+```
+Client                    Server
+  | ---- SYN (seq=x) ----> |   1. Client initiates
+  | <--- SYN+ACK (y, x+1)  |   2. Server responds
+  | ---- ACK (y+1) ------> |   3. Client confirms
+  |     connection established |
+```
+
+**Closing a connection (four-way wave)**:
+
+```
+Client                    Server
+  | ---- FIN ---->         |   1. Client: I have no more data
+  | <--- ACK ----          |   2. Server: got it
+  | <--- FIN ----          |   3. Server: I'm done too
+  | ---- ACK ------>       |   4. Client: got it, closing
+```
+
+Why 3 for establishing and 4 for closing? When establishing, the server's SYN and ACK can be combined; when closing, after the server receives the client's FIN, it may still have data to send, so it ACKs first, sends the remaining data, then FINs — split into two steps.
+
+## 2. InetAddress: Representing Addresses
+
+`InetAddress` represents an IP address. Common subclasses are `Inet4Address` (IPv4) and `Inet6Address` (IPv6).
+
+```java
+// get by hostname (performs a DNS query)
+InetAddress addr = InetAddress.getByName("www.baidu.com");
+System.out.println(addr.getHostAddress());   // IP address
+
+// local machine
+InetAddress local = InetAddress.getLocalHost();
+System.out.println(local.getHostName());     // hostname
+System.out.println(local.getHostAddress());  // IP
+
+// get multiple by hostname (one domain may have multiple IPs)
+InetAddress[] all = InetAddress.getAllByName("www.baidu.com");
+```
+
+## 3. TCP Communication: Socket and ServerSocket
+
+Java's TCP communication uses two classes:
+
+- **`ServerSocket`** — the server side, listens on a port, waits for connections.
+- **`Socket`** — the client side, initiates a connection; after the server's accept, it also gets a Socket.
+
+### 3.1 Server Side
+
+```java
+try (ServerSocket server = new ServerSocket(8080)) {   // listen on 8080
+    System.out.println("服务端启动, 等待连接...");
+    while (true) {
+        Socket client = server.accept();    // blocks, waits for a connection
+        // handle client...
+    }
+}
+```
+
+`accept()` is blocking — it waits indefinitely when no client is connected. Each incoming connection returns a `Socket` corresponding to that client's connection.
+
+### 3.2 Client Side
+
+```java
+try (Socket socket = new Socket("127.0.0.1", 8080)) {   // connect to server
+    OutputStream out = socket.getOutputStream();
+    out.write("Hello".getBytes());
+
+    InputStream in = socket.getInputStream();
+    byte[] buf = new byte[1024];
+    int len = in.read(buf);
+    System.out.println("收到: " + new String(buf, 0, len));
+}
+```
+
+The essence of a Socket: **two streams** — `getInputStream` reads what the other side sent, `getOutputStream` writes to the other side. Network communication is just stream reading and writing.
+
+### 3.3 A Complete TCP Exchange
+
+```java
+// === Server ===
+try (ServerSocket server = new ServerSocket(8080);
+     Socket client = server.accept();
+     BufferedReader in = new BufferedReader(
+         new InputStreamReader(client.getInputStream()));
+     PrintWriter out = new PrintWriter(client.getOutputStream(), true)) {
+
+    String line;
+    while ((line = in.readLine()) != null) {   // read a line
+        System.out.println("收到: " + line);
+        out.println("Echo: " + line);           // write back a line
+        if ("bye".equals(line)) break;
+    }
+}
+
+// === Client ===
+try (Socket socket = new Socket("127.0.0.1", 8080);
+     BufferedReader in = new BufferedReader(
+         new InputStreamReader(socket.getInputStream()));
+     PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
+
+    out.println("Hello");
+    System.out.println("服务端回: " + in.readLine());
+    out.println("bye");
+}
+```
+
+`BufferedReader`/`PrintWriter` wrap byte streams into character streams for easy line-by-line reading and writing. The `true` argument to `PrintWriter` enables auto-flush — otherwise you must call `flush()` manually.
+
+## 4. UDP Communication: DatagramSocket
+
+UDP uses `DatagramSocket` and `DatagramPacket` — there's no concept of a connection; each packet is sent independently.
+
+```java
+// === UDP Server ===
+try (DatagramSocket socket = new DatagramSocket(9090)) {
+    byte[] buf = new byte[1024];
+    DatagramPacket packet = new DatagramPacket(buf, buf.length);
+    socket.receive(packet);    // blocks, waits for a datagram
+    String msg = new String(packet.getData(), 0, packet.getLength());
+    System.out.println("收到: " + msg + " from " + packet.getAddress());
+}
+
+// === UDP Client ===
+try (DatagramSocket socket = new DatagramSocket()) {
+    byte[] data = "Hello UDP".getBytes();
+    DatagramPacket packet = new DatagramPacket(
+        data, data.length, InetAddress.getByName("127.0.0.1"), 9090);
+    socket.send(packet);
+}
+```
+
+Characteristics of UDP:
+
+- **Connectionless** — no handshake before `send`; fire and forget.
+- **Datagram boundaries preserved** — send one packet, the receiver's `receive` gets the whole packet (unlike TCP's byte stream, which can sticky-pack).
+- **May lose packets** — under network congestion, routers drop UDP packets, and the application layer is unaware.
+
+## 5. Hands-On: A Multithreaded Echo Server
+
+A real server must handle multiple clients at once — single-threaded `accept` + `read` would block, and one slow client would kill everyone. The solution is **one thread per client**.
+
+The code below starts a server and multiple clients in the same process, demonstrating multithreaded TCP communication. It runs in the Piston environment — all communication is over `127.0.0.1` local loopback.
+
+<CodeRunner code={`import java.io.*;
+import java.net.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 多线程 Echo 服务器演示 ===\\n");
+
+        // 1. 启动 Echo 服务器 (独立线程)
+        int port = 18080;
+        ExecutorService serverExec = Executors.newSingleThreadExecutor();
+        serverExec.submit(() -> {
+            try (ServerSocket server = new ServerSocket(port)) {
+                System.out.println("[服务器] 启动在端口 " + port);
+                ExecutorService clientPool = Executors.newFixedThreadPool(4);
+
+                // 接受若干连接 (用超时避免无限阻塞)
+                server.setSoTimeout(3000);
+                int handled = 0;
+                while (handled < 5) {
+                    try {
+                        Socket client = server.accept();
+                        clientPool.submit(() -> handleClient(client, handled + 1));
+                        handled++;
+                    } catch (SocketTimeoutException e) {
+                        if (handled >= 3) break;   // 至少处理 3 个再退
+                    }
+                }
+                Thread.sleep(1000);   // 等任务完成
+                clientPool.shutdown();
+                System.out.println("[服务器] 关闭");
+            } catch (Exception e) {
+                System.out.println("[服务器] 异常: " + e);
+            }
+        });
+
+        // 等服务器就绪
+        Thread.sleep(300);
+
+        // 2. 启动 3 个客户端
+        System.out.println("\\n--- 启动 3 个客户端 ---");
+        List<Future<String>> results = new ArrayList<>();
+        ExecutorService clientExec = Executors.newFixedThreadPool(3);
+        String[] messages = {"Hello from A", "Greetings from B", "Salute from C"};
+        for (int i = 0; i < 3; i++) {
+            final String msg = messages[i];
+            final int idx = i + 1;
+            results.add(clientExec.submit(() -> echoClient(port, msg, idx)));
+        }
+
+        for (Future<String> f : results) {
+            System.out.println(f.get());
+        }
+        clientExec.shutdown();
+        serverExec.shutdown();
+
+        // 3. 演示 InetAddress
+        System.out.println("\\n--- InetAddress ---");
+        InetAddress local = InetAddress.getLocalHost();
+        System.out.println("本机: " + local.getHostAddress() + " / " + local.getHostName());
+        InetAddress loopback = InetAddress.getByName("127.0.0.1");
+        System.out.println("回环: " + loopback + ", isLoopback=" + loopback.isLoopbackAddress());
+
+        // 4. UDP 演示
+        System.out.println("\\n--- UDP Echo ---");
+        udpDemo();
+
+        System.out.println("\\n=== 网络编程关键点 ===");
+        System.out.println("1. Socket = 两条流 (InputStream/OutputStream)");
+        System.out.println("2. accept() 阻塞 -> 用线程池处理多客户端");
+        System.out.println("3. readLine() 阻塞 -> 注意超时设置");
+        System.out.println("4. UDP 用 DatagramSocket/DatagramPacket, 无连接");
+        System.out.println("5. 真实生产用 Netty, 不要裸 Socket");
+    }
+
+    // 处理单个客户端
+    static void handleClient(Socket client, int id) {
+        String name = "客户端#" + id;
+        try (Socket c = client;
+             BufferedReader in = new BufferedReader(
+                 new InputStreamReader(c.getInputStream()));
+             PrintWriter out = new PrintWriter(c.getOutputStream(), true)) {
+
+            System.out.println("[服务器] " + name + " 连接来自 " + c.getRemoteSocketAddress());
+            String line;
+            while ((line = in.readLine()) != null) {
+                System.out.println("  [服务器] 收到 " + name + ": " + line);
+                out.println("ECHO<" + name + ">: " + line);   // 回显
+                if (line.equals("bye")) break;
+            }
+            System.out.println("[服务器] " + name + " 断开");
+        } catch (IOException e) {
+            System.out.println("[服务器] " + name + " 异常: " + e.getMessage());
+        }
+    }
+
+    // 客户端发消息并收响应
+    static String echoClient(int port, String msg, int id) throws Exception {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", port), 1000);
+            socket.setSoTimeout(2000);
+            BufferedReader in = new BufferedReader(
+                new InputStreamReader(socket.getInputStream()));
+            PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+
+            out.println(msg);
+            String resp = in.readLine();
+            out.println("bye");
+            return "[客户端#" + id + "] 发=\"" + msg + "\" 收=\"" + resp + "\"";
+        }
+    }
+
+    // UDP 简单演示
+    static void udpDemo() throws Exception {
+        int port = 19090;
+        // 服务端先就绪
+        Thread server = new Thread(() -> {
+            try (DatagramSocket sock = new DatagramSocket(port)) {
+                sock.setSoTimeout(2000);
+                byte[] buf = new byte[256];
+                DatagramPacket packet = new DatagramPacket(buf, buf.length);
+                sock.receive(packet);
+                String msg = new String(packet.getData(), 0, packet.getLength());
+                System.out.println("  [UDP 服务端] 收到: " + msg
+                    + " 来自 " + packet.getAddress() + ":" + packet.getPort());
+
+                // 回送
+                String reply = "UDP-ACK: " + msg;
+                byte[] data = reply.getBytes();
+                sock.send(new DatagramPacket(data, data.length,
+                    packet.getAddress(), packet.getPort()));
+            } catch (Exception e) {
+                System.out.println("  [UDP 服务端] " + e.getMessage());
+            }
+        });
+        server.start();
+        Thread.sleep(200);
+
+        // 客户端发
+        try (DatagramSocket sock = new DatagramSocket()) {
+            sock.setSoTimeout(2000);
+            String msg = "Ping over UDP";
+            byte[] data = msg.getBytes();
+            sock.send(new DatagramPacket(data, data.length,
+                InetAddress.getByName("127.0.0.1"), port));
+
+            byte[] buf = new byte[256];
+            DatagramPacket reply = new DatagramPacket(buf, buf.length);
+            sock.receive(reply);
+            System.out.println("  [UDP 客户端] 收到: "
+                + new String(reply.getData(), 0, reply.getLength()));
+        }
+        server.join();
+    }
+}`} />
+
+> **Key observations**:
+> - **3 clients connect simultaneously; the server handles them in parallel with a thread pool** — under single-threading, a slow client would block the fast ones.
+> - **`accept()` blocks** — it waits when there's no connection, so the server must run in its own thread.
+> - **`setSoTimeout` prevents indefinite blocking** — set a timeout on reads to avoid a malicious client that never sends data tying up the server.
+> - **TCP uses `BufferedReader.readLine()` to read line-by-line** — this is a simple "application-layer protocol" (line-delimited).
+> - **UDP uses `DatagramPacket` to send/receive** — connectionless, fire and forget.
+
+## 6. Common Pitfalls in Network Programming
+
+### 6.1 Sticky Packet / Fragmented Packet
+
+TCP is a **byte-stream** protocol — there are no "message boundaries." Send `"abc"` 10 times, and the other side may receive `"abcabcabc..."` all at once, or 30 individual 1-byte reads. This is sticky packet / fragmented packet.
+
+The fix: a custom application-layer protocol —
+
+- **Fixed length** — each message is exactly N bytes, padded if shorter.
+- **Delimiter** — separate with `\n` or a special character (the Echo above does this).
+- **Length prefix** — send a 4-byte length first, then the data (most common).
+
+```java
+// length-prefix protocol
+DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+byte[] data = msg.getBytes(StandardCharsets.UTF_8);
+out.writeInt(data.length);   // 4-byte length
+out.write(data);             // the data
+```
+
+### 6.2 Resource Leaks
+
+An unclosed Socket = a file descriptor leak. Linux defaults to 1024 fds per process; leak too many and you get `Too many open files`. Always use `try-with-resources`.
+
+### 6.3 Blocking and Timeouts
+
+`accept`/`read` block indefinitely by default. Production environments must set timeouts:
+
+```java
+server.setSoTimeout(30_000);     // accept timeout
+socket.setSoTimeout(10_000);     // read timeout
+socket.connect(addr, 3000);      // connect timeout
+```
+
+### 6.4 Character Encoding
+
+`new String(bytes)` uses the default encoding — which may differ across machines! Always specify explicitly:
+
+```java
+new String(data, StandardCharsets.UTF_8);
+"hello".getBytes(StandardCharsets.UTF_8);
+```
+
+## 7. From Socket to Netty
+
+The raw Socket API is fine for small demos, but exhausting for production-grade services — sticky packets, timeouts, connection management, heartbeats, half-close… all must be handled yourself. Production environments almost universally use **Netty** — an async, event-driven networking framework built on NIO:
+
+```java
+// Netty server (illustrative, requires the netty dependency)
+EventLoopGroup boss = new NioEventLoopGroup(1);
+EventLoopGroup worker = new NioEventLoopGroup();
+try {
+    ServerBootstrap b = new ServerBootstrap();
+    b.group(boss, worker)
+     .channel(NioServerSocketChannel.class)
+     .childHandler(new ChannelInitializer<SocketChannel>() {
+         @Override
+         protected void initChannel(SocketChannel ch) {
+             ch.pipeline().addLast(new StringDecoder(), new StringEncoder());
+             ch.pipeline().addLast(new SimpleChannelInboundHandler<String>() {
+                 @Override
+                 protected void channelRead0(ChannelHandlerContext ctx, String msg) {
+                     ctx.writeAndFlush("Echo: " + msg);
+                 }
+             });
+         }
+     });
+    ChannelFuture f = b.bind(8080).sync();
+    f.channel().closeFuture().sync();
+} finally {
+    boss.shutdownGracefully();
+    worker.shutdownGracefully();
+}
+```
+
+Netty wraps "event loop + Channel pipeline + Codec" so a few lines of code yield a high-concurrency service. Dubbo, gRPC, and Spring WebFlux all rely on it. But only after understanding Sockets can you see what Netty is actually doing.
+
+## 8. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| TCP | Reliable byte stream, established via three-way handshake |
+| UDP | Unreliable datagram, connectionless |
+| `InetAddress` | Represents an IP address |
+| `ServerSocket` | Server listens on a port |
+| `Socket` | Client connection / the socket after server accept |
+| `accept()` | Blocks waiting for a connection |
+| `getInputStream`/`getOutputStream` | The two streams of a Socket |
+| `DatagramSocket`/`DatagramPacket` | UDP communication |
+| Multiple clients | One thread per connection (thread pool) |
+
+**Mnemonic**:
+
+- **TCP three-way handshake, UDP fire-and-forget** — reliability vs speed.
+- **Socket = two streams** — InputStream to read, OutputStream to write.
+- **`accept()` blocks** — use a thread pool for multiple clients.
+- **TCP sticky packets** — byte stream has no boundary; you need a custom protocol.
+- **Always set timeouts** — `setSoTimeout` prevents indefinite blocking.
+- **Use Netty in production** — don't use raw Sockets.
+
+## Closing: From Socket to HTTP
+
+This chapter built an Echo server with Sockets — the lowest layer of network communication. The next chapter looks at Java 11+'s built-in **HttpClient** — a high-level wrapper over the HTTP protocol, letting you conveniently call REST APIs, scrape web pages, and write crawlers.

@@ -1,0 +1,463 @@
+---
+title: "Java Memory Model"
+chapter: 37
+stage: "Stage 7"
+stageName: "Concurrent Programming"
+order: 4
+description: "Understand what JMM is (not the JVM memory structure), main memory vs working memory, the eight Happens-Before rules, instruction reordering and memory barriers"
+pubDate: 2026-07-03
+tags: ["Java", "JMM", "Happens-Before", "Instruction Reordering", "Memory Barrier"]
+---
+
+# Java Memory Model
+
+This chapter is the most abstract and most crucial theoretical cornerstone of concurrent programming — the **Java Memory Model (JMM)**.
+
+Many people confuse the JMM with "JVM memory structure" (heap, stack, method area). They are two different things. The JVM memory structure describes the **physical division of memory**, while the JMM describes **how multiple threads interact through memory** — it specifies when one thread's writes become visible to another thread, and whether instructions can be reordered. Only by understanding the JMM can you upgrade from "knowing how to use `volatile`/`synchronized`" to "knowing why they solve the problem."
+
+## 1. What the JMM Is (and Is Not)
+
+### 1.1 Three Easily Confused Concepts
+
+| Concept | Description |
+| --- | --- |
+| **JVM Memory Structure** | Heap, stack, method area, native method stack, program counter — physical division of memory |
+| **JMM (Java Memory Model)** | The specification for how multiple threads interact through memory — visibility, ordering, atomicity |
+| **Java Object Model** | The layout of objects in the heap (header, fields, alignment) — the OOP-Klass model |
+
+This chapter is about the **second row** — the JMM.
+
+### 1.2 Why the JMM Is Needed
+
+Different CPUs have different memory models (x86 is strongly consistent, ARM is weakly consistent), and different compilers have different optimization strategies. If Java did not specify its own memory model, the same Java code might behave differently on different hardware — violating Java's "write once, run anywhere" promise.
+
+JSR-133 (revised in Java 5) formally established the JMM and answered three core questions:
+
+1. **Atomicity**: which operations are uninterruptible?
+2. **Visibility**: when do one thread's writes become visible to other threads?
+3. **Ordering**: can the compiler/CPU reorder instructions? When can they not?
+
+The JMM provides an **abstract specification** — programmers write code by the rules; the JVM and compilers freely optimize within the rules; behavior is consistent across platforms.
+
+## 2. Main Memory and Working Memory
+
+The core abstraction of the JMM — all variables live in **Main Memory**, and each thread has its own **Working Memory**.
+
+```
+       ┌─────────────────────────────┐
+       │        Main Memory          │
+       │   ┌─────┐ ┌─────┐ ┌─────┐   │
+       │   │ var1│ │ var2│ │ var3│   │
+       │   └─────┘ └─────┘ └─────┘   │
+       └─────────────────────────────┘
+            ▲         ▲         ▲
+            │ read    │ read    │ read
+            │ write   │ write   │ write
+       ┌────┴───┐ ┌───┴────┐ ┌───┴────┐
+       │Thread A│ │Thread B│ │Thread C│
+       │working │ │working │ │working │
+       │ memory │ │ memory │ │ memory │
+       │var1copy│ │var2copy│ │var3copy│
+       └────────┘ └────────┘ └────────┘
+```
+
+### 2.1 The Eight Operations
+
+The JMM defines 8 atomic operations for thread–main-memory interaction:
+
+| Operation | Acts on | Meaning |
+| --- | --- | --- |
+| `lock` | Main memory variable | Marks the variable as thread-exclusive |
+| `unlock` | Main memory variable | Releases the lock so other threads can lock it |
+| `read` | Main memory variable | Reads the main memory variable value and transfers it to working memory |
+| `load` | Working memory | Places the value from `read` into the working memory variable copy |
+| `use` | Working memory variable | Passes the working memory variable value to the execution engine |
+| `assign` | Working memory variable | Assigns the value returned by the execution engine to the working memory variable |
+| `store` | Working memory variable | Transfers the working memory variable value to main memory |
+| `write` | Main memory variable | Writes the value from `store` into the main memory variable |
+
+> Do not be intimidated by these 8 operations — they are an abstraction at the JMM "primitive" level, not used in everyday programming. But a few key rules are worth remembering:
+>
+> - `read`/`load` and `store`/`write` cannot appear alone — they must be paired.
+> - A thread is not allowed to discard its most recent `assign` — if working memory is modified, it must be synchronized back to main memory.
+> - A thread is not allowed to write back to main memory a variable that was never `assign`-ed.
+> - A new variable can only be "born" in main memory; working memory is not allowed to `use` a variable that was never `load`-ed.
+
+### 2.2 Working Memory ≈ CPU Cache + Registers
+
+The JMM's "working memory" is an abstraction — it corresponds to **CPU registers + L1/L2/L3 caches** in hardware. When a thread reads a variable, it does not read directly from main memory (DRAM); it loads the value into its own CPU cache and modifies it there — this causes threads on other CPUs to potentially miss the modification. The JMM abstracts this hardware detail into the "main memory–working memory" model.
+
+## 3. Happens-Before: The Eight Rules
+
+**Happens-Before** is the core concept of the JMM — it defines what it means for "operation A happens-before operation B": **the result of A is visible to B, and A executes before B in order** (note: physically A may not actually run first, but the JMM guarantees it appears so).
+
+This is the programmer's "visibility contract" — as long as there is a happens-before relationship between two operations, the result of the first operation is guaranteed to be visible to the second.
+
+The JMM defines 8 happens-before rules:
+
+### 3.1 Program Order Rule
+
+**Within a single thread, an operation that appears earlier in the source code happens-before a later one.**
+
+```java
+int a = 1;   // (1)
+int b = a;   // (2)  (1) happens-before (2)
+```
+
+Note: this rule looks simple, but **as-if-serial reordering within a single thread is still allowed** — the compiler may reorder as long as it does not affect the single-threaded result. But the happens-before relationship still holds when reasoning about multi-threading.
+
+### 3.2 Monitor Lock Rule
+
+**An unlock on a lock happens-before a subsequent lock on the same lock.**
+
+```java
+// Thread A
+synchronized(obj) {
+    x = 1;   // (1)
+}             // (2) unlock obj
+
+// Thread B
+synchronized(obj) {   // (3) lock obj
+    int y = x;        // (4) definitely sees x=1
+}
+```
+
+(2) happens-before (3), so the write in (1) is visible to (4) — this is the core of how `synchronized` guarantees visibility.
+
+### 3.3 Volatile Variable Rule
+
+**A write to a volatile variable happens-before a subsequent read of it.**
+
+```java
+// Thread A
+value = 42;        // (1) normal write
+ready = true;      // (2) volatile write
+
+// Thread B
+if (ready) {       // (3) volatile read
+    int x = value; // (4) definitely sees 42
+}
+```
+
+(2) happens-before (3), and combined with program order and transitivity, the write in (1) is visible to (4). This is why volatile solves the initialization visibility problem in double-checked locking.
+
+### 3.4 Thread Start Rule
+
+**The call to `Thread.start()` happens-before any code in the new thread.**
+
+```java
+int x = 10;
+Thread t = new Thread(() -> {
+    // definitely sees x = 10
+    System.out.println(x);
+});
+t.start();
+```
+
+All writes by the parent thread before `start()` are visible to the new thread — this is the JMM guarantee for "passing parent thread state to a child thread."
+
+### 3.5 Thread Termination Rule
+
+**All operations in a thread happen-before the return of that thread's `Thread.join()`.**
+
+```java
+Thread t = new Thread(() -> {
+    x = 99;   // child thread write
+});
+t.start();
+t.join();
+// Main thread definitely sees x = 99
+System.out.println(x);
+```
+
+### 3.6 Thread Interruption Rule
+
+**The call to `Thread.interrupt()` happens-before the interrupted thread detects the interruption event.**
+
+### 3.7 Object Finalization Rule
+
+**The end of an object's constructor happens-before the start of its `finalize()` method.**
+
+### 3.8 Transitivity
+
+**If A happens-before B, and B happens-before C, then A happens-before C.**
+
+This is the glue that ties the previous 7 rules together. For example:
+
+```
+(1) write value  →  (2) write volatile ready   [program order]
+(2) write ready   →  (3) read ready             [volatile rule]
+(3) read ready    →  (4) read value             [program order]
+Transitivity: (1) happens-before (4), so (1)'s write is visible to (4).
+```
+
+### 3.9 Quick Reference
+
+| Rule | Quick description |
+| --- | --- |
+| Program order | Within a single thread, earlier happens-before later |
+| Monitor lock | unlock happens-before subsequent lock |
+| volatile | write happens-before subsequent read |
+| Thread start | before `start()` happens-before new thread's code |
+| Thread termination | thread's code happens-before `join()` returns |
+| Thread interruption | `interrupt()` happens-before detection of interruption |
+| Object finalization | end of constructor happens-before `finalize()` |
+| Transitivity | A→B and B→C ⇒ A→C |
+
+## 4. Instruction Reordering
+
+**Instruction reordering** is when the compiler, JIT, or CPU reorders instructions for performance. Reordering falls into three categories:
+
+### 4.1 Compiler Reordering
+
+`javac` and JIT may reorder bytecode/machine code without changing single-threaded semantics (as-if-serial). For example:
+
+```java
+int a = 1;
+int b = 2;   // these two lines may be swapped
+int c = a + b;
+```
+
+There is no dependency between `a=1` and `b=2`, so they can be swapped.
+
+### 4.2 Instruction-Level Parallelism (ILP) Reordering
+
+Modern CPUs have multiple issue and out-of-order execution — multiple non-conflicting instructions can run in parallel. For example:
+
+```java
+a = 1;    // does not depend on b
+b = 2;    // does not depend on a
+// CPU may execute these two in parallel
+```
+
+### 4.3 Memory System Reordering
+
+CPU caches and store buffers make "writes" appear "delayed" — when one CPU writes a variable, the order another CPU sees may differ from the write order. This is prominent on weakly-memory-model CPUs like ARM/POWER; x86 is relatively strongly consistent.
+
+### 4.4 A Classic Reordering Bug: Double-Checked Locking
+
+```java
+class Singleton {
+    private static Singleton instance;   // no volatile!
+
+    public static Singleton getInstance() {
+        if (instance == null) {                  // (1) first check
+            synchronized (Singleton.class) {
+                if (instance == null) {          // (2) second check
+                    instance = new Singleton();  // (3) dangerous!
+                }
+            }
+        }
+        return instance;
+    }
+}
+```
+
+`instance = new Singleton()` is actually three steps:
+
+```
+a. allocate memory
+b. call constructor to initialize the object
+c. assign the memory address to instance
+```
+
+Reordering may turn this into `a → c → b` — instance is non-null, but the object is not yet initialized! At this point another thread sees instance as non-null in (1), returns it directly, but finds all fields are default values — crash.
+
+The fix: add `volatile` to `instance` — forbids the reordering of `c` and `b`.
+
+```java
+private static volatile Singleton instance;   // volatile!
+```
+
+This is a problem that was only fully resolved after the JMM revision in JDK 5, and the root cause of "why singletons need volatile."
+
+## 5. Memory Barriers
+
+A **memory barrier** is a CPU- or compiler-level instruction that **forbids reordering of instructions on either side of the barrier** and forces a cache flush — it is the physical foundation of `volatile`/`synchronized` implementations.
+
+### 5.1 Four Types of Memory Barriers
+
+| Barrier type | Meaning |
+| --- | --- |
+| **LoadLoad** | Load1; LoadLoad; Load2 — Load1 must complete its read before Load2 can read |
+| **StoreStore** | Store1; StoreStore; Store2 — Store1 must be flushed to memory before Store2 can write |
+| **LoadStore** | Load1; LoadStore; Store2 — Load1 must complete its read before Store2 can write |
+| **StoreLoad** | Store1; StoreLoad; Load2 — Store1 must be flushed before Load2 can read. **Most expensive but all-powerful** |
+
+### 5.2 Volatile's Barrier Insertion Strategy
+
+The JMM's strategy for inserting barriers on volatile writes/reads (conservative version):
+
+- **Before a volatile write**: insert StoreStore — guarantees all prior normal writes are visible to other threads.
+- **After a volatile write**: insert StoreLoad — guarantees the volatile write is visible to subsequent volatile reads.
+- **After a volatile read**: insert LoadLoad, LoadStore — forbids reordering of subsequent reads/writes with the volatile read.
+
+```
+normal write;  ← must precede the volatile write
+StoreStore;
+volatile write;
+StoreLoad;       ← key barrier, most expensive
+volatile read;
+LoadLoad;
+LoadStore;
+normal read;
+```
+
+`StoreLoad` is the heaviest barrier — it must wait for the store buffer to flush and clear read prefetches, which is expensive. This is why volatile writes are slower than reads.
+
+### 5.3 The Special Guarantee for final Fields
+
+The JMM has a special rule for `final` fields — **the write of a `final` field at the end of the constructor is visible to all threads**, with no need for `volatile` or `synchronized`.
+
+This is why immutable objects (`final` fields) are inherently thread-safe — the JMM guarantees that when other threads see the object, its `final` fields have definitely been initialized.
+
+```java
+final class ImmutablePoint {
+    final int x, y;   // final fields
+
+    ImmutablePoint(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }   // after construction ends, x/y are guaranteed visible to other threads
+}
+```
+
+But note: **the safety guarantee for `final` fields only holds when the constructor returns normally** — if `this` escapes during construction (e.g. starting a thread that uses `this` in the constructor), the guarantee is void.
+
+## 6. Hands-On: Demonstrating Reordering and Happens-Before
+
+The example below uses the "double-checked locking singleton" to demonstrate the impact of reordering, fixed with `volatile`. It also demonstrates the "thread start" happens-before rule — writes before the parent thread's `start` are visible to the child thread.
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // === 1. Demonstrate Happens-Before: thread start rule ===
+        System.out.println("=== Thread Start Rule ===");
+        int x = 10;
+        Thread t1 = new Thread(() -> {
+            // writes before start() are visible to the child thread
+            System.out.println("Child thread sees x = " + x + " (definitely 10)");
+        });
+        // Main thread modifies x then starts
+        x = 99;
+        t1.start();
+        t1.join();
+        System.out.println("Main thread x = " + x);
+
+        // === 2. Demonstrate Happens-Before: join rule ===
+        System.out.println("\\n=== join Rule ===");
+        int[] holder = new int[1];
+        Thread t2 = new Thread(() -> {
+            holder[0] = 42;   // child thread write
+        });
+        t2.start();
+        t2.join();   // after join, main thread definitely sees holder[0] = 42
+        System.out.println("After join, main thread sees holder = " + holder[0]);
+
+        // === 3. volatile guarantees visibility ===
+        System.out.println("\\n=== volatile Visibility ===");
+        VolatileDemo demo = new VolatileDemo();
+        Thread worker = new Thread(() -> {
+            int local = demo.value;   // read main memory's value
+            while (!demo.ready) {
+                // without volatile, may loop forever
+                // with volatile, can sense ready's change
+            }
+            System.out.println("worker sees ready=true, value=" + demo.value);
+        });
+        worker.start();
+        Thread.sleep(100);
+        demo.value = 100;
+        demo.ready = true;   // volatile write
+        worker.join(2000);
+        System.out.println("worker state: " + worker.getState());
+
+        // === 4. Double-checked locking singleton (volatile fix) ===
+        System.out.println("\\n=== Double-Checked Locking Singleton ===");
+        for (int i = 0; i < 5; i++) {
+            Singleton s = Singleton.getInstance();
+            System.out.println("Got instance: " + s + " value=" + s.value);
+        }
+
+        // === 5. final field visibility ===
+        System.out.println("\\n=== final Fields ===");
+        final ImmutablePoint[] points = new ImmutablePoint[1];
+        Thread creator = new Thread(() -> {
+            points[0] = new ImmutablePoint(3, 4);
+        });
+        creator.start();
+        creator.join();
+        // final field guarantee: after construction, fields are definitely visible
+        System.out.println("Point: x=" + points[0].x + " y=" + points[0].y);
+    }
+}
+
+class VolatileDemo {
+    int value = 0;
+    volatile boolean ready = false;   // volatile guarantees visibility
+}
+
+class Singleton {
+    private static volatile Singleton instance;   // volatile prevents reordering
+    final int value;
+    private Singleton() {
+        this.value = 42;
+    }
+    public static Singleton getInstance() {
+        if (instance == null) {
+            synchronized (Singleton.class) {
+                if (instance == null) {
+                    instance = new Singleton();
+                }
+            }
+        }
+        return instance;
+    }
+}
+
+final class ImmutablePoint {
+    final int x;
+    final int y;
+    ImmutablePoint(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+}`} />
+
+> **Key observations**:
+> - **Thread start rule**: the main thread modifies `x = 99` before `start`, and the child thread sees x as 99 — writes before `start` are visible to the child thread.
+> - **join rule**: the child thread writes `holder[0] = 42`, and after `join` the main thread definitely sees 42.
+> - **volatile visibility**: without `volatile`, the worker may loop forever (not guaranteed to reproduce); with it, it exits reliably.
+> - **Double-checked locking**: `instance` is only safe after adding `volatile` — forbids the "allocate memory → assign → initialize" reordering.
+> - **final fields**: after construction ends, `x`/`y` are guaranteed visible to other threads, with no need for `volatile`.
+
+## 7. Chapter Summary
+
+| Concept | Key points |
+| --- | --- |
+| JMM | The specification for multi-threaded memory interaction; defines visibility, ordering, atomicity — not the JVM memory structure |
+| Main memory vs working memory | Main memory = DRAM; working memory = an abstraction of CPU cache + registers |
+| 8 operations | `lock`/`unlock`/`read`/`load`/`use`/`assign`/`store`/`write` |
+| Happens-Before | A hb B ⇒ A's result is visible to B and executes first |
+| 8 hb rules | Program order / lock / volatile / start / termination / interruption / finalization / transitivity |
+| Instruction reordering | Compiler / CPU / memory system can all reorder, breaking multi-threaded correctness |
+| Memory barriers | StoreStore/StoreLoad/LoadLoad/LoadStore — forbid reordering + flush cache |
+| volatile barriers | StoreStore before write, StoreLoad after write, LoadLoad + LoadStore after read |
+| final fields | After construction, visible to other threads with no need for volatile |
+
+**Mnemonics**:
+
+- **The JMM is not the memory structure** — it is the "multi-threaded visibility contract."
+- **Happens-Before is a reasoning tool** — as long as two operations have an hb relationship, the first's writes are visible to the second.
+- **volatile write followed by StoreLoad** — this is the most expensive barrier, and the reason volatile writes are slower than reads.
+- **final fields are lock-free visible** — once construction completes, they are definitely visible; this is the safety cornerstone of immutable objects.
+- **DCL singletons need volatile** — prevents "allocate → assign → initialize" from being reordered.
+
+## Conclusion: The JMM Is the "Constitution" of Concurrency
+
+Once you understand the JMM, you no longer write concurrent code by "feel" — you can **reason** about it: "do these two steps have an hb relationship? If not, add synchronization." This is the dividing line between a "tuning engineer" and a "concurrency engineer."
+
+But the JMM only specifies "what is safe"; the actual implementation of safety relies on **synchronization mechanisms** — `synchronized`, `volatile`, `ThreadLocal`, `wait`/`notify`. The next chapter dives into the principles and usage of these mechanisms, showing how they put JMM rules into practice. What is the monitor underneath `synchronized`? What exactly does "`volatile` does not guarantee atomicity" mean? Why must `wait`/`notify` be inside a `synchronized` block? The answers are all in the next chapter.

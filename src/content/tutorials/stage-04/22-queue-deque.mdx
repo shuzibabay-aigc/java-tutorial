@@ -1,0 +1,502 @@
+---
+title: "Queue 与 Deque"
+chapter: 22
+stage: "第四阶段"
+stageName: "集合框架"
+order: 5
+description: "深入 PriorityQueue 最小堆实现、ArrayDeque 循环数组、Deque 兼做栈与队列的技巧，以及 BlockingQueue 阻塞队列系列概览"
+pubDate: 2026-07-03
+tags: ["Java", "Queue", "Deque", "PriorityQueue", "ArrayDeque", "BlockingQueue", "堆", "栈"]
+---
+
+# Queue 与 Deque
+
+前面的 `List`、`Set`、`Map` 关心的是"装什么"，而 `Queue`（队列）和 `Deque`（双端队列）关心的是"怎么进、怎么出"。它们是按"进出规则"组织的容器——先进先出、后进先出、按优先级出，每一种规则都对应一种数据结构与一类应用场景。
+
+这一章，我们看 `PriorityQueue` 怎么用最小堆实现"VIP 优先"、`ArrayDeque` 怎么用循环数组同时当好栈和队列，以及 `BlockingQueue` 怎么在生产者-消费者之间架起桥梁。
+
+## 一、Queue 接口：两种行为
+
+`Queue<E>` 继承自 `Collection<E>`，定义了"队列"的行为。它有两套方法，分别对应"出错抛异常"和"出错返回特殊值"两种风格：
+
+| 操作 | 抛异常 | 返回特殊值 |
+| --- | --- | --- |
+| 入队 | `add(e)` | `offer(e)` |
+| 出队（取并删） | `remove()` | `poll()` |
+| 查看队头（取不删） | `element()` | `peek()` |
+
+通常用 `offer`/`poll`/`peek` 这一套——它们在容量受限或空队列时更友好，不会抛异常。
+
+`Queue` 的默认语义是 **FIFO**（先进先出）——最先入队的最先出队，像食堂取号排队。但 `Queue` 还有个子接口 `Deque`，允许两端进出，能模拟 FIFO 队列、LIFO 栈、双端队列三种角色。
+
+## 二、PriorityQueue：优先队列
+
+### 2.1 不按入队顺序，按优先级
+
+`PriorityQueue` 打破了"先进先出"——出队的总是"优先级最高"的那个。默认是**最小堆**，即每次 `poll` 出最小的元素：
+
+```java
+PriorityQueue<Integer> pq = new PriorityQueue<>();
+pq.offer(5);
+pq.offer(1);
+pq.offer(3);
+System.out.println(pq.poll());   // 1（最小）
+System.out.println(pq.poll());   // 3
+System.out.println(pq.poll());   // 5
+```
+
+注意：**优先队列的遍历顺序不是排序顺序**！`toString` 和迭代器只是按数组顺序展示，不代表优先级顺序。要看排序效果，必须用 `poll` 一个个取出。
+
+### 2.2 最小堆的实现
+
+`PriorityQueue` 底层是一个数组表示的**二叉堆**（Binary Heap）。它满足"堆性质"：每个节点都小于等于它的子节点（最小堆）。
+
+```
+最小堆示例：            数组表示：
+       1               [1, 3, 5, 7, 9, 6]
+      / \
+     3   5
+    / \  / \
+   7  9 6
+```
+
+数组表示的妙处：节点 `i` 的父节点是 `(i-1)/2`，左子节点是 `2i+1`，右子节点是 `2i+2`——不用指针，纯算术定位。
+
+**入队（offer）**：新元素放到数组末尾，然后**上浮**（sift up）——和父节点比较，比父小就交换，直到符合堆性质。
+
+```java
+// 简化版上浮
+private void siftUp(int k, E x) {
+    while (k > 0) {
+        int parent = (k - 1) >>> 1;
+        if (comparator.compare(x, queue[parent]) >= 0) break;
+        queue[k] = queue[parent];
+        k = parent;
+    }
+    queue[k] = x;
+}
+```
+
+**出队（poll）**：取出根（最小值），把末尾元素搬到根位置，然后**下沉**（sift down）——和较小的子节点比较，比子大就交换，直到符合堆性质。
+
+```java
+// 简化版下沉
+private void siftDown(int k, E x) {
+    int half = size >>> 1;
+    while (k < half) {
+        int child = 2 * k + 1;       // 左子
+        int right = child + 1;
+        if (right < size && comparator.compare(queue[child], queue[right]) > 0)
+            child = right;            // 取较小的子节点
+        if (comparator.compare(x, queue[child]) <= 0) break;
+        queue[k] = queue[child];
+        k = child;
+    }
+    queue[k] = x;
+}
+```
+
+入队和出队都是 O(log n)——堆的高度是 log n。
+
+### 2.3 自定义优先级
+
+默认是最小堆（小的先出）。要"大的先出"（最大堆），传个反转 Comparator：
+
+```java
+PriorityQueue<Integer> maxHeap = new PriorityQueue<>(Comparator.reverseOrder());
+```
+
+自定义对象怎么排？传 `Comparator`：
+
+```java
+PriorityQueue<Task> pq = new PriorityQueue<>(
+    Comparator.comparingInt(Task::getPriority)   // 按优先级数值升序
+);
+```
+
+### 2.4 应用：Top K 问题
+
+`PriorityQueue` 的经典应用是 **Top K**——找出前 K 大/小的元素。技巧是用一个大小为 K 的小堆，遍历所有元素：堆不满就加；新元素比堆顶大，就替换堆顶。最后堆里就是 Top K。
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 基本优先队列
+        PriorityQueue<Integer> pq = new PriorityQueue<>();
+        pq.offer(5);
+        pq.offer(1);
+        pq.offer(3);
+        pq.offer(7);
+        pq.offer(2);
+        System.out.println("--- 最小堆，poll 出来是升序 ---");
+        while (!pq.isEmpty()) {
+            System.out.print(pq.poll() + " ");
+        }
+        System.out.println();
+
+        // 2. 最大堆
+        PriorityQueue<Integer> maxHeap = new PriorityQueue<>(Comparator.reverseOrder());
+        maxHeap.offer(5);
+        maxHeap.offer(1);
+        maxHeap.offer(3);
+        System.out.println("\\n--- 最大堆，poll 出来是降序 ---");
+        while (!maxHeap.isEmpty()) {
+            System.out.print(maxHeap.poll() + " ");
+        }
+        System.out.println();
+
+        // 3. Top 3 最大的元素
+        int[] nums = {3, 1, 5, 7, 2, 8, 4, 9, 6};
+        System.out.println("\\n--- Top 3 最大 ---");
+        List<Integer> top3 = topK(nums, 3);
+        System.out.println(top3);
+
+        // 4. 任务调度：按优先级处理
+        System.out.println("\\n--- 任务调度 ---");
+        PriorityQueue<Task> tasks = new PriorityQueue<>(
+            Comparator.comparingInt(Task::getPriority)
+        );
+        tasks.offer(new Task("写文档", 3));
+        tasks.offer(new Task("修紧急bug", 1));   // 优先级 1 最高
+        tasks.offer(new Task("回复邮件", 5));
+        tasks.offer(new Task("开会议", 2));
+        while (!tasks.isEmpty()) {
+            System.out.println("处理: " + tasks.poll());
+        }
+    }
+
+    // 找前 k 大的元素（用小堆）
+    static List<Integer> topK(int[] nums, int k) {
+        PriorityQueue<Integer> minHeap = new PriorityQueue<>(k);
+        for (int n : nums) {
+            if (minHeap.size() < k) {
+                minHeap.offer(n);
+            } else if (n > minHeap.peek()) {
+                minHeap.poll();
+                minHeap.offer(n);
+            }
+        }
+        List<Integer> result = new ArrayList<>(minHeap);
+        Collections.sort(result, Comparator.reverseOrder());
+        return result;
+    }
+}
+
+class Task implements Comparable<Task> {
+    String name;
+    int priority;   // 数值越小优先级越高
+
+    Task(String name, int priority) {
+        this.name = name;
+        this.priority = priority;
+    }
+
+    int getPriority() { return priority; }
+
+    @Override
+    public int compareTo(Task o) {
+        return Integer.compare(this.priority, o.priority);
+    }
+
+    @Override
+    public String toString() {
+        return name + "(优先级=" + priority + ")";
+    }
+}`} />
+
+## 三、ArrayDeque：循环数组双端队列
+
+### 3.1 一专多能的"瑞士军刀"
+
+`ArrayDeque` 是个被低估的容器——它既能当**栈**用（替代老旧的 `Stack`），又能当**队列**用（替代 `LinkedList`），而且性能都比被替代者更好。它基于**循环数组**（circular array）实现。
+
+循环数组的核心思路：维护 `head` 和 `tail` 两个指针，数组首尾相连——`tail` 走到数组末尾就绕回开头。这样两端插入删除都 O(1)，不用搬移元素。
+
+```
+容量 8，head=2, tail=6
+索引: 0  1  2  3  4  5  6  7
+数据: -  -  A  B  C  D  -  -
+          ↑head       ↑tail
+```
+
+### 3.2 当栈用：push / pop / peek
+
+`Deque` 的 `push`/`pop`/`peek` 语义对应栈（LIFO）：
+
+```java
+Deque<String> stack = new ArrayDeque<>();
+stack.push("A");      // 入栈（在头部加）
+stack.push("B");
+stack.push("C");
+System.out.println(stack.pop());   // C（后进先出）
+System.out.println(stack.peek());  // B（看栈顶不删）
+```
+
+`push` 实际调的是 `addFirst`，`pop` 调的是 `removeFirst`——栈就是"只在头部操作的双端队列"。
+
+> 💡 **为什么不用 `java.util.Stack`？** `Stack` 继承 `Vector`，所有方法加 `synchronized`，性能差。而且它暴露了 `get(i)` 等 List 方法，破坏了栈的抽象。Java 文档明确推荐用 `ArrayDeque` 替代 `Stack`。
+
+### 3.3 当队列用：offer / poll / peek
+
+`Deque` 当队列（FIFO）用时，`offer` 在尾部加，`poll` 从头部取：
+
+```java
+Deque<String> queue = new ArrayDeque<>();
+queue.offer("A");     // 入队（尾部加）
+queue.offer("B");
+queue.offer("C");
+System.out.println(queue.poll());   // A（先进先出）
+```
+
+`offer` 调 `addLast`，`poll` 调 `removeFirst`——队列就是"尾进头出"的双端队列。
+
+### 3.4 性能特点
+
+`ArrayDeque` 几乎所有操作都是 O(1)：
+
+| 操作 | 复杂度 |
+| --- | --- |
+| `push` / `pop` / `peek` | O(1) |
+| `offer` / `poll` / `peek` | O(1) |
+| `addFirst` / `addLast` / `removeFirst` / `removeLast` | O(1) |
+| `contains` | O(n) |
+
+它比 `LinkedList` 快——没有节点对象开销，缓存友好。它比 `Stack` 快——没有 synchronized。**结论：栈和队列都首选 `ArrayDeque`**。
+
+注意：`ArrayDeque` **不允许 null**——因为它用 null 判断"空槽"，加入 null 会和空槽混淆。如果要存 null，用 `LinkedList`。
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 栈操作
+        Deque<String> stack = new ArrayDeque<>();
+        stack.push("第一层");
+        stack.push("第二层");
+        stack.push("第三层");
+        System.out.println("--- 栈（后进先出）---");
+        System.out.println("peek: " + stack.peek());   // 第三层
+        while (!stack.isEmpty()) {
+            System.out.println("pop: " + stack.pop());
+        }
+
+        // 2. 队列操作
+        Deque<String> queue = new ArrayDeque<>();
+        queue.offer("Alice");
+        queue.offer("Bob");
+        queue.offer("Charlie");
+        System.out.println("\\n--- 队列（先进先出）---");
+        while (!queue.isEmpty()) {
+            System.out.println("poll: " + queue.poll());
+        }
+
+        // 3. 双端操作
+        Deque<Integer> deque = new ArrayDeque<>();
+        deque.addFirst(2);
+        deque.addFirst(1);
+        deque.addLast(3);
+        deque.addLast(4);
+        System.out.println("\\n--- 双端队列 ---");
+        System.out.println("deque: " + deque);     // [1, 2, 3, 4]
+        System.out.println("getFirst: " + deque.getFirst());   // 1
+        System.out.println("getLast: " + deque.getLast());     // 4
+        deque.removeFirst();
+        deque.removeLast();
+        System.out.println("removeFirst/Last 后: " + deque);   // [2, 3]
+
+        // 4. 括号匹配：栈的经典应用
+        System.out.println("\\n--- 括号匹配检查 ---");
+        String[] exprs = {"(a+b)", "([)]", "((()))", "{[()]}"};
+        for (String expr : exprs) {
+            System.out.println(expr + " -> " + (isBalanced(expr) ? "合法" : "非法"));
+        }
+    }
+
+    static boolean isBalanced(String expr) {
+        Deque<Character> stack = new ArrayDeque<>();
+        Map<Character, Character> pairs = Map.of(')', '(', ']', '[', '}', '{');
+        for (char c : expr.toCharArray()) {
+            if (c == '(' || c == '[' || c == '{') {
+                stack.push(c);
+            } else if (c == ')' || c == ']' || c == '}') {
+                if (stack.isEmpty() || stack.pop() != pairs.get(c)) {
+                    return false;
+                }
+            }
+        }
+        return stack.isEmpty();
+    }
+}`} />
+
+## 四、BlockingQueue：阻塞队列
+
+`BlockingQueue` 是 `Queue` 的并发版本，专为**生产者-消费者**模型设计。它的特点：
+
+- **入队满时阻塞**：队列满了，`put` 会阻塞直到有空位。
+- **出队空时阻塞**：队列空了，`take` 会阻塞直到有元素。
+- **线程安全**：内部已保证，不需要外部加锁。
+
+### 4.1 主要实现
+
+| 实现 | 底层 | 特点 |
+| --- | --- | --- |
+| `ArrayBlockingQueue` | 数组 | 有界，FIFO，单一锁 |
+| `LinkedBlockingQueue` | 链表 | 可选有界（默认 Integer.MAX_VALUE），FIFO，两把锁（读写分离） |
+| `SynchronousQueue` | 无 | 容量 0，每个 put 必须等一个 take |
+| `PriorityBlockingQueue` | 堆 | 无界，按优先级出队 |
+| `DelayQueue` | 堆 | 元素到期才能取出，适合定时任务 |
+| `LinkedBlockingDeque` | 链表 | 双端阻塞队列 |
+
+### 4.2 四套方法
+
+`BlockingQueue` 按行为分四套：
+
+| 行为 | 抛异常 | 返回特殊值 | 阻塞 | 超时 |
+| --- | --- | --- | --- | --- |
+| 入队 | `add(e)` | `offer(e)` | `put(e)` | `offer(e, time, unit)` |
+| 出队 | `remove()` | `poll()` | `take()` | `poll(time, unit)` |
+| 查看 | `element()` | `peek()` | - | - |
+
+最常用 `put`/`take`——它们会阻塞，是生产者-消费者的核心。
+
+### 4.3 生产者-消费者示例
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws InterruptedException {
+        BlockingQueue<String> queue = new ArrayBlockingQueue<>(3);
+
+        // 生产者
+        Thread producer = new Thread(() -> {
+            try {
+                for (int i = 1; i <= 5; i++) {
+                    String item = "商品-" + i;
+                    queue.put(item);   // 满了会阻塞
+                    System.out.println("生产: " + item + " (队列大小 " + queue.size() + ")");
+                    Thread.sleep(50);
+                }
+                queue.put("END");   // 结束信号
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }, "生产者");
+
+        // 消费者
+        Thread consumer = new Thread(() -> {
+            try {
+                while (true) {
+                    String item = queue.take();   // 空了会阻塞
+                    if ("END".equals(item)) break;
+                    System.out.println("  消费: " + item);
+                    Thread.sleep(150);   // 消费比生产慢
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }, "消费者");
+
+        producer.start();
+        consumer.start();
+        producer.join();
+        consumer.join();
+        System.out.println("完成！");
+
+        // 演示 DelayQueue
+        System.out.println("\\n--- DelayQueue 演示 ---");
+        DelayQueue<DelayedTask> dq = new DelayQueue<>();
+        long now = System.currentTimeMillis();
+        dq.offer(new DelayedTask("1秒后", now + 1000));
+        dq.offer(new DelayedTask("3秒后", now + 3000));
+        dq.offer(new DelayedTask("500毫秒后", now + 500));
+        while (!dq.isEmpty()) {
+            DelayedTask t = dq.take();   // 到期才能取出
+            System.out.println("取出: " + t.name + " (实际 " + (System.currentTimeMillis() - now) + "ms)");
+        }
+    }
+}
+
+class DelayedTask implements Delayed {
+    final String name;
+    final long executeTime;
+
+    DelayedTask(String name, long executeTime) {
+        this.name = name;
+        this.executeTime = executeTime;
+    }
+
+    @Override
+    public long getDelay(TimeUnit unit) {
+        return unit.convert(executeTime - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    @Override
+    public int compareTo(Delayed o) {
+        return Long.compare(this.executeTime, ((DelayedTask) o).executeTime);
+    }
+}`} />
+
+`DelayQueue` 是个有趣的特例——元素必须实现 `Delayed`，到期（`getDelay` 返回值不大于 0）才能被 `take` 取出。它常用于定时任务调度、缓存过期清理等。
+
+## 五、Queue 与 Deque 的关系
+
+```
+Collection
+└── Queue
+    ├── PriorityQueue（优先队列，堆）
+    └── Deque（双端队列）
+        ├── ArrayDeque（循环数组，强烈推荐）
+        └── LinkedList（链表，也能当 Deque）
+    └── BlockingQueue（阻塞队列，并发用）
+        ├── ArrayBlockingQueue
+        ├── LinkedBlockingQueue
+        ├── SynchronousQueue
+        ├── PriorityBlockingQueue
+        └── DelayQueue
+```
+
+注意 `Deque` 继承 `Queue`——所以 `Deque` 能做 `Queue` 能做的所有事，还多出"双端"能力。
+
+## 六、何时用什么
+
+| 场景 | 推荐 |
+| --- | --- |
+| 栈（后进先出） | `ArrayDeque` |
+| 队列（先进先出） | `ArrayDeque`（无界）或 `LinkedBlockingQueue`（有界并发） |
+| 按优先级处理 | `PriorityQueue` |
+| Top K | `PriorityQueue`（大小 K 的堆） |
+| 生产者-消费者 | `ArrayBlockingQueue` / `LinkedBlockingQueue` |
+| 定时任务 | `DelayQueue` |
+| 任务交接（直接传递） | `SynchronousQueue` |
+
+## 七、本章小结
+
+| 主题 | 要点 |
+| --- | --- |
+| Queue 两套方法 | add/remove/element（抛异常） vs offer/poll/peek（返回特殊值） |
+| PriorityQueue | 最小堆，poll 出最小，O(log n) |
+| 上浮/下沉 | 入队上浮，出队下沉 |
+| 最大堆 | `Comparator.reverseOrder()` |
+| Top K | 小堆维护 K 个最大元素 |
+| ArrayDeque | 循环数组，双端 O(1) |
+| 栈 | `push`/`pop`/`peek`（实际操作头部） |
+| 队列 | `offer`/`poll`/`peek`（尾进头出） |
+| 替代 Stack | 用 `ArrayDeque`，不要用 `Stack` |
+| BlockingQueue | 阻塞队列，生产者-消费者 |
+| 四套方法 | 抛异常/返回值/阻塞/超时 |
+| DelayQueue | 元素到期才能取出 |
+
+## 结语：进出的艺术
+
+`Queue` 和 `Deque` 看起来"低调"，但它们是很多算法与系统的关键积木：
+
+- **栈**支撑了函数调用、表达式求值、回溯算法。
+- **队列**支撑了 BFS、消息传递、流控。
+- **优先队列**支撑了 Dijkstra、Huffman 编码、任务调度。
+- **阻塞队列**支撑了线程池、生产者-消费者、消息中间件。
+
+`ArrayDeque` 是日常 90% 场景的答案——快、省、通用。当你需要"按优先级处理"时换 `PriorityQueue`，需要"跨线程交接任务"时换 `BlockingQueue`。这三板斧，足以应对绝大多数进出场景。
+
+下一章，我们看 `Collections` 工具类——集合框架的"瑞士军刀"，以及 Java 9+ 的不可变工厂方法。

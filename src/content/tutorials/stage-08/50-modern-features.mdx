@@ -1,0 +1,700 @@
+---
+title: "其他现代特性速览"
+chapter: 50
+stage: "第八阶段"
+stageName: "现代 Java 特性"
+order: 5
+description: "速览接口私有方法、Stream 增强 takeWhile/dropWhile/ofNullable/toList、HttpClient 同步异步 HTTP/2、Text Blocks 文本块、Sequenced Collections 序列化集合、Foreign Function & Memory API"
+pubDate: 2026-07-03
+tags: ["Java", "HttpClient", "Text Blocks", "Sequenced Collections", "FFM API", "Stream"]
+---
+
+# 其他现代特性速览
+
+这一章是第八阶段的收官——前面四章讲了模块系统、Records、Sealed Classes、Pattern Matching 这些"重磅"特性，本章把剩下的"小而美"特性一口气讲完。它们每一个都没有三件套那么革命性，但合在一起让 Java 写起来舒服多了。
+
+这一章会快速过完六个特性：
+
+1. **接口私有方法**（Java 9+）
+2. **Stream 增强**（Java 9+ / 16+）
+3. **HttpClient**（Java 11+）
+4. **Text Blocks 文本块**（Java 15+）
+5. **Sequenced Collections 序列化集合**（Java 21+）
+6. **Foreign Function & Memory API**（Java 22+，正式）
+
+## 一、接口私有方法（Java 9+）
+
+### 1.1 痛点：接口的代码复用
+
+Java 8 引入了接口的 `default` 方法和 `static` 方法——接口终于能带"实现"了。但很快出现一个问题：多个 default 方法之间想复用代码怎么办？
+
+```java
+interface Logger {
+    default void logInfo(String msg) {
+        // 想复用这个格式化逻辑
+        System.out.println("[INFO] " + msg);
+    }
+    default void logError(String msg) {
+        // 又要写一遍格式化?
+        System.out.println("[ERROR] " + msg);
+    }
+}
+```
+
+Java 8 没办法——只能把"共用逻辑"也写成 `default` 方法，但这样就**暴露给接口的使用者**了。用户能看到 `logInternal` 这种"内部方法"，破坏抽象。
+
+### 1.2 Java 9 的解法：接口私有方法
+
+Java 9（JEP 213）允许接口里有 `private` 方法——只能在接口内部被 default/static 方法调用：
+
+```java
+interface Logger {
+    default void logInfo(String msg) {
+        log("INFO", msg);   // 调用私有方法
+    }
+    default void logError(String msg) {
+        log("ERROR", msg);
+    }
+    default void logWarn(String msg) {
+        log("WARN", msg);
+    }
+
+    // 私有方法, 复用逻辑, 不暴露给实现类
+    private void log(String level, String msg) {
+        System.out.println("[" + level + "] " + msg + " @" + System.currentTimeMillis());
+    }
+
+    // 也可以是 static 私有
+    private static String format(String level, String msg) {
+        return "[" + level + "] " + msg;
+    }
+}
+```
+
+特点：
+
+- **`private` 方法**：实例方法，被 default 方法调用。
+- **`private static` 方法**：静态方法，被 static/default 方法调用。
+- **不能是 abstract**——私有方法必须有实现。
+- **不被实现类继承**——只在接口内部可见。
+
+这是个小特性，但解决了接口代码复用的"最后一公里"。
+
+## 二、Stream 增强（Java 9+ / 16+）
+
+Java 8 引入了 Stream API，后续版本持续在"打补丁"。几个最常用的增强：
+
+### 2.1 takeWhile / dropWhile（Java 9+）
+
+`takeWhile`：取满足条件的前缀，遇到第一个不满足的就停。
+
+`dropWhile`：跳过满足条件的前缀，遇到第一个不满足的就开始取。
+
+```java
+Stream.of(1, 2, 3, 4, 5, 2, 1)
+    .takeWhile(n -> n < 4)   // 取 1, 2, 3, 遇到 4 停
+    .collect(Collectors.toList());   // [1, 2, 3]
+
+Stream.of(1, 2, 3, 4, 5, 2, 1)
+    .dropWhile(n -> n < 4)   // 跳 1, 2, 3, 从 4 开始
+    .collect(Collectors.toList());   // [4, 5, 2, 1]
+```
+
+**和 `filter` 的区别**——`filter` 是"全程过滤"，`takeWhile`/`dropWhile` 是"前缀操作"。对**有序且按某种条件分段**的流特别有用：日志按时间分页、序列按阈值分段。
+
+### 2.2 ofNullable（Java 9+）
+
+`Stream.ofNullable(null)` 返回空流，不抛 NPE：
+
+```java
+Stream.ofNullable(null).count();   // 0
+Stream.ofNullable("hello").count();   // 1
+
+// 配合 flatMap 处理可能为 null 的元素
+Stream.of("a", null, "b", null, "c")
+    .flatMap(Stream::ofNullable)   // 过滤掉 null
+    .collect(Collectors.toList());   // [a, b, c]
+```
+
+### 2.3 Stream.toList()（Java 16+）
+
+Java 16 之前，把 Stream 收集成 List 要写 `.collect(Collectors.toList())`——又长又容易写错。Java 16 加了 `Stream.toList()` 直接收集：
+
+```java
+// 老写法
+List<String> list = stream.collect(Collectors.toList());
+
+// 新写法
+List<String> list = stream.toList();
+```
+
+**注意**：`toList()` 返回的是**不可变 List**——不能 `add`/`remove`。如果要可变 List，还得用 `collect(Collectors.toCollection(ArrayList::new))`。
+
+```java
+List<Integer> nums = Stream.of(1, 2, 3).toList();
+nums.add(4);   // 抛 UnsupportedOperationException
+```
+
+### 2.4 其他小增强
+
+- `Stream.iterate(seed, hasNext, next)`——支持终止条件的 iterate，类似 for 循环。
+- `IntStream.takeWhile/dropWhile`——基本类型流也支持。
+- `Collectors.teeing`——双下游收集器，同时算两个统计（如同时算 sum 和 count 求平均）。
+
+```java
+// Java 9: 带终止条件的 iterate
+Stream.iterate(1, n -> n <= 100, n -> n + 1)
+    .forEach(System.out::println);   // 等价于 for (int i=1; i<=100; i++)
+
+// Java 12+: teeing 同时算总和和数量
+double avg = Stream.of(1, 2, 3, 4, 5)
+    .collect(Collectors.teeing(
+        Collectors.summingDouble(i -> i),
+        Collectors.counting(),
+        (sum, count) -> sum / count
+    ));   // 3.0
+```
+
+## 三、HttpClient（Java 11+）
+
+Java 9 引入了新的 HTTP Client API（`java.net.http`），Java 11 正式发布（JEP 321）。它替代了老旧的 `HttpURLConnection`——支持 HTTP/2、WebSocket、同步异步、连接池。
+
+### 3.1 基本用法
+
+```java
+import java.net.URI;
+import java.net.http.*;
+import java.time.Duration;
+
+HttpClient client = HttpClient.newBuilder()
+    .version(HttpClient.Version.HTTP_2)        // 默认 HTTP/2, 自动降级 HTTP/1.1
+    .connectTimeout(Duration.ofSeconds(10))
+    .build();
+
+HttpRequest request = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.example.com/users"))
+    .timeout(Duration.ofSeconds(30))
+    .header("Accept", "application/json")
+    .GET()
+    .build();
+
+// 同步
+HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+System.out.println(response.statusCode());
+System.out.println(response.body());
+
+// 异步
+client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+    .thenApply(HttpResponse::body)
+    .thenAccept(System.out::println)
+    .join();   // 等待完成
+```
+
+### 3.2 优势对比
+
+| 维度 | HttpURLConnection | HttpClient |
+| --- | --- | --- |
+| HTTP/2 | 不支持 | 原生支持 |
+| 异步 | 需自己开线程 | 内建 `sendAsync` |
+| 连接池 | 无（每次新建） | 内建连接池 |
+| API 设计 | API 古老、配置繁琐 | Builder 模式，清晰 |
+| WebSocket | 不支持 | 原生支持 |
+| HTTPS | 配置繁琐 | 默认支持 |
+
+### 3.3 POST JSON
+
+```java
+String json = "{\"name\":\"Alice\",\"age\":30}";
+HttpRequest postReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.example.com/users"))
+    .header("Content-Type", "application/json")
+    .POST(HttpRequest.BodyPublishers.ofString(json))
+    .build();
+```
+
+### 3.4 注意
+
+HttpClient 本身是**线程安全**的、可以复用——一个应用通常建一个 client 全局共享。每个请求建一个 `HttpRequest` 对象（不可变，可重用）。
+
+## 四、Text Blocks 文本块（Java 15+）
+
+### 4.1 痛点：字符串里的"转义地狱"
+
+写 SQL、JSON、HTML 时，Java 字符串的转义让人崩溃：
+
+```java
+String json = "{\\n" +
+    "  \\"name\\": \\"Alice\\",\\n" +
+    "  \\"age\\": 30\\n" +
+    "}";
+```
+
+每一行 `+` 拼接，每个 `"` 要转义成 `\"`——10 行 JSON 写出来像天书。
+
+### 4.2 文本块语法
+
+Java 15（JEP 378）引入 **Text Blocks**——用三个引号 `"""` 包裹多行字符串：
+
+```java
+String json = """
+        {
+          "name": "Alice",
+          "age": 30
+        }
+        """;
+```
+
+特点：
+
+- **多行**——直接换行，不用 `\n`。
+- **不用转义引号**——`"` 直接写。
+- **缩进控制**——编译器自动去掉"共同最小缩进"，让代码对齐。
+- **结尾 `"""`** 单独一行表示字符串结束。
+
+### 4.3 缩进规则
+
+文本块的缩进是"智能"的——以**结尾 `"""`** 的位置为基准：
+
+```java
+String s = """
+        hello
+        world
+        """;   // 结尾 """ 在这里
+// s = "hello\\nworld\\n"  (缩进被去掉了)
+```
+
+如果结尾 `"""` 在更左的位置，会保留更多缩进：
+
+```java
+String s = """
+            hello
+            world
+        """;   // 结尾 """ 在更左
+// s = "    hello\\n    world\\n"  (保留了 4 空格)
+```
+
+### 4.4 转义和插值
+
+文本块里仍然可以用 `\s`（保留尾部空格）、`\＜换行＞`（行尾续行）：
+
+```java
+String sql = """
+        SELECT id, name \\
+               age \\
+        FROM   users \\
+        WHERE  age > 18
+        """;
+// 实际是 "SELECT id, name age FROM users WHERE age > 18" (一行)
+
+String colors = """
+        red   \\s
+        green \\s
+        blue  \\s
+        """;   // \\s 保留尾部空格, 否则编译器会去掉
+```
+
+Java 没有内建的字符串插值（如 `${var}`），但可以用 `String.format` 或 `formatted`：
+
+```java
+String name = "Alice";
+int age = 30;
+String json = """
+        {
+          "name": "%s",
+          "age": %d
+        }
+        """.formatted(name, age);
+```
+
+## 五、Sequenced Collections 序列化集合（Java 21+）
+
+### 5.1 痛点：拿"最后一个元素"那么难?
+
+Java 21 之前，不同集合"拿最后一个元素"的 API 完全不统一：
+
+```java
+List<Integer> list = List.of(1, 2, 3);
+list.get(list.size() - 1);   // List 的最后
+
+Deque<Integer> deque = new ArrayDeque<>(list);
+deque.getLast();   // Deque 的最后
+
+SortedSet<Integer> set = new TreeSet<>(list);
+set.last();   // SortedSet 的最后
+
+// Set 没有"顺序", 拿最后没意义 (但 LinkedHashSet 有顺序...)
+```
+
+每个集合类型自己一套 API，记不住。`Map` 更惨——拿最后一个 entry 要 `map.entrySet().iterator()` 一直 `next`。
+
+### 5.2 Sequenced Collections 接口
+
+Java 21（JEP 431）引入了三个新接口统一"有顺序的集合"：
+
+- `SequencedCollection＜E＞` —— 有顺序的 Collection
+- `SequencedSet＜E＞` —— 有顺序的 Set
+- `SequencedMap＜K,V＞` —— 有顺序的 Map
+
+新方法：
+
+```java
+interface SequencedCollection<E> extends Collection<E> {
+    SequencedCollection<E> reversed();   // 反转
+    void addFirst(E e);                  // 头部添加
+    void addLast(E e);                   // 尾部添加
+    E getFirst();                        // 取第一个
+    E getLast();                         // 取最后一个
+    E removeFirst();                     // 删第一个
+    E removeLast();                      // 删最后一个
+}
+```
+
+```java
+List<Integer> list = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+list.getFirst();      // 1
+list.getLast();       // 5
+list.addFirst(0);     // [0, 1, 2, 3, 4, 5]
+list.reversed();      // [5, 4, 3, 2, 1, 0]
+
+LinkedHashSet<Integer> set = new LinkedHashSet<>(List.of(1, 2, 3));
+set.getFirst();       // 1
+set.getLast();        // 3   (以前做不到!)
+
+LinkedHashMap<String, Integer> map = new LinkedHashMap<>();
+map.put("a", 1); map.put("b", 2); map.put("c", 3);
+map.firstEntry();     // a=1
+map.lastEntry();      // c=3   (以前做不到!)
+map.pollLastEntry();  // 删除并返回 c=3
+map.reversed();       // 反转的 Map 视图
+```
+
+终于——所有"有顺序的集合"用同一套 API。代码可读性、可移植性大幅提升。
+
+### 5.3 哪些集合实现了
+
+- `List`、`Deque`、`Queue` → 实现 `SequencedCollection`
+- `LinkedHashSet` → 实现 `SequencedSet`
+- `LinkedHashMap` → 实现 `SequencedMap`
+- `TreeSet` / `TreeMap` 也实现了（按比较顺序）
+- `HashSet` / `HashMap` 没实现（无顺序）
+
+## 六、Foreign Function & Memory API（Java 22+）
+
+### 6.1 痛点：JNI 的折磨
+
+Java 调用 C/C++ 库一直用 JNI（Java Native Interface）——但它有几个大问题：
+
+- **写 C 桥接代码**——要写 `.h` 头文件、`.c` 实现文件，编译成 `.so`/`.dll`，部署复杂。
+- **内存不安全**——C 的指针、内存分配，JVM 管不到，容易段错误。
+- **性能开销**——JNI 调用有上下文切换开销。
+- **不能调用系统函数**——想调 `printf`、`getpid` 这种 libc 函数也要写 C 包装。
+
+### 6.2 FFM API 是什么
+
+**Foreign Function & Memory API（FFM）** 是 Java 22 正式发布的特性（JEP 454），让 Java **直接调用** C/C++ 库的函数、**直接操作**堆外内存，**不用写 JNI 桥接代码**。
+
+核心 API：
+
+- `Linker` —— 平台链接器，找 C 函数。
+- `SymbolLookup` —— 在 `.so`/`.dll` 里找符号。
+- `MemorySegment` —— 堆外内存段，替代 `sun.misc.Unsafe` 和 `ByteBuffer`。
+- `Arena` —— 内存分配器，管理生命周期。
+
+### 6.3 调用 C 函数示例
+
+```java
+import java.lang.foreign.*;
+import java.lang.invoke.MethodHandle;
+
+Linker linker = Linker.nativeLinker();
+SymbolLookup stdlib = linker.defaultLookup();
+
+// 找到 C 的 printf 函数
+MethodHandle printf = stdlib.find("printf")
+    .orElseThrow();
+
+// 调用
+try (Arena arena = Arena.ofConfined()) {
+    MemorySegment format = arena.allocateUtf8String("Hello %s!\\n");
+    MemorySegment arg = arena.allocateUtf8String("World");
+    printf.invoke(format, arg);   // 输出 "Hello World!"
+}
+```
+
+不写一行 C 代码，直接调 `printf`——这是 JNI 时代不可想象的。`Arena.ofConfined()` 管理的内存会在 try-with-resources 结束时自动释放，**内存安全**。
+
+### 6.4 性能与场景
+
+FFM 的设计目标之一是**性能接近 JNI、内存更安全**。它替代了三个老 API：
+
+- `sun.misc.Unsafe`（内部 API，未来移除）
+- `java.nio.ByteBuffer` 的直接内存（API 限制多）
+- JNI（开发复杂）
+
+适合场景：高性能计算、调原生库（OpenSSL、SQLite、CUDA）、游戏引擎、数据库驱动。Java 22 起官方数据库驱动、TLS 库已陆续用 FFM 重写。
+
+## 七、实战：综合演示
+
+下面的例子综合演示这六个特性。
+
+<CodeRunner code={`import java.util.*;
+import java.util.stream.*;
+import java.net.URI;
+import java.net.http.*;
+import java.time.Duration;
+import java.util.concurrent.*;
+
+public class Main {
+    // === 1. 接口私有方法 ===
+    interface Logger {
+        default void logInfo(String msg) { log("INFO", msg); }
+        default void logError(String msg) { log("ERROR", msg); }
+        default void logWarn(String msg) { log("WARN", msg); }
+        // 私有方法, 复用逻辑, 不暴露给实现类
+        private void log(String level, String msg) {
+            System.out.println("[" + level + "] " + msg);
+        }
+        private static String format(String level, String msg) {
+            return "[" + level + "] " + msg;
+        }
+    }
+
+    static class MyLogger implements Logger {}
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 其他现代特性速览 ===\\n");
+
+        // 1. 接口私有方法
+        System.out.println("--- 1. 接口私有方法 ---");
+        MyLogger logger = new MyLogger();
+        logger.logInfo("信息");
+        logger.logError("错误");
+        logger.logWarn("警告");
+
+        // 2. Stream 增强
+        System.out.println("\\n--- 2. Stream 增强 ---");
+        // takeWhile / dropWhile
+        List<Integer> taken = Stream.of(1, 2, 3, 4, 5, 2, 1)
+            .takeWhile(n -> n < 4).toList();
+        List<Integer> dropped = Stream.of(1, 2, 3, 4, 5, 2, 1)
+            .dropWhile(n -> n < 4).toList();
+        System.out.println("takeWhile(n<4): " + taken);   // [1, 2, 3]
+        System.out.println("dropWhile(n<4): " + dropped); // [4, 5, 2, 1]
+
+        // ofNullable
+        long count = Stream.of("a", null, "b", null, "c")
+            .flatMap(Stream::ofNullable).count();
+        System.out.println("ofNullable 过滤 null 后: " + count + " 项");   // 3
+
+        // iterate 带终止条件
+        List<Integer> range = Stream.iterate(1, n -> n <= 5, n -> n + 1).toList();
+        System.out.println("iterate(1, <=5, +1): " + range);   // [1, 2, 3, 4, 5]
+
+        // toList (Java 16+) 不可变
+        List<String> names = Stream.of("Alice", "Bob", "Charlie").toList();
+        System.out.println("toList: " + names + " (不可变)");
+        try {
+            names.add("David");
+        } catch (UnsupportedOperationException e) {
+            System.out.println("  试图 add 抛异常: " + e.getClass().getSimpleName());
+        }
+
+        // teeing 同时算 sum 和 count
+        double avg = Stream.of(1, 2, 3, 4, 5).collect(Collectors.teeing(
+            Collectors.summingDouble(i -> i),
+            Collectors.counting(),
+            (sum, cnt) -> sum / cnt
+        ));
+        System.out.println("teeing 算平均: " + avg);   // 3.0
+
+        // 3. Text Blocks
+        System.out.println("\\n--- 3. Text Blocks 文本块 ---");
+        String json = """
+                {
+                  "name": "Alice",
+                  "age": 30,
+                  "skills": ["Java", "Python"]
+                }
+                """;
+        System.out.println(json);
+
+        // formatted 插值
+        String name = "Bob";
+        int age = 25;
+        String greeting = """
+                你好, %s!
+                你今年 %d 岁.
+                """.formatted(name, age);
+        System.out.println(greeting.strip());
+
+        // SQL 示例
+        String sql = """
+                SELECT u.id, u.name, COUNT(o.id) AS order_count
+                FROM   users u
+                LEFT JOIN orders o ON u.id = o.user_id
+                WHERE  u.age > 18
+                GROUP  BY u.id, u.name
+                """;
+        System.out.println("SQL 文本块:");
+        System.out.println(sql);
+
+        // 4. Sequenced Collections
+        System.out.println("--- 4. Sequenced Collections ---");
+        List<Integer> list = new ArrayList<>(List.of(1, 2, 3, 4, 5));
+        System.out.println("List: " + list);
+        System.out.println("  getFirst(): " + list.getFirst());   // 1
+        System.out.println("  getLast(): " + list.getLast());     // 5
+        list.addFirst(0);
+        list.addLast(6);
+        System.out.println("  addFirst(0) + addLast(6): " + list);
+        System.out.println("  removeFirst(): " + list.removeFirst() + " -> " + list);
+        System.out.println("  reversed(): " + list.reversed());
+
+        // LinkedHashSet
+        LinkedHashSet<String> set = new LinkedHashSet<>(List.of("a", "b", "c"));
+        System.out.println("LinkedHashSet: " + set);
+        System.out.println("  getFirst(): " + set.getFirst() + ", getLast(): " + set.getLast());
+        System.out.println("  reversed(): " + set.reversed());
+
+        // LinkedHashMap
+        LinkedHashMap<String, Integer> map = new LinkedHashMap<>();
+        map.put("one", 1); map.put("two", 2); map.put("three", 3);
+        System.out.println("LinkedHashMap: " + map);
+        System.out.println("  firstEntry(): " + map.firstEntry());
+        System.out.println("  lastEntry(): " + map.lastEntry());
+        System.out.println("  pollLastEntry(): " + map.pollLastEntry() + " -> " + map);
+        System.out.println("  reversed(): " + map.reversed());
+
+        // 5. HttpClient (异步请求演示, 不实际联网, 走本地)
+        System.out.println("\\n--- 5. HttpClient ---");
+        HttpClient client = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_2)
+            .connectTimeout(Duration.ofSeconds(5))
+            .build();
+        System.out.println("HttpClient 已创建: " + client);
+        System.out.println("  版本: " + client.version());
+        System.out.println("  连接超时: " + client.connectTimeout().orElse(null));
+
+        // 构造一个请求 (不实际发送, 因为沙箱可能没网络)
+        HttpRequest req = HttpRequest.newBuilder()
+            .uri(URI.create("https://httpbin.org/get"))
+            .timeout(Duration.ofSeconds(10))
+            .header("Accept", "application/json")
+            .GET()
+            .build();
+        System.out.println("请求 URI: " + req.uri());
+        System.out.println("请求方法: " + req.method());
+        System.out.println("请求头: " + req.headers().map());
+
+        // 异步发送 (设置 3 秒超时, 避免沙箱卡死)
+        try {
+            CompletableFuture<HttpResponse<String>> future = client.sendAsync(
+                req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = future.get(3, TimeUnit.SECONDS);
+            System.out.println("响应状态码: " + resp.statusCode());
+            System.out.println("响应体 (前 100 字符): "
+                + resp.body().substring(0, Math.min(100, resp.body().length())));
+        } catch (Exception e) {
+            System.out.println("(沙箱无网络, 请求失败: " + e.getClass().getSimpleName() + ")");
+            System.out.println("(实际环境可用 client.send 同步或 sendAsync 异步)");
+        }
+
+        // 6. FFM API 演示 (反射检查可用性, 不实际调用 native)
+        System.out.println("\\n--- 6. Foreign Function & Memory API ---");
+        try {
+            Class<?> linkerClass = Class.forName("java.lang.foreign.Linker");
+            System.out.println("FFM API 可用: " + linkerClass.getName());
+            System.out.println("  Linker 类存在, Java 22+ 可直接调 C 函数");
+
+            // 演示 Arena (Java 22+)
+            Class<?> arenaClass = Class.forName("java.lang.foreign.Arena");
+            System.out.println("  Arena 类存在: " + arenaClass.getName());
+
+            // 实际调用 (Java 22+ 才能编译, 这里只用反射检测)
+            // 真实代码:
+            // Linker linker = Linker.nativeLinker();
+            // SymbolLookup libc = linker.defaultLookup();
+            // MethodHandle getpid = libc.find("getpid").orElseThrow();
+            // try (Arena arena = Arena.ofConfined()) {
+            //     int pid = (int) getpid.invoke();
+            //     System.out.println("PID: " + pid);
+            // }
+            System.out.println("  (实际 Java 22+ 环境可直接调用 getpid/printf 等)");
+        } catch (ClassNotFoundException e) {
+            System.out.println("FFM API 不可用 (Java < 22)");
+            System.out.println("  Java 22+ 才正式支持 Foreign Function & Memory API");
+        }
+
+        System.out.println("\\n=== 总结 ===");
+        System.out.println("1. 接口私有方法 (Java 9+): 复用 default 方法间的逻辑");
+        System.out.println("2. Stream 增强 (Java 9+/16+): takeWhile/dropWhile/ofNullable/toList");
+        System.out.println("3. HttpClient (Java 11+): HTTP/2、同步异步、连接池");
+        System.out.println("4. Text Blocks (Java 15+): 三引号多行字符串");
+        System.out.println("5. Sequenced Collections (Java 21+): 统一的 getFirst/getLast/reversed");
+        System.out.println("6. FFM API (Java 22+): 无 JNI 调 C 函数, 安全操作堆外内存");
+    }
+}`} />
+
+> **观察重点**：
+> - **`Logger` 接口的 `private void log`**——三个 default 方法复用，外部看不到。
+> - **`takeWhile` vs `filter`**——前者遇到第一个不满足就停，后者过滤全部。
+> - **`toList()` 不可变**——add 抛 `UnsupportedOperationException`。
+> - **Text Blocks 缩进自动去除**——结尾 `"""` 的位置决定保留多少缩进。
+> - **`list.getFirst()` / `set.getLast()` / `map.firstEntry()`**——所有"有序集合"统一 API。
+> - **HttpClient `sendAsync` 返回 `CompletableFuture`**——和 `CompletableFuture` API（第 44 章）无缝衔接。
+> - **FFM API 在 Java 22+ 才能用**——Java 21 之前是预览特性。
+
+## 八、其他值得一提的特性
+
+除了上面六大特性，还有一些值得了解的现代特性：
+
+- **var 局部变量类型推断**（Java 10+）——`var list = new ArrayList＜String＞()`。
+- **switch 表达式**（Java 14+）——`switch` 能作为表达式返回值，`yield` 关键字。
+- **`String.isBlank()`/`strip()`/`repeat()`/`lines()`**（Java 11+）——字符串增强。
+- **`Files.readString`/`writeString`**（Java 11+）——一行读写文本文件。
+- **`Optional.isEmpty()`**（Java 11+）——`!isPresent()` 的对称方法。
+- **`String.format` 的实例版 `formatted`**（Java 15+）——`"%s".formatted(name)`。
+- **Record Patterns 嵌套**（Java 21）——上一章讲过。
+- **Virtual Threads**（Java 21）——第七阶段已讲。
+- **Generational ZGC**（Java 21）——下个阶段讲。
+- **Unnamed Patterns/Variables**（Java 22）——`case Point(_, _)`、`var _ = ...`。
+- **Statements Before super/this**（Java 22）——构造器里 super 前可以写语句。
+
+Java 6 个月一次的发布节奏让特性"小步快跑"——每个版本都有几个小特性，累积起来就是质变。
+
+## 九、本章小结
+
+| 特性 | 版本 | 核心要点 |
+| --- | --- | --- |
+| 接口私有方法 | Java 9+ | 复用 default 方法间逻辑，不暴露给实现类 |
+| `takeWhile`/`dropWhile` | Java 9+ | Stream 前缀操作，遇条件停止 |
+| `ofNullable` | Java 9+ | null 转 empty stream |
+| `iterate(seed, hasNext, next)` | Java 9+ | 带终止条件的迭代 |
+| `teeing` | Java 12+ | 双下游收集器 |
+| `Stream.toList()` | Java 16+ | 直接收集为不可变 List |
+| HttpClient | Java 11+ | HTTP/2、同步异步、连接池、WebSocket |
+| Text Blocks | Java 15+ | 三引号多行字符串，自动缩进控制 |
+| Sequenced Collections | Java 21+ | 统一 getFirst/getLast/reversed |
+| FFM API | Java 22+ | 无 JNI 调 C，安全操作堆外内存 |
+
+**记忆口诀**：
+
+- **接口私有方法**——default 间的"内部工具"。
+- **takeWhile 取前缀，dropWhile 跳前缀**——和 filter 的"全程过滤"不同。
+- **toList 不可变**——要可变得用 `toCollection(ArrayList::new)`。
+- **HttpClient 三件套**——HttpClient、HttpRequest、HttpResponse，Builder 模式。
+- **Text Blocks 三引号**——缩进看结尾 `"""` 的位置。
+- **Sequenced Collections**——所有有序集合的 `getFirst`/`getLast`/`reversed` 统一了。
+- **FFM**——Java 22+ 才正式，调 C 不用 JNI。
+
+## 结语：第八阶段完结——现代 Java 的全景
+
+第八阶段到这里就结束了。回顾这 5 章，现代 Java 的"现代化"体现在三个层面：
+
+1. **模块化（第 46 章）** —— 强封装、可靠配置、可定制 JRE。Java 终于有了"大型工程"的边界控制。
+2. **数据建模三件套（第 47-49 章）** —— Records + Sealed + Pattern Matching。Java 终于能像函数式语言一样优雅建模 ADT。
+3. **API 现代化（本章）** —— HttpClient、Text Blocks、Sequenced Collections、FFM。日常 API 终于不再"上世纪"。
+
+这三个层面合起来，让 Java 在保持向后兼容的同时，写起来和 Kotlin、Scala 一样舒服。如果你还在用 Java 8，强烈建议升级——光是 Records + switch 模式匹配 + HttpClient + Text Blocks，就能让你的代码量减少 30%。
+
+下一阶段我们进入 **第九阶段：JVM 深度**。从语法回到运行时——JVM 内存模型、垃圾回收、类加载机制、性能调优、字节码基础。这是 Java 工程师"内功"的最后一关——会写 Java 不算什么，懂 JVM 才是真正的"Java 老兵"。我们下一阶段见。

@@ -1,0 +1,564 @@
+---
+title: "Exception Handling"
+chapter: 16
+stage: "Stage 3"
+stageName: "Java Core Libraries"
+order: 4
+description: "Master the Java exception hierarchy, checked vs unchecked exceptions, try/catch/finally, multi-catch, exception chaining, try-with-resources, and best practices for custom exceptions"
+pubDate: 2026-07-03
+tags: ["Java", "异常处理", "Exception", "try-with-resources", "自定义异常"]
+---
+
+# Exception Handling
+
+The world of programs isn't always calm waters. A user types letters expecting a number, the network suddenly drops, a file vanishes without explanation, an array is accessed out of bounds, a null pointer lurks in some corner... If these "accidents" aren't handled properly, the program may crash, or worse — data is lost and systems go down.
+
+**Exception handling** is Java's "safety net" — it lets you anticipate where things might go wrong, set up defenses in advance, and keep your program composed in the face of the unexpected. Well-written exception handling is like a carefully designed floodwall; poorly written handling is a time bomb buried in the code. In this chapter, we'll systematically explore Java's world of exceptions.
+
+## 1. The Exception Hierarchy: A Family Tree
+
+### 1.1 The Throwable family
+
+The "founding ancestor" of all errors and exceptions in Java is `java.lang.Throwable`. It has two main branches:
+
+```
+Throwable
+├── Error                    // Serious errors, should not be caught
+│   ├── OutOfMemoryError
+│   ├── StackOverflowError
+│   └── ...
+└── Exception                // Exceptions, can be handled
+    ├── RuntimeException     // Runtime exceptions (Unchecked)
+    │   ├── NullPointerException
+    │   ├── IndexOutOfBoundsException
+    │   ├── ClassCastException
+    │   ├── IllegalArgumentException
+    │   └── ...
+    └── Other Exception      // Checked exceptions
+        ├── IOException
+        ├── SQLException
+        └── ...
+```
+
+Only `Throwable` and its subclasses can be `throw`n and `catch`d.
+
+### 1.2 Error: the "disaster" you shouldn't touch
+
+`Error` represents JVM-level serious problems — out of memory (`OutOfMemoryError`), stack overflow (`StackOverflowError`). These errors generally **should not be caught**, because the program can no longer recover normally, and catching them does no good. The right move is to let the program crash and then fix the code (reduce recursion depth, track down a memory leak, etc.).
+
+### 1.3 Exception: the "accident" you can handle
+
+`Exception` is what we can and should handle. It splits into two branches:
+
+- **RuntimeException** (runtime exceptions): programming logic errors, such as null pointers, out-of-bounds, failed casts.
+- **Other Exception** (checked exceptions): external environment problems, such as IO failures, database disconnects.
+
+## 2. Checked vs Unchecked Exception
+
+### 2.1 The difference
+
+| Trait | Checked Exception | Unchecked Exception |
+| --- | --- | --- |
+| Inherits from | `Exception` (non-RuntimeException) | `RuntimeException` |
+| Compiler check | **Forced** handling (catch or throws) | Not forced |
+| Typical examples | IOException, SQLException | NullPointerException, IllegalArgumentException |
+| Nature | Recoverable external exception | Programming error |
+
+### 2.2 The "forcing" nature of checked
+
+Checked exceptions must be handled at compile time — either `try/catch` or declared with `throws` on the method signature, otherwise compilation fails:
+
+```java
+import java.io.FileReader;
+
+// Option 1: try/catch
+public void readFile() {
+    try {
+        FileReader fr = new FileReader("data.txt");   // May throw IOException
+    } catch (java.io.IOException e) {
+        e.printStackTrace();
+    }
+}
+
+// Option 2: throws declaration
+public void readFile() throws java.io.IOException {
+    FileReader fr = new FileReader("data.txt");   // Propagate outward
+}
+```
+
+But `RuntimeException` is not forced:
+
+```java
+public void divide(int a, int b) {
+    // No need to declare throws ArithmeticException
+    // The compiler doesn't force you to catch it either
+    int result = a / b;   // Throws ArithmeticException when b=0
+}
+```
+
+### 2.3 The design philosophy debate
+
+The original intent of checked exceptions was good — forcing developers to handle foreseeable exceptions. But in practice they're often criticized: too many `throws` declarations pollute method signatures, and layers of `try/catch` bloat the code. Many frameworks (like Spring) prefer to wrap checked exceptions into RuntimeExceptions.
+
+A practical recommendation: **custom business exceptions usually extend RuntimeException** (Unchecked), to avoid forcing callers to handle them; only use checked exceptions for those the caller "can reasonably recover from."
+
+## 3. try / catch / finally
+
+### 3.1 Basic structure
+
+```java
+try {
+    // Code that may throw
+} catch (SpecificException e) {
+    // Handle a specific exception
+} catch (Exception e) {
+    // Handle other exceptions
+} finally {
+    // Always executes (resource cleanup)
+}
+```
+
+- `try`: wraps the code that might fail.
+- `catch`: catches and handles exceptions; you can write multiple (from specific to general).
+- `finally`: **always executes** (whether normal, exceptional, or return), commonly used for resource cleanup.
+
+### 3.2 The order of catch
+
+`catch` blocks must be ordered **from subclass to superclass**, otherwise compilation fails (a parent class first would "shadow" the subclass):
+
+```java
+try {
+    ...
+} catch (FileNotFoundException e) {   // subclass first
+    ...
+} catch (IOException e) {              // parent class after
+    ...
+}
+```
+
+### 3.3 Does finally always execute?
+
+**Almost always** — except when:
+
+1. `try` or `catch` calls `System.exit()`, and the JVM exits directly.
+2. The JVM crashes or is killed.
+3. `try` or `catch` enters an **infinite loop**.
+
+```java
+try {
+    System.exit(0);     // JVM exits, finally won't run
+} finally {
+    System.out.println("I won't be printed");   // won't execute
+}
+```
+
+### 3.4 The "tug of war" between finally and return
+
+If both `try` and `finally` have `return`, **finally's return overrides try's** — this is a terrible practice and should be avoided:
+
+```java
+public int test() {
+    try {
+        return 1;
+    } finally {
+        return 2;   // Ultimately returns 2! Overrides try's return 1
+    }
+}
+```
+
+> ⚠️ **Never return from a finally block.** It not only overrides try's return value but also "swallows" any unthrown exception from try.
+
+## 4. Multi-Catch (Java 7+)
+
+Java 7 introduced **multi-catch** syntax, letting a single `catch` handle several exception types:
+
+```java
+try {
+    // May throw IOException or SQLException
+} catch (IOException | SQLException e) {
+    // Separate multiple exception types with |
+    log.error("Operation failed", e);
+}
+```
+
+Rules:
+
+- Multiple exception types are separated by `|`.
+- The type of `e` is their **closest common superclass**.
+- `e` is implicitly `final` and cannot be reassigned in the catch block.
+- You cannot catch exceptions in a parent-child relationship (e.g. `IOException | FileNotFoundException` is meaningless since the latter is a subclass of the former).
+
+This is far more elegant than the Java 6 style of writing one catch block per exception and copy-pasting the handling logic.
+
+## 5. Exception Chaining
+
+Sometimes a low-level exception needs to be "translated" into a higher-level semantic exception, without losing the original information — this is **exception chaining** (Exception Chaining).
+
+```java
+public void loadConfig() throws ConfigException {
+    try {
+        readFile("config.properties");
+    } catch (IOException e) {
+        // Wrap IOException as a business exception, preserving the cause
+        throw new ConfigException("Config load failed", e);
+    }
+}
+```
+
+`new ConfigException("Config load failed", e)` passes the original exception `e` as the **cause**. When the stack trace is printed, you'll see "Caused by: java.io.IOException..." — none of the original information is lost.
+
+Besides passing the cause via the constructor, you can also use `initCause`:
+
+```java
+ConfigException ce = new ConfigException("Config load failed");
+ce.initCause(e);
+throw ce;
+```
+
+But the constructor approach is more concise and recommended. All `Throwable`s support a cause — if your custom exception doesn't have a "cause-accepting constructor," you can add one yourself:
+
+```java
+public class ConfigException extends Exception {
+    public ConfigException(String msg) { super(msg); }
+    public ConfigException(String msg, Throwable cause) { super(msg, cause); }
+}
+```
+
+## 6. throw vs throws
+
+These two keywords differ by just one letter, but they have different jobs:
+
+| Keyword | Purpose | Location | Usage |
+| --- | --- | --- | --- |
+| `throw` | **Throw** an exception object | Inside a method body | `throw new IOException();` |
+| `throws` | **Declare** the exceptions a method may throw | Method signature | `void m() throws IOException` |
+
+```java
+// throws declaration: this method may throw IOException
+public void readFile(String path) throws IOException {
+    if (path == null) {
+        // throw: actually throws the exception object
+        throw new IllegalArgumentException("Path cannot be null");
+    }
+    // ...
+}
+```
+
+Memory trick: `throw` is the "verb" (throw it out), `throws` is the "declaration" (tell the caller).
+
+## 7. Custom Exceptions
+
+### 7.1 Design principles
+
+Custom exceptions make error messages more business-meaningful. `UserNotFoundException` is clearer than `RuntimeException("user not found")`, and callers can catch it specifically.
+
+Design follows two paths:
+
+- **Extend Exception**: becomes a checked exception, forcing callers to handle it. Suited for scenarios where "the caller can reasonably recover."
+- **Extend RuntimeException**: becomes an unchecked exception, not forced. Suited for "programming errors" or "a framework style that prefers unchecked."
+
+### 7.2 An example of a custom exception
+
+```java
+// Business exception base class (Unchecked)
+public class BusinessException extends RuntimeException {
+    private final int code;   // error code
+
+    public BusinessException(int code, String message) {
+        super(message);
+        this.code = code;
+    }
+
+    public BusinessException(int code, String message, Throwable cause) {
+        super(message, cause);
+        this.code = code;
+    }
+
+    public int getCode() { return code; }
+}
+
+// A specific business exception
+public class UserNotFoundException extends BusinessException {
+    public UserNotFoundException(String userId) {
+        super(4041, "User not found: " + userId);
+    }
+}
+```
+
+Including an **error code** (code) is a good habit — the frontend can branch on the code for different UI treatment, which is more reliable than parsing a plain string.
+
+## 8. try-with-resources (Java 7+)
+
+### 8.1 The pain of resource management
+
+Many resources in Java (file streams, database connections, network sockets) must be closed after use, or they leak. The traditional pattern:
+
+```java
+FileReader fr = null;
+try {
+    fr = new FileReader("data.txt");
+    // use fr
+} catch (IOException e) {
+    e.printStackTrace();
+} finally {
+    if (fr != null) {
+        try {
+            fr.close();   // close itself may throw IOException!
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+A `finally` nested inside another `try/catch` — ugly and error-prone.
+
+### 8.2 The elegance of try-with-resources
+
+Java 7 introduced **try-with-resources**, which automatically closes resources that implement the `AutoCloseable` interface:
+
+```java
+try (FileReader fr = new FileReader("data.txt")) {
+    // use fr
+} catch (IOException e) {
+    e.printStackTrace();
+}
+// fr is automatically closed at the end of try, no finally needed!
+```
+
+Resources are declared in the parentheses of `try`, and after the `try` block ends (whether normally or exceptionally) **close() is called automatically**. Multiple resources are separated by semicolons, and the closing order is the **reverse of declaration**:
+
+```java
+try (FileReader fr = new FileReader("data.txt");
+     BufferedReader br = new BufferedReader(fr)) {
+    // br is closed first, then fr
+    String line = br.readLine();
+}
+```
+
+### 8.3 The AutoCloseable interface
+
+Any class that implements `AutoCloseable` (or `Closeable`) can use try-with-resources:
+
+```java
+public class MyResource implements AutoCloseable {
+    public MyResource() { System.out.println("Open resource"); }
+
+    public void use() { System.out.println("Use resource"); }
+
+    @Override
+    public void close() {   // called automatically
+        System.out.println("Close resource");
+    }
+}
+
+// Usage
+try (MyResource r = new MyResource()) {
+    r.use();
+}   // r.close() is called automatically
+```
+
+### 8.4 Suppressed exceptions
+
+If the `try` block throws an exception and `close()` also throws one, the latter is **suppressed**, attached to the primary exception, and not lost:
+
+```java
+try {
+    Exception primary = new Exception("Primary exception");
+    primary.addSuppressed(new Exception("Exception from close"));
+    throw primary;
+} catch (Exception e) {
+    System.out.println(e.getMessage());          // Primary exception
+    for (Throwable s : e.getSuppressed()) {
+        System.out.println("Suppressed: " + s);       // Exception from close
+    }
+}
+```
+
+This is another big advantage of try-with-resources over hand-written finally — in finally, an exception from close would "swallow" the primary exception from try, while try-with-resources preserves everything.
+
+## 9. Best Practices for Exceptions
+
+### 9.1 Don't swallow exceptions with catch(Exception)
+
+```java
+// ❌ Worst pattern: swallow the exception and pretend nothing happened
+try {
+    riskyOperation();
+} catch (Exception e) {
+    // Empty! The exception is silently swallowed
+}
+```
+
+This lets bugs hide forever — when something goes wrong there isn't even a log, leaving you blind during troubleshooting. At the very least, log it:
+
+```java
+// ✅ At least log it
+try {
+    riskyOperation();
+} catch (Exception e) {
+    log.error("Operation failed", e);   // log the full stack trace
+    // If unrecoverable, wrap and rethrow
+    throw new RuntimeException("Operation failed", e);
+}
+```
+
+### 9.2 Don't catch Throwable
+
+`Throwable` includes `Error`, and `Error` (like `OutOfMemoryError`) shouldn't be caught — the program is already unrecoverable. Catching it would mask a genuinely serious problem.
+
+### 9.3 Catch specific exception types
+
+```java
+// ❌ Too broad
+catch (Exception e) { ... }
+
+// ✅ Handle specifically
+catch (FileNotFoundException e) { ... }
+catch (IOException e) { ... }
+```
+
+### 9.4 Don't return from finally
+
+As discussed above — finally's return overrides try's return value and swallows try's exception.
+
+### 9.5 Exceptions are not control flow
+
+Don't use exceptions for normal flow control (for example, using `NumberFormatException` to test whether a string is a number). Exceptions are for "exceptional" situations; the normal path should use `if` checks.
+
+## 10. Hands-On: A Custom Business Exception Hierarchy
+
+The example below uses a complete bank transfer scenario to demonstrate a custom exception hierarchy and exception chaining in practice.
+
+<CodeRunner code={`// Business exception base class
+class BizException extends RuntimeException {
+    private final int code;
+    public BizException(int code, String msg) { super(msg); this.code = code; }
+    public BizException(int code, String msg, Throwable cause) { super(msg, cause); this.code = code; }
+    public int getCode() { return code; }
+}
+
+// Insufficient balance exception
+class InsufficientBalanceException extends BizException {
+    public InsufficientBalanceException(double balance, double amount) {
+        super(4001, "余额不足: 当前 " + balance + ", 需转账 " + amount);
+    }
+}
+
+// Account not found exception
+class AccountNotFoundException extends BizException {
+    public AccountNotFoundException(String accountId) {
+        super(4041, "账户不存在: " + accountId);
+    }
+}
+
+// Account class
+class Account {
+    String id;
+    double balance;
+    Account(String id, double balance) { this.id = id; this.balance = balance; }
+}
+
+// Bank service
+class BankService {
+    private java.util.Map<String, Account> accounts = new java.util.HashMap<>();
+
+    BankService() {
+        accounts.put("A001", new Account("A001", 1000));
+        accounts.put("A002", new Account("A002", 500));
+    }
+
+    void transfer(String fromId, String toId, double amount) {
+        Account from = findAccount(fromId);
+        Account to = findAccount(toId);
+
+        if (from.balance < amount) {
+            throw new InsufficientBalanceException(from.balance, amount);
+        }
+        from.balance -= amount;
+        to.balance += amount;
+        System.out.println("转账成功: " + fromId + " -> " + toId
+            + " 金额 " + amount);
+    }
+
+    private Account findAccount(String id) {
+        Account acc = accounts.get(id);
+        if (acc == null) throw new AccountNotFoundException(id);
+        return acc;
+    }
+
+    void printBalances() {
+        accounts.forEach((k, v) ->
+            System.out.println("  " + k + ": " + v.balance));
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        BankService bank = new BankService();
+
+        // Simulate several transfers
+        String[][] cases = {
+            {"A001", "A002", "300"},   // normal
+            {"A001", "A002", "9999"},  // insufficient balance
+            {"A001", "X999", "100"},   // account not found
+            {"A002", "A001", "200"},   // normal
+        };
+
+        for (String[] c : cases) {
+            System.out.println("\\n--- 转账 " + c[0] + " -> " + c[1]
+                + " 金额 " + c[2] + " ---");
+            try {
+                bank.transfer(c[0], c[1], Double.parseDouble(c[2]));
+                System.out.println("状态: 成功");
+            } catch (BizException e) {
+                System.out.println("状态: 失败 [错误码 " + e.getCode() + "] "
+                    + e.getMessage());
+            }
+        }
+
+        System.out.println("\\n=== 最终余额 ===");
+        bank.printBalances();
+
+        // Demonstrate try-with-resources
+        System.out.println("\\n=== try-with-resources 演示 ===");
+        try (MyResource r = new MyResource()) {
+            r.use();
+            System.out.println("try 块正常结束");
+        } catch (Exception e) {
+            System.out.println("捕获: " + e.getMessage());
+        }
+        System.out.println("资源已自动关闭");
+    }
+}
+
+// Demonstrates AutoCloseable
+class MyResource implements AutoCloseable {
+    MyResource() { System.out.println("  [资源] 打开"); }
+    void use() { System.out.println("  [资源] 使用中"); }
+    @Override
+    public void close() { System.out.println("  [资源] 自动关闭"); }
+}`} />
+
+## 11. Chapter Summary
+
+| Topic | Key points |
+| --- | --- |
+| Exception hierarchy | Throwable → Error / Exception → RuntimeException |
+| Error | Serious JVM errors, should not be caught |
+| Checked | Compiler forces handling, represents recoverable external exceptions |
+| Unchecked | Not forced, represents programming errors |
+| try/catch/finally | finally almost always runs (except System.exit/JVM crash) |
+| finally pitfall | Don't return from finally — it overrides the return value and swallows exceptions |
+| multi-catch | `catch (A | B e)`, e is implicitly final |
+| Exception chaining | `new Exception(msg, cause)` preserves the original exception |
+| throw vs throws | throw throws an object, throws declares the signature |
+| Custom exceptions | Extend Exception (Checked) or RuntimeException (Unchecked) |
+| try-with-resources | Auto-closes AutoCloseable, in reverse order, preserves suppressed exceptions |
+| Best practices | Don't swallow exceptions, don't catch Throwable, catch specific types |
+
+## Conclusion
+
+Exception handling is the bedrock of program robustness. Good exception handling is not about "hiding errors" — it's about "letting errors surface and propagate in the right way": log what should be logged, wrap what should be wrapped, propagate what should be propagated. Remember a few key principles: **catch with specific types**, **don't swallow exceptions**, **make good use of try-with-resources**, **don't return from finally** — and your code will stay composed in the face of the unexpected.
+
+The next chapter is the finale of Stage 3 — **generics**. It's one of Java's most "magical" features: it makes code both type-safe and generic, while hiding quite a few secrets behind "type erasure." Let's lift the veil together.

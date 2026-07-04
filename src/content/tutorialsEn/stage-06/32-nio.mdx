@@ -1,0 +1,419 @@
+---
+title: "NIO"
+chapter: 32
+stage: "Stage 6"
+stageName: "I/O and NIO"
+order: 5
+description: "Understand the essential differences between NIO and traditional IO, master Buffer's four core properties, Channel, Selector multiplexing, and zero-copy technology"
+pubDate: 2026-07-03
+tags: ["Java", "NIO", "Buffer", "Channel", "Selector", "零拷贝", "ByteBuffer"]
+---
+
+# NIO
+
+Traditional IO (`InputStream`/`OutputStream`) has one defining characteristic: **stream-oriented and blocking**. When you call `read()`, the thread sits there waiting for data — one connection per thread, and when connections pile up, threads run out. This was fine in the 1990s, but in the high-concurrency world of the internet era, the "one thread per connection" model falls short.
+
+Java 1.4 introduced NIO (New IO / Non-blocking IO), redesigning IO from the ground up: **buffer-oriented, optionally non-blocking, with multiplexing support**. It doesn't replace traditional IO — for file read/write the two perform similarly — but it shines in **high-concurrency network communication**. Netty, Mina, and Tomcat's NIO Connector are all built on NIO.
+
+In this chapter we explore NIO's three core components — Buffer, Channel, and Selector — along with the "zero copy" magic it brings.
+
+## 1. NIO vs IO: Two Worldviews
+
+First, the essential differences:
+
+| Dimension | Traditional IO | NIO |
+| --- | --- | --- |
+| Direction | One-way (InputStream or OutputStream) | Bidirectional (Channel can both read and write) |
+| Data unit | Stream of bytes (read one by one) | Buffer blocks (read chunk by chunk) |
+| Blocking | Blocking (read blocks until data arrives) | Optionally non-blocking (read returns immediately) |
+| Multiplexing | Not supported | Selector-supported |
+| Best for | Files, low-concurrency networking | High-concurrency networking |
+
+**Stream-oriented vs buffer-oriented** is the core distinction. Traditional IO is like drinking through a straw — one sip at a time, and once the water flows past, it's gone. NIO is like catching water in a bucket — fill a whole bucket, then process it at your leisure; the water in the bucket doesn't disappear.
+
+This "bucket" is the **Buffer**.
+
+## 2. Buffer: The Data Bucket
+
+`Buffer` is NIO's core data structure — an **objectified byte array** that, unlike a raw array, adds "position tracking" capability.
+
+### 2.1 Four Core Properties
+
+Every Buffer has four core properties:
+
+| Property | Meaning |
+| --- | --- |
+| `capacity` | Capacity, the total size of the bucket (fixed once created) |
+| `position` | Current position, the index of the next element to read/write |
+| `limit` | Limit, the index of the first element that cannot be read/written |
+| `mark` | Marker, can return here with `reset()` |
+
+They satisfy the invariant: `mark ≤ position ≤ limit ≤ capacity` (0 is the lower bound for mark).
+
+### 2.2 Buffer State Transitions
+
+A Buffer is like a "two-state machine" — switching between write mode and read mode:
+
+```
+Newly created → Write mode (position=0, limit=capacity)
+   ↓ flip()          ← switch to read mode
+Read mode (position=0, limit=how much was just written)
+   ↓ clear()         ← switch back to write mode (resets, position=0, limit=capacity)
+   or compact()       ← switch back to write mode (preserves unread data)
+```
+
+**Writing data**: `put` writes data at `position`, then `position` advances.
+
+**flip**: done writing, ready to read — `limit = position; position = 0`. This step "flips" — setting the write boundary as the read boundary, and moving position back to the start.
+
+**Reading data**: `get` reads from `position`, then `position` advances.
+
+**clear**: done reading, ready to write again — `position=0; limit=capacity`. **The data isn't actually cleared** — only the pointers are reset; the next `put` will overwrite.
+
+**rewind**: `position=0`, but `limit` stays — to read through again.
+
+**mark / reset**: `mark()` records the current position, `reset()` jumps back to the mark.
+
+### 2.3 A Complete Example
+
+```java
+ByteBuffer buf = ByteBuffer.allocate(10);   // capacity=10
+
+// Write mode: position=0, limit=10
+buf.put((byte) 1);
+buf.put((byte) 2);
+buf.put((byte) 3);
+// Now position=3, limit=10
+
+buf.flip();
+// Read mode: position=0, limit=3
+
+byte a = buf.get();   // 1, position=1
+byte b = buf.get();   // 2, position=2
+
+buf.clear();
+// Back to write mode: position=0, limit=10
+```
+
+> **The most common beginner trap**: writing data and forgetting to `flip()`, then reading and getting nothing — because `position` is still at the write position, with no readable data. `flip` is the "soul operation" of Buffer — you must remember it.
+
+### 2.4 Buffer Types
+
+`Buffer` is the abstract base class, with a concrete subclass for each primitive type:
+
+| Class | Element type |
+| --- | --- |
+| `ByteBuffer` | `byte` (most commonly used) |
+| `CharBuffer` | `char` |
+| `ShortBuffer` | `short` |
+| `IntBuffer` | `int` |
+| `LongBuffer` | `long` |
+| `FloatBuffer` | `float` |
+| `DoubleBuffer` | `double` |
+
+The most commonly used is `ByteBuffer` — network and file IO are both byte streams.
+
+### 2.5 Creating a ByteBuffer
+
+```java
+// Heap buffer (lives in the JVM heap, managed by GC)
+ByteBuffer heapBuf = ByteBuffer.allocate(1024);
+
+// Direct buffer (off-heap, directly accessible by the OS)
+ByteBuffer directBuf = ByteBuffer.allocateDirect(1024);
+
+// Wrap an existing array
+byte[] arr = new byte[1024];
+ByteBuffer wrapped = ByteBuffer.wrap(arr);
+```
+
+A **direct buffer**'s memory lives outside the JVM heap, so the OS can use it directly for IO — eliminating the copy between "kernel buffer ↔ user buffer," making it faster for large files and network IO. But allocation and deallocation are expensive (system calls), so it's best for long-term reuse.
+
+## 3. Channel: The Bidirectional Conduit
+
+`Channel` is NIO's "pipe," connecting a data source to a Buffer. Unlike a stream, **a Channel is bidirectional** — a single Channel can both read and write.
+
+### 3.1 Major Channels
+
+| Channel | Purpose |
+| --- | --- |
+| `FileChannel` | File read/write (cannot be non-blocking) |
+| `SocketChannel` | TCP client |
+| `ServerSocketChannel` | TCP server |
+| `DatagramChannel` | UDP |
+
+### 3.2 FileChannel Basics
+
+```java
+import java.io.*;
+import java.nio.*;
+import java.nio.channels.*;
+
+try (RandomAccessFile file = new RandomAccessFile("data.txt", "rw");
+     FileChannel channel = file.getChannel()) {
+
+    ByteBuffer buf = ByteBuffer.allocate(48);
+    int bytesRead = channel.read(buf);   // read into buf
+
+    while (bytesRead != -1) {
+        buf.flip();                      // switch to read mode
+        while (buf.hasRemaining()) {
+            System.out.print((char) buf.get());
+        }
+        buf.clear();                     // switch back to write mode
+        bytesRead = channel.read(buf);
+    }
+}
+```
+
+`FileChannel` adds `position` control, `transferTo`/`transferFrom` zero-copy, and other capabilities beyond traditional `FileInputStream`. Note: `FileChannel` **cannot** be non-blocking — there's no need for non-blocking file IO.
+
+### 3.3 Non-Blocking Network Channels
+
+```java
+SocketChannel socket = SocketChannel.open();
+socket.configureBlocking(false);   // non-blocking mode
+socket.connect(new InetSocketAddress("example.com", 80));
+
+// In non-blocking mode, connect returns immediately; finishConnect() returns false until connected
+while (!socket.finishConnect()) {
+    // waiting for connection; can do other things
+}
+```
+
+Non-blocking mode lets a single thread manage multiple Channels — but non-blocking alone isn't enough; you need Selector to "event-driven" manage hundreds or thousands of connections.
+
+## 4. Selector: The Multiplexer
+
+`Selector` is the heart of NIO's high-concurrency model — **one thread managing multiple Channels**. It's built on the operating system's `epoll`/`kqueue`/`select` system calls, letting a single thread "wait until any Channel has an event."
+
+### 4.1 The Working Model
+
+```
+        [Selector]
+            |
+    Register multiple Channels' events of interest (OP_ACCEPT / OP_READ / OP_WRITE)
+            |
+       select() blocks until an event occurs
+            |
+    Returns "list of ready Channels" (selectedKeys)
+            |
+    Iterate and process each ready Channel
+```
+
+### 4.2 Four Event Types
+
+`SelectionKey` defines four "events of interest":
+
+| Constant | Meaning |
+| --- | --- |
+| `OP_ACCEPT` | A new connection has arrived (ServerSocketChannel) |
+| `OP_CONNECT` | Connection establishment completed (SocketChannel) |
+| `OP_READ` | Data is available to read |
+| `OP_WRITE` | Ready to write data (rarely used; write buffers rarely fill up) |
+
+### 4.3 Server Skeleton Code
+
+```java
+Selector selector = Selector.open();
+
+ServerSocketChannel server = ServerSocketChannel.open();
+server.configureBlocking(false);
+server.bind(new InetSocketAddress(8080));
+server.register(selector, SelectionKey.OP_ACCEPT);
+
+while (true) {
+    selector.select();   // block until an event occurs
+
+    Set<SelectionKey> selectedKeys = selector.selectedKeys();
+    Iterator<SelectionKey> it = selectedKeys.iterator();
+    while (it.hasNext()) {
+        SelectionKey key = it.next();
+        it.remove();   // must remove manually!
+
+        if (key.isAcceptable()) {
+            // new connection
+            SocketChannel client = server.accept();
+            client.configureBlocking(false);
+            client.register(selector, SelectionKey.OP_READ);
+        } else if (key.isReadable()) {
+            // readable
+            SocketChannel client = (SocketChannel) key.channel();
+            ByteBuffer buf = ByteBuffer.allocate(1024);
+            int n = client.read(buf);
+            if (n == -1) {
+                client.close();
+            } else {
+                buf.flip();
+                // process buf
+            }
+        }
+    }
+}
+```
+
+**Key details**:
+
+1. After processing each key from the `selectedKeys()` set, you must call `it.remove()` — otherwise the next `select` will return the same event again, causing duplicate processing.
+2. When handling `OP_READ`, `read` returning `-1` means the peer closed the connection; you should `close` proactively.
+3. The `Selector` event model is "level-triggered" — as long as you haven't finished reading the data, the next `select` will return immediately, potentially causing a "busy wait."
+
+### 4.4 Why Selector Is Magical
+
+Traditional blocking IO: 1,000 connections need 1,000 threads. At 1 MB stack per thread, that's 1 GB of memory. Context-switching overhead is significant.
+
+NIO Selector: 1 thread manages 1,000 connections. It only does work when there's "something to do"; when idle, `select` blocks. This is the underlying logic that lets Redis, Nginx, and Netty handle hundreds of thousands of concurrent connections — **event-driven rather than thread-driven**.
+
+## 5. Zero Copy: transferTo / transferFrom
+
+Traditional file copy: disk → kernel buffer → user buffer → Socket buffer → network card. Four copies, four context switches.
+
+NIO's `transferTo`/`transferFrom` leverages the operating system's `sendfile` system call — **data goes straight from kernel to network card, never entering user space at all.** This is called "zero copy," and it boosts performance several-fold.
+
+```java
+try (FileChannel src = new FileInputStream("big.dat").getChannel();
+     FileChannel dst = new FileOutputStream("copy.dat").getChannel()) {
+    // Zero copy: the OS moves data directly within the kernel
+    src.transferTo(0, src.size(), dst);
+    // or dst.transferFrom(src, 0, src.size());
+}
+```
+
+Kafka's high throughput relies on exactly this — when consumers pull messages, the Broker uses `transferTo` to send log files straight to the network card, with zero user-mode copies. This is one of the keys to handling millions of TPS on a single machine.
+
+## 6. In Practice: File Copy with NIO
+
+Below we use `FileChannel` + `ByteBuffer` to copy a file, comparing direct Buffer vs heap Buffer performance:
+
+<CodeRunner code={`import java.io.*;
+import java.nio.*;
+import java.nio.channels.*;
+import java.nio.file.*;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class Main {
+    public static void main(String[] args) throws IOException {
+        // 准备 5MB 测试文件
+        Path src = Paths.get("src.dat");
+        try (FileChannel ch = FileChannel.open(src,
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            ByteBuffer buf = ByteBuffer.allocate(8192);
+            for (int i = 0; i < buf.capacity(); i++) buf.put((byte) (i & 0xFF));
+            for (int block = 0; block < 640; block++) {   // ~5MB
+                buf.flip();
+                ch.write(buf);
+                buf.clear();
+            }
+        }
+        System.out.println("源文件: " + Files.size(src) + " 字节\\n");
+
+        // 方式 1：FileChannel + 堆 Buffer
+        Path dst1 = Paths.get("dst1.dat");
+        long t1 = System.currentTimeMillis();
+        try (FileChannel in = new FileInputStream(src.toFile()).getChannel();
+             FileChannel out = new FileOutputStream(dst1.toFile()).getChannel()) {
+            ByteBuffer buf = ByteBuffer.allocate(8192);
+            while (in.read(buf) != -1) {
+                buf.flip();
+                out.write(buf);
+                buf.clear();
+            }
+        }
+        long time1 = System.currentTimeMillis() - t1;
+        System.out.println("方式 1（堆 Buffer + Channel）: " + time1 + " ms, 大小=" + Files.size(dst1));
+
+        // 方式 2：transferTo（零拷贝）
+        Path dst2 = Paths.get("dst2.dat");
+        long t2 = System.currentTimeMillis();
+        try (FileChannel in = new FileInputStream(src.toFile()).getChannel();
+             FileChannel out = new FileOutputStream(dst2.toFile()).getChannel()) {
+            in.transferTo(0, in.size(), out);
+        }
+        long time2 = System.currentTimeMillis() - t2;
+        System.out.println("方式 2（transferTo 零拷贝）: " + time2 + " ms, 大小=" + Files.size(dst2));
+
+        // 演示 Buffer 的状态流转
+        System.out.println("\\n--- Buffer 状态流转演示 ---");
+        ByteBuffer demo = ByteBuffer.allocate(10);
+        System.out.println("初始: pos=" + demo.position() + " lim=" + demo.limit() + " cap=" + demo.capacity());
+
+        demo.put((byte) 1).put((byte) 2).put((byte) 3);
+        System.out.println("写 3 字节后: pos=" + demo.position() + " lim=" + demo.limit());
+
+        demo.flip();
+        System.out.println("flip 后（切读态）: pos=" + demo.position() + " lim=" + demo.limit());
+
+        System.out.println("读: " + demo.get() + ", pos=" + demo.position());
+        System.out.println("读: " + demo.get() + ", pos=" + demo.position());
+
+        demo.mark();
+        System.out.println("mark 在 pos=" + demo.position());
+        System.out.println("读: " + demo.get() + ", pos=" + demo.position());
+        demo.reset();
+        System.out.println("reset 后 pos=" + demo.position());
+
+        demo.clear();
+        System.out.println("clear 后（切写态）: pos=" + demo.position() + " lim=" + demo.limit());
+
+        // 清理
+        Files.deleteIfExists(src);
+        Files.deleteIfExists(dst1);
+        Files.deleteIfExists(dst2);
+        System.out.println("\\n清理完毕");
+    }
+}`} />
+
+> **What to watch for**:
+> - **transferTo is usually faster than Channel+Buffer** — it goes straight through the OS `sendfile`, with zero user-mode copies.
+> - **Buffer state transitions** are the "grammar" of NIO — `flip` switches write to read, `clear` switches read to write, `mark/reset` marks and retreats. Internalize these state changes until they're instinct, and your NIO code won't go wrong.
+> - On small files the difference is negligible (system-call overhead dominates); the larger the file, the more pronounced the zero-copy advantage.
+
+## 7. The Difficulty of NIO and the Birth of Netty
+
+The NIO API is powerful but hard to use:
+
+- **Buffer's flip/clear is error-prone** — forget flip and you read nothing; forget clear and you can't write.
+- **Selector event handling is complex** — `selectedKeys` requires manual removal; half-packet and sticky-packet problems need to be handled yourself.
+- **No decode/encode framework** — you have to split the byte stream into messages yourself.
+
+For exactly these reasons, **Netty** was born. It wraps NIO with:
+
+- **ChannelPipeline**: the Chain of Responsibility pattern, with handlers processing events in sequence.
+- **ByteBuf**: a friendlier buffer than `ByteBuffer` (separate read and write pointers, no constant flipping).
+- **Built-in codecs**: `LengthFieldBasedFrameDecoder`, `StringDecoder`, and more, ready to use out of the box.
+- **Zero copy**: further optimized on top of `FileRegion`.
+
+Today, for writing high-performance network programs, **few use raw NIO directly; most use Netty.** But understanding NIO is a prerequisite for understanding Netty — Netty's design is built entirely on top of NIO.
+
+## 8. Quick Reference Table
+
+| Concept | Description |
+| --- | --- |
+| `Buffer` | Data container with four properties: capacity/position/limit/mark |
+| `allocate(n)` | Create a heap buffer |
+| `allocateDirect(n)` | Create a direct buffer (off-heap, faster for IO) |
+| `flip()` | Switch from write mode to read mode (limit=position, position=0) |
+| `clear()` | Switch from read mode to write mode (position=0, limit=capacity) |
+| `rewind()` | position=0 (re-read, limit unchanged) |
+| `compact()` | Move unread data to the front, switch to write mode |
+| `Channel` | Bidirectional data conduit |
+| `FileChannel` | File channel (cannot be non-blocking) |
+| `SocketChannel` | TCP client |
+| `ServerSocketChannel` | TCP server |
+| `Selector` | Multiplexer, one thread manages multiple Channels |
+| `SelectionKey.OP_ACCEPT` | Accept-connection event |
+| `SelectionKey.OP_READ` | Readable event |
+| `transferTo` / `transferFrom` | Zero-copy transfer |
+
+## Conclusion: From "Thread-Driven" to "Event-Driven"
+
+NIO isn't just "another IO API" — it represents a shift in mindset:
+
+- **Traditional IO**: one thread per connection, each thread blocking to wait for data. Simple, but poorly scalable.
+- **NIO**: one thread manages multiple connections, driven by Selector events. Complex, but handles high concurrency.
+
+This "event-driven" mindset is at the core of modern high-concurrency systems — Node.js, Nginx, Redis, and Netty all follow the same approach. Once you understand NIO, you truly understand "why Redis can handle 100,000 QPS on a single thread" — it shares the same underlying philosophy with NIO: **avoid thread blocking, keep the CPU always doing useful work.**
+
+Buffer and Channel are NIO's "bricks and mortar," Selector is NIO's "architect," and zero copy is NIO's "accelerator." Combine them, and you can write a network service that handles hundreds of thousands of connections on a single machine — something traditional blocking IO could never achieve.
+
+The next chapter is the finale of NIO.2 — the `Files` utility class advanced features, covering streaming reads of large files, file watching, temp files, and more.

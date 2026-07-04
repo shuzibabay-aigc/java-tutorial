@@ -1,0 +1,418 @@
+---
+title: "序列化"
+chapter: 31
+stage: "第六阶段"
+stageName: "I/O 与 NIO"
+order: 4
+description: "掌握 Serializable 接口、ObjectInputStream/ObjectOutputStream、serialVersionUID、transient 关键字与自定义序列化，理解其安全陷阱与 JSON 替代方案"
+pubDate: 2026-07-03
+tags: ["Java", "序列化", "Serializable", "transient", "serialVersionUID", "JSON", "Protobuf"]
+---
+
+# 序列化
+
+内存里的对象，是一张脆弱的网——对象引用对象，引用再引用对象，全靠 JVM 在内存里维护。一旦 JVM 关闭，这张网就消散了。如果你想让一个对象"穿越"——存到磁盘、传到另一台机器、缓存到 Redis——就得把它"拍扁"成字节序列，这个过程叫**序列化**（serialization）。反过来从字节重建对象叫**反序列化**（deserialization）。
+
+Java 自带的序列化机制（`Serializable` + `ObjectOutputStream`）是最古老、最直接的方式。它方便但有 notorious 的安全问题，今天在很多场景被 JSON/Protobuf 取代。但理解它仍是必要的——它是 Java 远程通信（RMI）、部分缓存（EhCache）、Spring Session 等的底层基础。
+
+## 一、Serializable 接口：标记接口
+
+要让一个类的对象可序列化，只需实现 `java.io.Serializable` 接口：
+
+```java
+import java.io.Serializable;
+
+public class Person implements Serializable {
+    private String name;
+    private int age;
+    // ... 构造器、getter
+}
+```
+
+注意：`Serializable` 是个**标记接口**（marker interface）——它**没有任何方法**。它的作用只是"打标签"——告诉 JVM "这个类的对象允许被序列化"。运行时 `ObjectOutputStream` 会用 `instanceof Serializable` 检查，不通过就抛 `NotSerializableException`。
+
+为什么不设计成有方法的接口？因为序列化的逻辑由 JVM 自动生成——它通过反射读取所有字段，不需要你写代码。这种"零侵入"是它的优雅之处，也是它后来出问题的根源。
+
+## 二、ObjectOutputStream / ObjectInputStream
+
+序列化和反序列化的核心类：
+
+```java
+public class ObjectOutputStream extends OutputStream {
+    public void writeObject(Object obj) throws IOException;   // 序列化
+    public void writeInt(int v);                              // 写基本类型
+    public void writeUTF(String s);                           // 写字符串
+    // ...
+}
+
+public class ObjectInputStream extends InputStream {
+    public Object readObject() throws IOException, ClassNotFoundException;  // 反序列化
+    public int readInt();
+    public String readUTF();
+    // ...
+}
+```
+
+### 2.1 基本用法
+
+```java
+import java.io.*;
+
+// 序列化
+Person p = new Person("Alice", 30);
+try (ObjectOutputStream out = new ObjectOutputStream(
+        new FileOutputStream("person.dat"))) {
+    out.writeObject(p);
+}
+
+// 反序列化
+try (ObjectInputStream in = new ObjectInputStream(
+        new FileInputStream("person.dat"))) {
+    Person restored = (Person) in.readObject();
+    System.out.println(restored);
+}
+```
+
+`readObject` 返回 `Object`，需要强转。它还会抛 `ClassNotFoundException`——因为反序列化时 JVM 要根据字节流里的类名加载对应的类。
+
+### 2.2 序列化整个对象图
+
+如果你序列化的对象里引用了另一个对象，JVM 会**递归序列化整个对象图**——只要所有引用的对象都实现 `Serializable`：
+
+```java
+class Address implements Serializable {
+    String city;
+}
+
+class Person implements Serializable {
+    String name;
+    Address address;   // 也必须 Serializable
+}
+```
+
+如果 `Address` 没实现 `Serializable`，序列化 `Person` 时会抛 `NotSerializableException`。这条规则隐式而强大——一个对象能序列化，意味着它"所有可达的对象"都能序列化。
+
+## 三、serialVersionUID：版本兼容性
+
+序列化的字节流里记录了类的"指纹"——`serialVersionUID`（流版本 UID）。反序列化时，JVM 会比对**字节流里的 UID** 和**当前类的 UID**：
+
+- 一致：允许反序列化。
+- 不一致：抛 `InvalidClassException`。
+
+### 3.1 不显式声明的后果
+
+如果你不显式声明 `serialVersionUID`，编译器会根据类结构（字段、方法签名）自动算一个。**问题在于**：你以后给类加个字段，自动算出的 UID 就变了——之前序列化的字节流再也反序列化不回来。
+
+```java
+// v1：第一次发布
+class Person implements Serializable {
+    String name;
+}
+
+// 你存了 100 万个 person.dat
+
+// v2：加个字段
+class Person implements Serializable {
+    String name;
+    int age;   // 加字段后，自动算的 UID 变了
+}
+
+// 之前存的 100 万个 person.dat 全部反序列化失败！
+```
+
+### 3.2 显式声明
+
+```java
+public class Person implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private String name;
+    private int age;
+}
+```
+
+显式声明后，加字段不改 UID——反序列化时新字段保留默认值（`0`、`null`），老字段正常恢复。这就是 UID 的核心作用：**让你控制版本兼容性**。
+
+**规则**：所有 `Serializable` 类都要显式声明 `serialVersionUID`。用 IDE 一键生成或写 `1L` 都行，重点是"显式"。
+
+## 四、transient 关键字：不参与序列化
+
+有些字段不该序列化——密码、临时缓存、平台相关资源。用 `transient` 标记：
+
+```java
+public class User implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private String username;
+    private transient String password;   // 不会被序列化
+    private transient int loginCount = 0; // 临时统计，不持久化
+}
+```
+
+反序列化后，`transient` 字段是类型默认值（`null`、`0`、`false`）。
+
+`static` 字段也不参与序列化——static 属于类，不属于对象，序列化是"对象状态"的快照。
+
+## 五、自定义序列化：writeObject / readObject
+
+JVM 的默认序列化不总满足需求。比如你想序列化时加密密码、压缩数据、跳过某些逻辑——可以在类里写**私有的 `writeObject` 和 `readObject` 方法**：
+
+```java
+public class Account implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private String username;
+    private transient String password;   // transient + 自定义写法
+
+    // 私有方法，签名必须严格匹配
+    private void writeObject(ObjectOutputStream out) throws IOException {
+        out.defaultWriteObject();                    // 先写默认字段
+        out.writeUTF(encrypt(password));             // 再写加密后的密码
+    }
+
+    private void readObject(ObjectInputStream in)
+            throws IOException, ClassNotFoundException {
+        in.defaultReadObject();                      // 先读默认字段
+        this.password = decrypt(in.readUTF());       // 再解密
+    }
+
+    private String encrypt(String s) { return new StringBuilder(s).reverse().toString(); }
+    private String decrypt(String s) { return new StringBuilder(s).reverse().toString(); }
+}
+```
+
+JVM 在序列化时会用反射查找这两个私有方法——存在就调用你的，不存在就用默认的。`defaultWriteObject`/`defaultReadObject` 让你"在默认逻辑之外加点料"。
+
+## 六、序列化的陷阱
+
+Java 序列化方便，但坑很多。理解这些坑，才能知道为什么现代项目少用它。
+
+### 6.1 安全问题（最严重）
+
+反序列化时，JVM 会根据字节流里的类名加载类并实例化——**攻击者可以构造恶意字节流，让 JVM 实例化危险类**，触发任意代码执行。这种攻击叫"Java 反序列化漏洞"，2015 年的 Apache Commons Collections 漏洞震惊业界，影响了 WebLogic、Jenkins、WebSphere 等无数系统。
+
+**核心原则**：**永远不要反序列化不可信的数据**。`readObject` 是个"打开潘多拉魔盒"的操作——它可能调用任意类的构造逻辑。
+
+### 6.2 版本兼容
+
+加字段、改字段类型、移动类到不同包——都可能导致旧数据反序列化失败或字段错乱。`serialVersionUID` 只是个"软契约"，不能解决所有兼容问题。
+
+### 6.3 性能与体积
+
+Java 序列化的字节流包含大量类信息（类名、字段名、UID），**体积大**——序列化一个简单对象可能上百字节。速度也比 JSON 库慢几倍。
+
+### 6.4 跨语言不通
+
+Java 序列化是 Java 私有格式——Python、Go、Node.js 都读不懂。这在多语言微服务里是致命的。
+
+## 七、替代方案：JSON 与 Protobuf
+
+新项目里，序列化基本用 JSON 或 Protobuf，而非 Java 自带序列化。
+
+### 7.1 JSON
+
+JSON 是文本格式，可读、跨语言、调试友好。Java 主流库有两个：
+
+- **Jackson**：Spring 默认集成，功能强大，性能优秀。
+- **Gson**：Google 出品，API 简洁，适合简单场景。
+
+```java
+// Jackson 示例（伪代码，需要 com.fasterxml.jackson.databind.ObjectMapper）
+ObjectMapper mapper = new ObjectMapper();
+String json = mapper.writeValueAsString(person);          // 对象 -> JSON
+Person p = mapper.readValue(json, Person.class);          // JSON -> 对象
+```
+
+JSON 的优势：可读、跨语言、字段加减兼容性好（缺字段用默认值，多字段忽略）。缺点：体积比二进制大，不支持二进制数据（要用 Base64）。
+
+### 7.2 Protobuf
+
+Google 的 Protocol Buffers 是二进制格式，**体积小、速度快、强类型**。需要写 `.proto` 文件定义结构，编译器生成各语言的代码。
+
+```proto
+// person.proto
+syntax = "proto3";
+message Person {
+    string name = 1;
+    int32 age = 2;
+}
+```
+
+Protobuf 适合高性能场景——RPC 通信（gRPC 默认用 Protobuf）、海量数据存储。缺点：不可读（二进制），需要 schema 文件。
+
+### 7.3 选型建议
+
+| 场景 | 推荐 |
+| --- | --- |
+| 配置文件、API 响应 | JSON |
+| 内部缓存、Session | JSON 或 Java 序列化（如果信任） |
+| 高性能 RPC | Protobuf |
+| 跨语言大数据 | Protobuf / Avro |
+| Java 私有遗留系统 | Java 序列化（不推荐新项目） |
+
+## 八、实战：序列化与反序列化 Person
+
+下面这个例子完整演示序列化的常见技巧——基本字段、`transient`、`serialVersionUID`、版本兼容：
+
+<CodeRunner code={`import java.io.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // 1. 基本序列化/反序列化
+        System.out.println("--- 1. 基本序列化 ---");
+        Person alice = new Person("Alice", 30, "secret123");
+        System.out.println("原对象: " + alice);
+
+        // 序列化到字节数组
+        byte[] data;
+        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+             ObjectOutputStream out = new ObjectOutputStream(baos)) {
+            out.writeObject(alice);
+            data = baos.toByteArray();
+        }
+        System.out.println("序列化字节数: " + data.length);
+
+        // 反序列化
+        Person restored;
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(data);
+             ObjectInputStream in = new ObjectInputStream(bais)) {
+            restored = (Person) in.readObject();
+        }
+        System.out.println("反序列化后: " + restored);
+        System.out.println("password 是 transient，反序列化后为: " + restored.getPassword());
+        // null —— transient 字段不参与序列化
+
+        // 2. 序列化集合
+        System.out.println("\\n--- 2. 序列化集合 ---");
+        List<Person> team = List.of(
+            new Person("Alice", 30, "p1"),
+            new Person("Bob", 25, "p2"),
+            new Person("Charlie", 35, "p3")
+        );
+
+        try (ObjectOutputStream out = new ObjectOutputStream(
+                new FileOutputStream("team.dat"))) {
+            out.writeObject(team);
+        }
+
+        try (ObjectInputStream in = new ObjectInputStream(
+                new FileInputStream("team.dat"))) {
+            @SuppressWarnings("unchecked")
+            List<Person> loaded = (List<Person>) in.readObject();
+            loaded.forEach(System.out::println);
+        }
+
+        // 3. 自定义序列化（加密密码）
+        System.out.println("\\n--- 3. 自定义序列化（加密） ---");
+        Account acc = new Account("alice", "mySecret");
+        System.out.println("原账户: " + acc);
+
+        byte[] accData;
+        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+             ObjectOutputStream out = new ObjectOutputStream(baos)) {
+            out.writeObject(acc);
+            accData = baos.toByteArray();
+        }
+
+        // 看看序列化后字节里有没有明文密码
+        String bytesStr = new String(accData);   // 用默认编码看（不严谨，仅演示）
+        System.out.println("字节流含明文 'mySecret'? " + bytesStr.contains("mySecret"));
+        System.out.println("字节流含反转后 'terceSym'? " + bytesStr.contains("terceSym"));
+
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(accData);
+             ObjectInputStream in = new ObjectInputStream(bais)) {
+            Account restoredAcc = (Account) in.readObject();
+            System.out.println("反序列化后: " + restoredAcc);
+        }
+
+        // 清理
+        new File("team.dat").delete();
+    }
+}
+
+class Person implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private String name;
+    private int age;
+    private transient String password;   // 不参与序列化
+
+    Person(String name, int age, String password) {
+        this.name = name; this.age = age; this.password = password;
+    }
+
+    public String getName() { return name; }
+    public int getAge() { return age; }
+    public String getPassword() { return password; }
+
+    @Override
+    public String toString() {
+        return String.format("Person(name=%s, age=%d, password=%s)", name, age, password);
+    }
+}
+
+class Account implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private String username;
+    private transient String password;   // transient + 自定义序列化
+
+    Account(String username, String password) {
+        this.username = username; this.password = password;
+    }
+
+    // 自定义序列化：密码加密后写入
+    private void writeObject(ObjectOutputStream out) throws IOException {
+        out.defaultWriteObject();
+        out.writeUTF(encrypt(password));
+    }
+
+    // 自定义反序列化：解密还原
+    private void readObject(ObjectInputStream in)
+            throws IOException, ClassNotFoundException {
+        in.defaultReadObject();
+        this.password = decrypt(in.readUTF());
+    }
+
+    private String encrypt(String s) {
+        return new StringBuilder(s).reverse().toString();
+    }
+
+    private String decrypt(String s) {
+        return new StringBuilder(s).reverse().toString();
+    }
+
+    @Override
+    public String toString() {
+        return String.format("Account(username=%s, password=%s)", username, password);
+    }
+}`} />
+
+> **观察重点**：
+> - `Person.password` 是 `transient`，反序列化后变 `null`——验证 transient 的作用。
+> - `Account` 自定义了 `writeObject`/`readObject`，密码以反转形式存——验证自定义序列化。
+> - 序列化后字节流里能找到反转后的密码（`terceSym`），找不到明文——说明自定义逻辑生效。
+
+## 九、本章速查表
+
+| 概念 | 说明 |
+| --- | --- |
+| `Serializable` | 标记接口，无方法，表示对象可序列化 |
+| `ObjectOutputStream.writeObject` | 序列化对象到流 |
+| `ObjectInputStream.readObject` | 从流反序列化对象 |
+| `serialVersionUID` | 类版本指纹，显式声明以控制兼容性 |
+| `transient` | 字段不参与序列化 |
+| `static` | 不属于对象，不参与序列化 |
+| `writeObject`/`readObject` | 私有方法，自定义序列化逻辑 |
+| `defaultWriteObject`/`defaultReadObject` | 在自定义逻辑中调用默认序列化 |
+
+## 结语：方便但有代价
+
+Java 序列化是个有历史包袱的特性。它的设计思路——"标记接口 + JVM 自动反射字段"——优雅且零侵入，让序列化对业务代码几乎透明。但这种"透明"恰恰是它的问题所在：
+
+- **安全**：自动反序列化机制让攻击者能触发任意类的代码，造成 RCE。
+- **兼容**：类一改，旧数据可能挂掉，`serialVersionUID` 只是缓兵之计。
+- **跨语言**：纯 Java 私有格式，多语言环境不通。
+- **性能**：体积大、速度慢，不及 JSON/Protobuf。
+
+新项目里，跨语言数据交换首选 **JSON**（可读、调试友好），高性能场景用 **Protobuf**（紧凑、快）。Java 自带序列化保留在两个角落：一是遗留系统兼容，二是 Java 进程间私有通信（RMI、JGroups 等）——这些场景下"双方都是 Java、数据可信"，序列化的便利才显现。
+
+理解序列化，不仅是学一个 API，更是理解"对象状态如何穿越时空"这个根本问题。无论是 Java 序列化、JSON 还是 Protobuf，本质上都在回答同一个问题：**怎么把内存中那张对象网，无损地拍扁又还原**。
+
+下一章我们看 NIO——Java 的"新 IO"，它用 Buffer 和 Channel 重新设计了 IO，是高并发网络通信的基石。

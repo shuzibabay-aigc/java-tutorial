@@ -1,0 +1,597 @@
+---
+title: "日志框架"
+chapter: 66
+stage: "第十二阶段"
+stageName: "工程化与生态"
+order: 4
+description: "理解日志门面 SLF4J 与实现 Logback、日志级别（TRACE/DEBUG/INFO/WARN/ERROR）、日志格式与 Pattern、异步日志与性能、日志最佳实践（参数化日志、不拼接字符串）"
+pubDate: 2026-07-03
+tags: ["Java", "SLF4J", "Logback", "日志", "日志级别", "参数化日志"]
+---
+
+# 日志框架
+
+`System.out.println` 是新手最爱的调试工具，但生产环境用它就是灾难——不能按级别过滤、不能写文件、不能滚动归档、不能控制格式、性能差（同步 IO 阻塞）。**日志框架**就是为解决这些而生——它是生产级应用的"黑匣子记录仪"，让你在出问题时能从一堆日志里还原现场。
+
+这一章看 Java 日志的"门面 + 实现"双层架构——SLF4J 门面 + Logback 实现，以及日志的最佳实践。
+
+## 一、Java 日志的混乱史
+
+Java 日志生态很混乱，先理清楚：
+
+| 框架 | 角色 | 时期 |
+| --- | --- | --- |
+| `java.util.logging`（JUL） | JDK 自带 | 1999 |
+| **Log4j 1.x** | 第一代主流 | 2001 |
+| **SLF4J** | 日志**门面**（API） | 2004 |
+| **Logback** | Log4j 作者的新实现 | 2009 |
+| **Log4j 2** | Log4j 重写，性能最好 | 2014 |
+
+混乱的根源——Log4j 1.x 是早期主流，但没设计门面；JUL 是 JDK 自带的，但 API 不好用；Apache Commons Logging（JCL）想做门面但用类加载器有坑；最后 SLF4J 横空出世成为门面标准，Logback/Log4j2 是实现。
+
+**现代最佳实践**：
+
+```
+应用代码 --> SLF4J (门面) --> Logback 或 Log4j2 (实现)
+```
+
+应用只面向 SLF4J API 编程，背后接什么实现由配置决定。换实现不改业务代码——这就是"门面模式"。
+
+## 二、SLF4J：日志门面
+
+**SLF4J**（Simple Logging Facade for Java）只是 API，本身不输出日志。它需要绑定一个底层实现：
+
+```xml
+<!-- SLF4J API -->
+<dependency>
+    <groupId>org.slf4j</groupId>
+    <artifactId>slf4j-api</artifactId>
+    <version>2.0.9</version>
+</dependency>
+
+<!-- 绑定 Logback (Logback 自带 slf4j binding, 不需要额外依赖) -->
+<dependency>
+    <groupId>ch.qos.logback</groupId>
+    <artifactId>logback-classic</artifactId>
+    <version>1.4.14</version>
+</dependency>
+```
+
+### 2.1 基本用法
+
+```java
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public class UserService {
+    // 用类名声明 logger, 方便定位
+    private static final Logger log = LoggerFactory.getLogger(UserService.class);
+
+    public void login(String name) {
+        log.info("用户登录: {}", name);          // 参数化日志
+        log.debug("调试信息: id={}", 42);
+
+        try {
+            // 业务...
+        } catch (Exception e) {
+            log.error("登录失败: user={}", name, e);   // 异常作为最后参数
+        }
+    }
+}
+```
+
+`{}` 是占位符——参数按顺序填充。这是 SLF4J 的杀手锏之一（详见下文性能章节）。
+
+## 三、日志级别
+
+日志分 5 级，从详细到严重：
+
+| 级别 | 用途 | 示例 |
+| --- | --- | --- |
+| `TRACE` | 极细的跟踪信息 | `Entering method foo with args=[1,2]` |
+| `DEBUG` | 调试信息 | `Cache miss for key=user:42` |
+| `INFO` | 重要业务事件 | `User 42 logged in from 1.2.3.4` |
+| `WARN` | 警告，可恢复 | `Connection pool 80% full` |
+| `ERROR` | 错误，影响功能 | `Failed to send email to user 42` |
+
+级别有**继承关系**——开 `INFO` 会输出 `INFO`/`WARN`/`ERROR`，不输出 `TRACE`/`DEBUG`。生产环境一般开 `INFO`，开发环境开 `DEBUG`。
+
+```java
+log.trace("最详细");    // 生产几乎不开
+log.debug("调试用");    // 开发开, 生产关
+log.info("重要事件");   // 默认级别
+log.warn("警告");
+log.error("错误");      // 一定要看
+```
+
+**怎么选级别？**
+
+- **ERROR** —— 影响功能、需要立即关注（数据库连不上、关键调用失败）。
+- **WARN** —— 可恢复但要注意（重试成功、降级、连接池逼近上限）。
+- **INFO** —— 关键业务节点（登录、下单、支付完成）。
+- **DEBUG** —— 开发期排查问题用，生产关掉。
+- **TRACE** —— 极少用，几乎只在调试特定 bug 时短暂开。
+
+**常见误用**：
+
+- 把异常都 log 成 ERROR——一些异常是业务正常分支（如 `UserNotFoundException`），该 WARN 或 INFO。
+- 大量 INFO——日志爆炸，淹没关键信息。INFO 要克制。
+- ERROR 后又抛异常——上层再 log 一次 ERROR，重复。要么 log 要么抛，不要都做。
+
+## 四、Logback 配置
+
+`logback.xml`（放在 `src/main/resources/`）控制日志格式、输出位置、级别：
+
+```xml
+<configuration>
+    <!-- 控制台输出 -->
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 文件输出 (滚动归档) -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/app.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>logs/app.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>100MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>10GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{ISO8601} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 按包名控制级别 -->
+    <logger name="com.example.service" level="DEBUG"/>
+    <logger name="org.springframework" level="WARN"/>
+    <logger name="org.hibernate.SQL" level="DEBUG"/>
+
+    <!-- 根级别 -->
+    <root level="INFO">
+        <appender-ref ref="STDOUT"/>
+        <appender-ref ref="FILE"/>
+    </root>
+</configuration>
+```
+
+### 4.1 Pattern 格式
+
+`%pattern` 控制每行日志的格式：
+
+| 占位符 | 含义 |
+| --- | --- |
+| `%d{...}` | 时间戳，格式同 `SimpleDateFormat` |
+| `%thread` | 线程名 |
+| `%-5level` | 级别（左对齐 5 字符） |
+| `%logger{36}` | logger 名（类名），`{36}` 是缩写长度 |
+| `%msg` / `%message` | 日志消息 |
+| `%n` | 换行 |
+| `%M` | 方法名（性能开销大，慎用） |
+| `%L` | 行号（性能开销大，慎用） |
+| `%X{key}` | MDC（Mapped Diagnostic Context）值 |
+| `%-20.20logger` | logger 名固定 20 字符宽 |
+
+经典 Pattern：
+
+```
+%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n
+```
+
+输出：
+
+```
+2024-01-15 14:30:25.123 [main] INFO  c.e.s.UserService - 用户登录: 张三
+```
+
+### 4.2 滚动归档
+
+生产日志不能无限增长——`RollingFileAppender` 按时间/大小滚动：
+
+- 每天一个文件，超过 100MB 切分。
+- 保留 30 天历史。
+- 总大小超 10GB 自动删旧。
+- 历史文件 gzip 压缩。
+
+```
+logs/
+├── app.log                       # 当天
+├── app.2024-01-13.0.log.gz       # 前天 (压缩)
+├── app.2024-01-14.0.log.gz
+└── app.2024-01-14.1.log.gz       # 昨天第二个文件 (>100MB 切的)
+```
+
+## 五、性能与异步日志
+
+### 5.1 参数化日志：避免字符串拼接
+
+**错误写法**：
+
+```java
+log.debug("用户 " + name + " 登录, id=" + id);   // 总是拼接!
+```
+
+即使 `DEBUG` 关闭，字符串拼接**照样执行**——浪费 CPU 和内存。
+
+**正确写法**：
+
+```java
+log.debug("用户 {} 登录, id={}", name, id);
+```
+
+`{}` 是占位符，**只在日志实际输出时**才替换——`DEBUG` 关闭时几乎零开销。这就是 SLF4J 的关键设计。
+
+### 5.2 关闭日志的代价
+
+```java
+// 假设 DEBUG 关闭
+log.debug("复杂计算: " + expensiveCompute());   // expensiveCompute 仍然执行!
+
+log.debug("复杂计算: {}", expensiveCompute());   // expensiveCompute 仍然执行! (参数要算)
+
+// 用 guard 避免高开销参数
+if (log.isDebugEnabled()) {
+    log.debug("复杂计算: {}", expensiveCompute());
+}
+```
+
+注意第二种——参数化日志只在拼接上省了，**参数本身还是要算的**。如果参数计算很贵（序列化大对象、查询数据库），用 `isDebugEnabled()` 守卫。但简单参数（基本类型、字段访问）不用守卫，参数化日志就够了。
+
+### 5.3 异步日志
+
+同步日志——写文件 IO 阻塞业务线程。高并发下日志成为瓶颈。**异步日志**——业务线程扔到队列，后台线程批量写：
+
+Logback 异步 Appender：
+
+```xml
+<appender name="ASYNC" class="ch.qos.logback.classic.AsyncAppender">
+    <queueSize>4096</queueSize>
+    <discardingThreshold>0</discardingThreshold>   <!-- 0 = 不丢弃任何级别 -->
+    <neverBlock>true</neverBlock>                   <!-- 队列满不阻塞业务 -->
+    <appender-ref ref="FILE"/>
+</appender>
+```
+
+- 业务线程入队即返回，不等写盘。
+- 后台线程批量写，性能高 10~100 倍。
+- 代价——程序崩溃时队列里没写完的日志会丢。
+
+**Log4j 2** 的 Async Logger 更激进——用 Disruptor 无锁队列，比 Logback 异步快 10 倍以上。追求极致性能选 Log4j 2。
+
+### 5.4 异常栈怎么打
+
+```java
+// 对: 异常作为最后一个参数, 不写在 {} 里
+try {
+    ...
+} catch (SQLException e) {
+    log.error("查询用户失败: id={}", id, e);   // 异常自动打栈
+}
+
+// 错: e.getMessage() 丢了栈
+log.error("查询失败: {}", e.getMessage());   // 没栈, 怎么定位?
+
+// 错: 拼字符串
+log.error("查询失败: " + e);   // e.toString() 没栈
+```
+
+异常对象作为 `log.error(msg, args, exception)` 的最后一个参数（不加 `{}`），SLF4J 自动打印完整栈。`e.getMessage()` 只有消息文本，没有栈——出问题没法定位。
+
+## 六、MDC：链路追踪
+
+**MDC**（Mapped Diagnostic Context）——线程本地的日志上下文。在请求开始时塞入 `traceId`，后续日志自动带上：
+
+```java
+import org.slf4j.MDC;
+
+// 请求开始
+MDC.put("traceId", UUID.randomUUID().toString());
+MDC.put("userId", "user42");
+
+try {
+    // 业务代码, 各处 log 都会自动带 traceId/userId
+    log.info("处理订单");
+} finally {
+    MDC.clear();   // 清理, 避免线程池泄漏
+}
+```
+
+Pattern 里加 `%X{traceId}`：
+
+```
+%d{HH:mm:ss} [%X{traceId}] %-5level %logger - %msg%n
+```
+
+输出：
+
+```
+14:30:25 [a1b2c3d4] INFO  c.e.OrderService - 处理订单
+```
+
+MDC 是分布式链路追踪的基础——同一请求的所有日志带同一 `traceId`，能在 ELK/Loki 里一键搜出完整调用链。Spring Cloud Sleuth/Micrometer Tracing 就是基于 MDC 自动注入 traceId。
+
+## 七、实战：日志最佳实践演示
+
+由于 Piston 环境没有 SLF4J/Logback 依赖，下面用 Java SE 模拟一个**迷你日志框架**——演示级别过滤、参数化日志、MDC、异步日志的核心思想。
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.time.*;
+import java.time.format.*;
+
+// 迷你日志框架 (模拟 SLF4J + Logback 核心)
+enum Level { TRACE, DEBUG, INFO, WARN, ERROR }
+
+class LogEvent {
+    final long timestamp;
+    final String thread;
+    final Level level;
+    final String logger;
+    final String message;
+    final Throwable throwable;
+    final Map<String, String> mdc;
+
+    LogEvent(Level level, String logger, String message,
+            Throwable t, Map<String, String> mdc) {
+        this.timestamp = System.currentTimeMillis();
+        this.thread = Thread.currentThread().getName();
+        this.level = level;
+        this.logger = logger;
+        this.message = message;
+        this.throwable = t;
+        this.mdc = new HashMap<>(mdc);
+    }
+}
+
+interface Appender {
+    void append(LogEvent e);
+}
+
+// 控制台 Appender
+class ConsoleAppender implements Appender {
+    private final String pattern;
+    public ConsoleAppender(String pattern) { this.pattern = pattern; }
+
+    @Override
+    public void append(LogEvent e) {
+        String line = pattern
+            .replace("%d", LocalDateTime.ofInstant(
+                Instant.ofEpochMilli(e.timestamp), ZoneId.systemDefault())
+                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")))
+            .replace("%thread", e.thread)
+            .replace("%level", String.format("%-5s", e.level))
+            .replace("%logger", e.logger)
+            .replace("%msg", e.message)
+            .replace("%X{traceId}", e.mdc.getOrDefault("traceId", ""))
+            .replace("%X{user}", e.mdc.getOrDefault("user", ""));
+        System.out.println(line);
+        if (e.throwable != null) {
+            e.throwable.printStackTrace(System.out);
+        }
+    }
+}
+
+// 异步 Appender (用队列)
+class AsyncAppender implements Appender {
+    private final Appender target;
+    private final BlockingQueue<LogEvent> queue = new LinkedBlockingQueue<>(1024);
+    private volatile boolean running = true;
+
+    public AsyncAppender(Appender target) {
+        this.target = target;
+        Thread t = new Thread(() -> {
+            while (running || !queue.isEmpty()) {
+                try {
+                    LogEvent e = queue.poll(10, TimeUnit.MILLISECONDS);
+                    if (e != null) target.append(e);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }, "AsyncLogger");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    @Override
+    public void append(LogEvent e) {
+        if (!queue.offer(e)) {
+            // 队列满, 降级为同步 (生产框架是丢弃或阻塞)
+            target.append(e);
+        }
+    }
+
+    public void shutdown() throws InterruptedException {
+        running = false;
+        Thread.sleep(100);
+    }
+}
+
+class Logger {
+    private final String name;
+    private Level level = Level.INFO;
+    private final List<Appender> appenders = new ArrayList<>();
+    private static final ThreadLocal<Map<String, String>> MDC =
+        ThreadLocal.withInitial(HashMap::new);
+
+    public Logger(String name) { this.name = name; }
+    public void setLevel(Level l) { this.level = l; }
+    public void addAppender(Appender a) { appenders.add(a); }
+
+    public static void putMdc(String key, String val) { MDC.get().put(key, val); }
+    public static void removeMdc(String key) { MDC.get().remove(key); }
+    public static void clearMdc() { MDC.get().clear(); }
+
+    private boolean isEnabled(Level l) { return l.ordinal() >= level.ordinal(); }
+
+    public void log(Level l, String msg, Object... args) {
+        if (!isEnabled(l)) return;
+        // 参数化: {} 占位符替换
+        String formatted = format(msg, args);
+        Throwable t = (args.length > 0 && args[args.length - 1] instanceof Throwable)
+            ? (Throwable) args[args.length - 1] : null;
+        LogEvent e = new LogEvent(l, name, formatted, t, MDC.get());
+        for (Appender a : appenders) a.append(e);
+    }
+
+    private String format(String msg, Object... args) {
+        if (args.length == 0) return msg;
+        // 最后一个如果是 Throwable, 不参与 {}
+        int argCount = args.length;
+        if (args[args.length - 1] instanceof Throwable) argCount--;
+        StringBuilder sb = new StringBuilder();
+        int argIdx = 0;
+        for (int i = 0; i < msg.length(); i++) {
+            if (i < msg.length() - 1 && msg.charAt(i) == '{' && msg.charAt(i + 1) == '}') {
+                if (argIdx < argCount) sb.append(args[argIdx++]);
+                else sb.append("{}");
+                i++;
+            } else {
+                sb.append(msg.charAt(i));
+            }
+        }
+        return sb.toString();
+    }
+
+    public void trace(String m, Object... a) { log(Level.TRACE, m, a); }
+    public void debug(String m, Object... a) { log(Level.DEBUG, m, a); }
+    public void info(String m, Object... a) { log(Level.INFO, m, a); }
+    public void warn(String m, Object... a) { log(Level.WARN, m, a); }
+    public void error(String m, Object... a) { log(Level.ERROR, m, a); }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 日志框架演示 ===\\n");
+
+        // 1. 配置 logger
+        Logger log = new Logger("com.example.UserService");
+        ConsoleAppender console = new ConsoleAppender(
+            "%d [%thread] %level %logger [%X{traceId}] - %msg");
+        AsyncAppender async = new AsyncAppender(console);
+        log.addAppender(async);
+
+        // 2. 级别过滤: DEBUG 关闭时不输出
+        System.out.println("--- 级别 INFO (默认), DEBUG 不输出 ---");
+        log.setLevel(Level.INFO);
+        log.debug("这条 debug 看不见");
+        log.info("用户 {} 登录, id={}", "张三", 42);
+        log.warn("连接池使用率 {}%", 85);
+
+        // 3. 切到 DEBUG
+        System.out.println("\\n--- 切到 DEBUG ---");
+        log.setLevel(Level.DEBUG);
+        log.debug("调试信息: 缓存命中率 {}", 0.95);
+
+        // 4. 参数化 vs 字符串拼接的性能
+        System.out.println("\\n--- 参数化 vs 拼接性能对比 ---");
+        int times = 1_000_000;
+        // 参数化 (DEBUG 关闭, 几乎零开销)
+        log.setLevel(Level.ERROR);
+        long t1 = System.nanoTime();
+        for (int i = 0; i < times; i++) {
+            log.debug("用户 {} 操作 {}", "alice", i);
+        }
+        long paramNs = System.nanoTime() - t1;
+
+        // 字符串拼接 (即使关掉也要拼接)
+        long t2 = System.nanoTime();
+        for (int i = 0; i < times; i++) {
+            String msg = "用户 " + "alice" + " 操作 " + i;  // 总是拼接
+        }
+        long concatNs = System.nanoTime() - t2;
+
+        System.out.printf("参数化 (级别关闭) %d 次: %d ms%n", times, paramNs / 1_000_000);
+        System.out.printf("字符串拼接 %d 次: %d ms%n", times, concatNs / 1_000_000);
+        System.out.println("(参数化日志在级别关闭时几乎零开销, 这是 SLF4J 设计精髓)");
+
+        // 5. 异常打印
+        System.out.println("\\n--- 异常栈打印 ---");
+        log.setLevel(Level.ERROR);
+        try {
+            throw new RuntimeException("模拟数据库连接失败");
+        } catch (RuntimeException e) {
+            log.error("查询用户失败: id={}", 42, e);   // 异常作为最后参数
+        }
+
+        // 6. MDC 链路追踪
+        System.out.println("\\n--- MDC 链路追踪 ---");
+        log.setLevel(Level.INFO);
+        Logger.putMdc("traceId", "a1b2c3d4");
+        Logger.putMdc("user", "user42");
+        log.info("开始处理订单");
+        log.info("校验库存");
+        log.info("生成订单号");
+        Logger.clearMdc();
+        log.info("清掉 MDC 后的日志");
+
+        // 7. 异步日志
+        System.out.println("\\n--- 异步日志 ---");
+        log.setLevel(Level.INFO);
+        long t3 = System.currentTimeMillis();
+        for (int i = 0; i < 100; i++) {
+            log.info("异步日志 {}", i);   // 入队即返回
+        }
+        System.out.println("提交 100 条日志耗时: " + (System.currentTimeMillis() - t3) + " ms");
+        async.shutdown();   // 等异步线程把队列写完
+
+        System.out.println("\\n=== 日志最佳实践 ===");
+        System.out.println("1. 用 SLF4J 门面 + Logback/Log4j2 实现");
+        System.out.println("2. 参数化日志: log.info(\"用户 {} 登录\", name), 别拼接!");
+        System.out.println("3. 异常作为最后参数, 自动打栈: log.error(\"失败\", e)");
+        System.out.println("4. 级别克制: ERROR 真错误, WARN 注意, INFO 关键事件");
+        System.out.println("5. 生产用异步日志, 高并发不阻塞业务");
+        System.out.println("6. MDC + traceId 做链路追踪");
+        System.out.println("7. 日志文件滚动归档, 别无限增长");
+    }
+}`} />
+
+> **观察重点**：
+> - **级别关闭时参数化日志几乎零开销**——这是 SLF4J 的关键设计，对比字符串拼接省了百万次拼接。
+> - **异常作为最后参数自动打栈**——不要用 `e.getMessage()`，丢栈无法定位。
+> - **MDC 让日志自动带 `traceId`**——同一请求所有日志可串起来。
+> - **异步日志提交 100 条几乎瞬间完成**——业务线程不等写盘。
+
+## 八、日志最佳实践清单
+
+1. **用 SLF4J 门面**——业务代码不直接依赖 Logback/Log4j2，便于换实现。
+2. **永远参数化**——`log.info("x={}", x)`，不要 `log.info("x=" + x)`。
+3. **异常作为最后参数**——`log.error("msg", e)`，自动打栈。
+4. **级别克制**——INFO 要精，ERROR 要严。
+5. **不要在循环里大量 log**——容易日志爆炸。
+6. **不要记录敏感信息**——密码、身份证、卡号千万别进日志。
+7. **生产用异步日志**——避免 IO 阻塞业务。
+8. **日志要带上下文**——`log.info("用户 {} 登录", name)` 比 `log.info("登录成功")` 有用得多。
+9. **文件滚动归档**——别让日志撑爆磁盘。
+10. **ERROR 后不要抛**——log 和抛二选一，避免重复记录。
+
+## 九、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| SLF4J | 日志门面，应用面向它编程 |
+| Logback | SLF4J 的主流实现 |
+| 5 级日志 | TRACE/DEBUG/INFO/WARN/ERROR |
+| 参数化日志 | `{}` 占位符，关闭时零开销 |
+| 异常打栈 | 异常作为最后参数，自动输出栈 |
+| MDC | 线程本地上下文，做链路追踪 |
+| 异步日志 | 队列 + 后台写，不阻塞业务 |
+| Pattern | 控制日志格式 |
+| 滚动归档 | 按时间/大小切文件，控制总量 |
+
+**记忆口诀**：
+
+- **门面 + 实现**——SLF4J 门面，Logback 实现。
+- **5 级日志**——TRACE 最细、ERROR 最严重。
+- **参数化别拼接**——`{}` 占位符，关闭时零开销。
+- **异常末尾不带占位符**——`log.error("msg", e)` 自动打栈。
+- **生产异步 + 滚动**——不阻塞、不爆炸。
+- **MDC 串请求**——traceId 是分布式追踪的基础。
+
+## 结语：从 println 到日志框架
+
+这一章我们看了日志——从 SLF4J 门面到 Logback 实现，从级别到 Pattern，从 MDC 到异步。生产环境没有日志等于盲飞——出问题只能瞎猜。下一章看 Java 生态的"工具箱"——**Lombok 与常用工具库**，让你少写样板代码。

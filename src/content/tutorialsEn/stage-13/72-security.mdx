@@ -1,0 +1,648 @@
+---
+title: "Security and Authentication"
+chapter: 72
+stage: "Stage 13"
+stageName: "Java Web and the Spring Ecosystem"
+order: 5
+description: "Understand Spring Security fundamentals (filter chain/authentication/authorization), JWT authentication (Header.Payload.Signature), and an introduction to OAuth 2.0 (authorization code flow)"
+pubDate: 2026-07-03
+tags: ["Java", "Spring Security", "JWT", "OAuth2", "Authentication", "Authorization"]
+---
+
+# Security and Authentication
+
+Web application security is serious business — can an unauthenticated user see your orders? Can an ordinary employee access admin endpoints? These are guarded by **authentication** and **authorization** mechanisms. This chapter covers the two mainstream Java security approaches — the Spring Security framework and JWT tokens — plus the OAuth 2.0 protocol.
+
+## 1. Authentication vs Authorization
+
+First, clarify two concepts:
+
+- **Authentication (AuthN)** — Who are you? Verify identity (username/password, SMS, fingerprint). Answers "you are Zhang San."
+- **Authorization (AuthZ)** — What can you do? Verify permissions (roles, ACL). Answers "Zhang San is an admin."
+
+The classic trio:
+
+- **Authenticate** — On login, verify the account and password.
+- **Session** — After login, issue a credential (Session/JWT); subsequent requests carry it.
+- **Authorize** — Once the credential is valid, check whether the target resource can be accessed.
+
+## 2. Spring Security
+
+**Spring Security** is the Spring family's security framework — authentication, authorization, and attack protection (CSRF, CORS, session fixation) all in one. Powerful but with a steep learning curve, because it has many abstraction layers.
+
+### 2.1 The Filter Chain
+
+The core of Spring Security is **FilterChainProxy** — a chain of Servlet Filters, each doing one job:
+
+```
+HTTP request
+  ↓
+SecurityContextPersistenceFilter    -- load/save SecurityContext
+HeaderWriterFilter                   -- write security response headers
+CorsFilter                           -- CORS handling
+LogoutFilter                         -- handle /logout
+UsernamePasswordAuthenticationFilter -- handle /login (username/password auth)
+JwtAuthenticationFilter              -- (custom) JWT parsing & auth
+ExceptionTranslationFilter           -- translate exceptions to 401/403
+FilterSecurityInterceptor            -- authorization check
+  ↓
+Controller
+```
+
+Every request passes through this stack of Filters — authentication and authorization both happen in the Filter layer, so by the time the request reaches the Controller everything is already verified.
+
+### 2.2 Configuration
+
+Spring Boot integrates Spring Security:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+```
+
+```java
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity   // enable method-level @PreAuthorize
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        return http
+            .csrf(csrf -> csrf.disable())           // disable CSRF (not needed for REST APIs)
+            .sessionManagement(s -> s.sessionCreationPolicy(
+                SessionCreationPolicy.STATELESS))    // stateless (using JWT)
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/api/login", "/api/register").permitAll()
+                .requestMatchers("/api/admin/**").hasRole("ADMIN")
+                .requestMatchers("/api/user/**").authenticated()
+                .anyRequest().authenticated()
+            )
+            .addFilterBefore(jwtAuthFilter(),
+                UsernamePasswordAuthenticationFilter.class)
+            .build();
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();   // password hashing
+    }
+}
+```
+
+`authorizeHttpRequests` configures path permissions:
+
+- `permitAll()` — accessible to everyone.
+- `authenticated()` — accessible after login.
+- `hasRole("ADMIN")` — accessible with the ADMIN role.
+- `hasAnyRole("ADMIN", "USER")` — any of the roles.
+- `hasAuthority("user:write")` — has a specific authority.
+
+### 2.3 Method-level Authorization
+
+```java
+@RestController
+public class AdminController {
+
+    @PreAuthorize("hasRole('ADMIN')")
+    @DeleteMapping("/api/users/{id}")
+    public void deleteUser(@PathVariable Long id) { ... }
+
+    @PreAuthorize("#user.id == authentication.principal.id")
+    @PutMapping("/api/users/{id}")
+    public User update(@PathVariable Long id, @RequestBody User user) { ... }
+    // can only update your own info
+
+    @PostAuthorize("returnObject.owner == authentication.name")
+    @GetMapping("/api/orders/{id}")
+    public Order getOrder(@PathVariable Long id) { ... }
+    // check after return: can only view your own orders
+}
+```
+
+`@PreAuthorize` checks before the method executes; `@PostAuthorize` checks after. SpEL expressions support context variables like `#paramName`, `returnObject`, and `authentication.principal`.
+
+### 2.4 Password Hashing
+
+```java
+PasswordEncoder encoder = new BCryptPasswordEncoder();
+String raw = "123456";
+String hash = encoder.encode(raw);    // $2a$10$xxxxx...
+encoder.matches(raw, hash);            // true, verify the password
+```
+
+**Never store passwords in plaintext!** `BCrypt` is the industry standard for password hashing — salted, slow hashing (resists rainbow tables and brute force). `MD5`/`SHA1` are insecure — fast hashes are easily brute-forced.
+
+## 3. JWT
+
+**JWT** (JSON Web Token) is a stateless authentication token — the server stores no Session; the token itself carries the user information.
+
+### 3.1 JWT Structure
+
+A JWT consists of three parts, separated by `.`:
+
+```
+Header.Payload.Signature
+```
+
+- **Header** — Token type and signing algorithm, e.g. `{"alg":"HS256","typ":"JWT"}`.
+- **Payload** — User information and claims, e.g. `{"sub":"user42","role":"admin","exp":1700000000}`.
+- **Signature** — The signature, `HMACSHA256(base64(header) + "." + base64(payload), secret)`.
+
+```
+eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyNDIiLCJyb2xlIjoiYWRtaW4ifQ.abc123signature
+```
+
+The first two segments are Base64-encoded (not encrypted — they can be decoded); the third is the signature, which prevents tampering.
+
+### 3.2 Workflow
+
+```
+1. User logs in (username/password)
+       ↓
+2. Server verifies -> generates a JWT (containing user info + signature)
+       ↓
+3. Returns the JWT to the client
+       ↓
+4. Client stores the JWT (localStorage / cookie)
+       ↓
+5. Subsequent requests carry Authorization: Bearer <JWT>
+       ↓
+6. Server verifies the signature -> extracts user info -> handles the request
+       ↓
+7. No Session needed (stateless)
+```
+
+### 3.3 Generating and Verifying JWT
+
+```java
+import io.jsonwebtoken.*;
+import io.jsonwebtoken.security.Keys;
+import java.security.Key;
+import java.util.Date;
+
+public class JwtUtil {
+    private static final Key KEY = Keys.secretKeyFor(SignatureAlgorithm.HS256);
+    private static final long EXPIRATION = 3600_000L;   // 1 hour
+
+    // generate
+    public static String generate(Long userId, String role) {
+        return Jwts.builder()
+            .setSubject(userId.toString())
+            .claim("role", role)
+            .setIssuedAt(new Date())
+            .setExpiration(new Date(System.currentTimeMillis() + EXPIRATION))
+            .signWith(KEY)
+            .compact();
+    }
+
+    // verify + parse
+    public static Claims parse(String token) {
+        return Jwts.parserBuilder()
+            .setSigningKey(KEY)
+            .build()
+            .parseClaimsJws(token)
+            .getBody();
+    }
+}
+
+// usage
+String token = JwtUtil.generate(42L, "admin");
+Claims claims = JwtUtil.parse(token);
+claims.getSubject();    // "42"
+claims.get("role");     // "admin"
+```
+
+### 3.4 JWT vs Session
+
+| Comparison | Session | JWT |
+| --- | --- | --- |
+| State | Stored on the server (memory/Redis) | Stateless; the token carries it |
+| Scalability | Requires shared Session (Redis) | Naturally distributed-friendly |
+| Revocation | Just delete the Session | Hard (needs a blacklist) |
+| Size | JSESSIONID Cookie is small | JWT is larger (carries Payload) |
+| Security | Server-controlled | Signature prevents tampering, but Payload is readable |
+
+The price of JWT — **hard to revoke proactively**. Once a token is issued, it remains valid until expiry — a password change or logout cannot invalidate it immediately. The workaround is maintaining a "blacklist" (but that breaks statelessness).
+
+### 3.5 JWT Caveats
+
+1. **Do not store sensitive information in the Payload** — Base64 can be decoded; only put non-sensitive data like user_id and role.
+2. **Set a short expiry** — around 1 hour, paired with a refresh token for renewal.
+3. **Transmit over HTTPS** — if a JWT is intercepted it can be used to impersonate; HTTPS is mandatory.
+4. **Keep the signing key secret** — if the key leaks, anyone can forge tokens.
+5. **Do not store large amounts of data** — JWT travels with every request; large tokens waste bandwidth.
+
+## 4. OAuth 2.0
+
+**OAuth 2.0** is an authorization framework — letting a user authorize a third-party application to access their resources on another service **without handing over the password**. Think "Log in with GitHub," "Log in with WeChat."
+
+### 4.1 The Four Roles
+
+| Role | Example |
+| --- | --- |
+| **Resource Owner** | The user |
+| **Client** | The third-party application |
+| **Authorization Server** | GitHub/WeChat |
+| **Resource Server** | GitHub API |
+
+### 4.2 Authorization Code Flow (Most Common)
+
+```
+        User        Client        GitHub Auth Server        GitHub Resource Server
+         |            |                |                       |
+         |---login--->|                |                       |
+         |            |---redirect to GitHub login page---->  |
+         |            |                |                       |
+         |---enter password on GitHub->|                      |
+         |            |<--callback with code-|                |
+         |            |                |                       |
+         |            |--exchange code for token (backend, with secret)---->|
+         |            |<--access token-|                       |
+         |            |                |                       |
+         |            |--call API with token------------------>|
+         |            |<--user data----|                       |
+```
+
+Core steps:
+
+1. The client redirects the user to the GitHub authorization page (with `client_id` and `redirect_uri`).
+2. The user logs in on GitHub and consents to the authorization.
+3. GitHub redirects back to the client's `redirect_uri` with a `code` (a one-time short-lived code).
+4. The client's **backend** exchanges `code` + `client_secret` for an `access_token` (this happens server-side, so the secret is never exposed).
+5. The client uses `access_token` to call the GitHub API and fetch user information.
+
+Why the `code` step? — If the front end received the token directly, `client_secret` would have to be exposed in the front end, which is insecure. `code` is one-time and short-lived; the front end passes `code` to the backend, and the backend exchanges `code` + `secret` for the token — the secret never leaves the backend.
+
+### 4.3 Spring Security OAuth2 Client
+
+```java
+@Configuration
+public class OAuth2Config {
+    @Bean
+    public SecurityFilterChain filter(HttpSecurity http) throws Exception {
+        return http
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/", "/login**").permitAll()
+                .anyRequest().authenticated()
+            )
+            .oauth2Login(Customizer.withDefaults())   // enable OAuth2 login
+            .build();
+    }
+}
+```
+
+```yaml
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          github:
+            client-id: your-github-client-id
+            client-secret: your-github-client-secret
+            scope: read:user, user:email
+          google:
+            client-id: xxx
+            client-secret: yyy
+            scope: profile, email
+```
+
+Visiting a page that requires login automatically redirects to the GitHub/Google authorization page — after authorization, the callback automatically establishes a local Session/JWT. This is the principle behind "Log in with GitHub."
+
+## 5. Hands-on: JWT Generation and Verification
+
+Because Spring Security requires a Spring container, Piston cannot run it. Below we use plain Java SE to simulate JWT's core mechanism — HMAC signing, Base64 encoding, and tamper-proof verification.
+
+<CodeRunner code={`import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+
+// === 迷你 JWT 实现 (演示原理) ===
+class JwtUtil {
+    private static final String SECRET = "my-secret-key-demo-only-not-secure";
+    private static final String HMAC_ALGO = "HmacSHA256";
+
+    // Base64 URL 编码 (JWT 用 URL 安全的 Base64)
+    private static String b64UrlEncode(byte[] data) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(data);
+    }
+    private static String b64UrlEncode(String s) {
+        return b64UrlEncode(s.getBytes(StandardCharsets.UTF_8));
+    }
+    private static byte[] b64UrlDecode(String s) {
+        return Base64.getUrlDecoder().decode(s);
+    }
+
+    // HMAC-SHA256 签名
+    private static String sign(String data) throws Exception {
+        Mac mac = Mac.getInstance(HMAC_ALGO);
+        mac.init(new SecretKeySpec(SECRET.getBytes(StandardCharsets.UTF_8), HMAC_ALGO));
+        return b64UrlEncode(mac.doFinal(data.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    // 生成 JWT
+    public static String generate(Map<String, Object> claims) throws Exception {
+        String header = b64UrlEncode("{\\"alg\\":\\"HS256\\",\\"typ\\":\\"JWT\\"}");
+        String payload = b64UrlEncode(toJson(claims));
+        String signingInput = header + "." + payload;
+        String signature = sign(signingInput);
+        return signingInput + "." + signature;
+    }
+
+    // 验证 + 解析 JWT
+    public static Map<String, Object> parse(String token) throws Exception {
+        String[] parts = token.split("\\\\.");
+        if (parts.length != 3) throw new RuntimeException("JWT 格式错");
+
+        // 验证签名
+        String signingInput = parts[0] + "." + parts[1];
+        String expectedSig = sign(signingInput);
+        if (!expectedSig.equals(parts[2])) {
+            throw new RuntimeException("签名不匹配! 令牌被篡改");
+        }
+
+        // 解析 payload
+        String payload = new String(b64UrlDecode(parts[1]), StandardCharsets.UTF_8);
+        return parseJson(payload);
+    }
+
+    // 极简 JSON 序列化
+    private static String toJson(Map<String, Object> m) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (var e : m.entrySet()) {
+            if (!first) sb.append(",");
+            sb.append("\\"").append(e.getKey()).append("\\":");
+            Object v = e.getValue();
+            if (v instanceof Number) sb.append(v);
+            else sb.append("\\"").append(v).append("\\");
+            first = false;
+        }
+        return sb.append("}").toString();
+    }
+
+    // 极简 JSON 解析
+    private static Map<String, Object> parseJson(String json) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        json = json.replaceAll("[{}\\\"]", "");
+        for (String kv : json.split(",")) {
+            String[] parts = kv.split(":", 2);
+            if (parts.length == 2) {
+                String k = parts[0];
+                String v = parts[1];
+                try { m.put(k, Long.parseLong(v)); }
+                catch (NumberFormatException e) { m.put(k, v); }
+            }
+        }
+        return m;
+    }
+}
+
+// === 模拟 Spring Security 的认证授权 ===
+class SecurityContext {
+    private static final ThreadLocal<Map<String, Object>> current = ThreadLocal.withInitial(HashMap::new);
+
+    public static void setCurrentUser(Map<String, Object> claims) {
+        current.set(claims);
+    }
+
+    public static Map<String, Object> getCurrentUser() {
+        return current.get();
+    }
+
+    public static boolean hasRole(String role) {
+        Map<String, Object> user = getCurrentUser();
+        return role.equals(user.get("role"));
+    }
+
+    public static void clear() { current.remove(); }
+}
+
+// 权限检查注解 (模拟 @PreAuthorize)
+@java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+@java.lang.annotation.Target(java.lang.annotation.ElementType.METHOD)
+@interface PreAuthorize { String value(); }
+
+class AuthException extends RuntimeException {
+    public AuthException(String msg) { super(msg); }
+}
+
+// 业务接口
+class AdminController {
+    @PreAuthorize("hasRole('ADMIN')")
+    public String deleteUser(long id) {
+        return "删除用户 " + id;
+    }
+
+    @PreAuthorize("hasRole('USER')")
+    public String viewProfile(long id) {
+        return "查看用户 " + id + " 的资料";
+    }
+}
+
+// 模拟 Filter 拦截 + 权限检查
+class SecurityFilter {
+    private final AdminController controller = new AdminController();
+
+    // 模拟 HTTP 请求处理
+    public String handle(String token, String action, long id) throws Exception {
+        System.out.println("\\n[请求] action=" + action + ", id=" + id);
+
+        // 1. 认证: 解析 JWT
+        if (token == null || token.isEmpty()) {
+            throw new AuthException("未登录 (401 Unauthorized)");
+        }
+        Map<String, Object> claims;
+        try {
+            claims = JwtUtil.parse(token);
+        } catch (Exception e) {
+            throw new AuthException("令牌无效 (401): " + e.getMessage());
+        }
+        SecurityContext.setCurrentUser(claims);
+        System.out.println("[认证] 当前用户: " + claims);
+
+        // 2. 授权: 检查权限
+        try {
+            if ("deleteUser".equals(action)) {
+                checkPreAuthorize("hasRole('ADMIN')");
+                return controller.deleteUser(id);
+            } else if ("viewProfile".equals(action)) {
+                checkPreAuthorize("hasRole('USER')");
+                return controller.viewProfile(id);
+            }
+            throw new AuthException("未知操作 (404)");
+        } finally {
+            SecurityContext.clear();
+        }
+    }
+
+    private void checkPreAuthorize(String expr) {
+        if (expr.contains("hasRole('ADMIN')") && !SecurityContext.hasRole("ADMIN")) {
+            throw new AuthException("权限不足 (403 Forbidden), 需要 ADMIN 角色");
+        }
+        if (expr.contains("hasRole('USER')") && !SecurityContext.hasRole("USER")
+                && !SecurityContext.hasRole("ADMIN")) {
+            throw new AuthException("权限不足 (403 Forbidden), 需要 USER 角色");
+        }
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 安全与认证: JWT + 授权演示 ===\\n");
+
+        // 1. 生成 JWT
+        System.out.println("--- 1. 用户登录, 生成 JWT ---");
+        Map<String, Object> adminClaims = new LinkedHashMap<>();
+        adminClaims.put("sub", "user42");
+        adminClaims.put("role", "ADMIN");
+        adminClaims.put("exp", System.currentTimeMillis() + 3600000);
+        String adminToken = JwtUtil.generate(adminClaims);
+        System.out.println("Admin JWT: " + adminToken);
+
+        Map<String, Object> userClaims = new LinkedHashMap<>();
+        userClaims.put("sub", "user100");
+        userClaims.put("role", "USER");
+        String userToken = JwtUtil.generate(userClaims);
+        System.out.println("User  JWT: " + userToken);
+
+        // 2. JWT 结构解析
+        System.out.println("\\n--- 2. JWT 三段结构 ---");
+        String[] parts = adminToken.split("\\\\.");
+        System.out.println("Header   : " + parts[0]);
+        System.out.println("Payload  : " + parts[1]);
+        System.out.println("Signature: " + parts[2]);
+        System.out.println("解码 Payload: " + new String(
+            java.util.Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8));
+
+        // 3. Admin 访问 (有权限)
+        SecurityFilter filter = new SecurityFilter();
+        System.out.println("\\n--- 3. Admin 访问 ---");
+        System.out.println("结果: " + filter.handle(adminToken, "deleteUser", 1L));
+        System.out.println("结果: " + filter.handle(adminToken, "viewProfile", 1L));
+
+        // 4. 普通用户访问 (无 admin 权限)
+        System.out.println("\\n--- 4. 普通用户访问 admin 接口 ---");
+        try {
+            filter.handle(userToken, "deleteUser", 1L);
+        } catch (AuthException e) {
+            System.out.println("捕获: " + e.getMessage());
+        }
+        System.out.println("\\n--- 普通用户访问 user 接口 ---");
+        System.out.println("结果: " + filter.handle(userToken, "viewProfile", 1L));
+
+        // 5. 未登录访问
+        System.out.println("\\n--- 5. 未登录访问 ---");
+        try {
+            filter.handle(null, "viewProfile", 1L);
+        } catch (AuthException e) {
+            System.out.println("捕获: " + e.getMessage());
+        }
+
+        // 6. 篡改 JWT (修改 payload 不改签名)
+        System.out.println("\\n--- 6. 篡改 JWT (改 role 为 ADMIN) ---");
+        String[] userParts = userToken.split("\\\\.");
+        String tamperedPayload = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString("{\\"sub\\":\\"user100\\",\\"role\\":\\"ADMIN\\"}".getBytes(StandardCharsets.UTF_8));
+        String tamperedToken = userParts[0] + "." + tamperedPayload + "." + userParts[2];
+        System.out.println("篡改后 token: " + tamperedToken);
+        try {
+            filter.handle(tamperedToken, "deleteUser", 1L);
+        } catch (AuthException e) {
+            System.out.println("捕获: " + e.getMessage());
+            System.out.println("(签名验证失败, 篡改被识破)");
+        }
+
+        System.out.println("\\n=== 安全要点 ===");
+        System.out.println("1. 认证 (AuthN) 验身份, 授权 (AuthZ) 验权限");
+        System.out.println("2. Spring Security: 过滤器链 + SecurityContext");
+        System.out.println("3. JWT = Header.Payload.Signature, 无状态");
+        System.out.println("4. JWT Payload 是 Base64 不是加密, 别放敏感信息");
+        System.out.println("5. 签名防篡改, 密钥必须保密");
+        System.out.println("6. 密码用 BCrypt, 不要 MD5/SHA");
+        System.out.println("7. OAuth2 授权码模式: code + secret 换 token");
+        System.out.println("8. 401 = 没认证, 403 = 认证了但没权限");
+    }
+}`} />
+
+> **What to observe**:
+> - **All three JWT segments can be decoded** — the Payload is Base64, so `role` and similar info are readable; never put a password there.
+> - **Signature verification stops tampering** — changing a USER token to ADMIN makes the signature mismatch, and the forgery is detected.
+> - **401 vs 403** — no token is 401; a valid token but insufficient permission is 403.
+> - **ThreadLocal holds the current user** — `SecurityContext` is set in the Filter and readable anywhere in business code.
+
+## 6. Other Security Essentials
+
+### 6.1 CSRF
+
+CSRF (Cross-Site Request Forgery) — a malicious site abuses the user's Cookie to impersonate the user and send requests. Spring Security enables CSRF Token protection by default. REST APIs using JWT (no Cookie) are naturally CSRF-resistant and can disable it.
+
+### 6.2 XSS
+
+XSS (Cross-Site Scripting) — a malicious script is injected into a page and executed. Defenses:
+
+- Output escaping (Thymeleaf escapes by default).
+- Set `HttpOnly` on cookies (JS cannot read them).
+- Content Security Policy (CSP) headers.
+
+### 6.3 CORS
+
+CORS (Cross-Origin Resource Sharing) — the browser's same-origin policy restricts cross-origin requests. Front-end/back-end separation requires configuration:
+
+```java
+@Bean
+public CorsConfigurationSource corsConfigurationSource() {
+    CorsConfiguration config = new CorsConfiguration();
+    config.setAllowedOrigins(List.of("https://frontend.com"));
+    config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE"));
+    config.setAllowedHeaders(List.of("*"));
+    config.setAllowCredentials(true);
+    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+    source.registerCorsConfiguration("/**", config);
+    return source;
+}
+```
+
+### 6.4 HTTPS
+
+Production requires HTTPS — encrypted transport, defense against man-in-the-middle. Let's Encrypt offers free certificates; just configure SSL in Spring Boot.
+
+## 7. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| Authentication (AuthN) | Verifies identity (who you are) |
+| Authorization (AuthZ) | Verifies permissions (what you can do) |
+| Spring Security | Filter chain + SecurityContext |
+| `@PreAuthorize` | Method-level authorization |
+| BCrypt | The password-hashing standard |
+| JWT | Header.Payload.Signature; stateless |
+| JWT signature | HMAC-SHA256; prevents tampering |
+| OAuth 2.0 | Authorization code flow; code for token |
+| 401 vs 403 | 401 not authenticated; 403 not authorized |
+
+**Memory mnemonics**:
+
+- **Authentication asks "who are you"; authorization asks "what can you do."**
+- **JWT three parts** — Header / Payload / Signature.
+- **Payload holds no secrets** — Base64 can be decoded.
+- **Signature prevents tampering** — keep the key secret.
+- **BCrypt for passwords** — slow hashing resists brute force.
+- **401 not authenticated, 403 not authorized.**
+- **OAuth2 authorization code flow** — code + secret for token.
+
+## Conclusion: Stage 13 Wrap-up
+
+This chapter covered Spring Security, JWT, and OAuth 2.0 — the full landscape of Java Web security. Looking back at Stage 13:
+
+- **Chapter 68, Java Web Fundamentals** — HTTP, Servlet, Session, Tomcat.
+- **Chapter 69, Spring Core** — IoC, DI, AOP, transactions.
+- **Chapter 70, Spring Boot** — auto-configuration, REST API, virtual threads, Actuator.
+- **Chapter 71, The Data Access Layer** — MyBatis, MyBatis-Plus, JPA, Flyway.
+- **Chapter 72, Security and Authentication (this chapter)** — Spring Security, JWT, OAuth 2.0.
+
+These five chapters let you build a complete web application — from HTTP intake to business logic to data storage to security authentication. The next stage moves into more advanced topics — **design patterns, data structures and algorithms, Redis, message queues, microservices, Docker** — upgrading a monolith into a distributed system.

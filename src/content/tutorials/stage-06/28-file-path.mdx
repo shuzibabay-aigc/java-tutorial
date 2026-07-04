@@ -1,0 +1,354 @@
+---
+title: "File 与 Path"
+chapter: 28
+stage: "第六阶段"
+stageName: "I/O 与 NIO"
+order: 1
+description: "理解旧 File 类的缺陷，掌握 NIO.2 的 Path 路径操作、Files 工具类的文件创建/删除/复制/移动，以及目录遍历的 Stream 形式"
+pubDate: 2026-07-03
+tags: ["Java", "IO", "File", "Path", "NIO.2", "Files"]
+---
+
+# File 与 Path
+
+文件，是数据的归宿。程序运行时的一切——变量、对象、集合——都活在内存里，断电即逝。唯有落到文件里，数据才能跨越时间（下次启动还在）和空间（传给另一台机器）。Java 从诞生之初就提供了 `File` 类来操作文件，但它在二十年后被 NIO.2 的 `Path` 与 `Files` 取代——这是一次"从简陋到优雅"的进化。
+
+这一章，我们先看旧 `File` 类为何"不够好"，再看 `Path` 与 `Files` 如何把文件操作重塑成流畅的现代 API。
+
+## 一、旧 File 类的问题
+
+`java.io.File` 自 JDK 1.0 就存在，是一个"老前辈"。它代表文件或目录路径名，提供创建、删除、查询等方法。看起来够用，实际藏着不少坑。
+
+### 1.1 跨平台路径问题
+
+`File` 强依赖平台分隔符——Windows 用 `\`，Unix 用 `/`：
+
+```java
+// Windows 上能跑，Linux 上路径就乱了
+File f = new File("C:\\Users\\alice\\data.txt");
+
+// 跨平台写法得手动拼
+File f2 = new File("data" + File.separator + "data.txt");
+```
+
+这种"硬编码反斜杠"的代码在跨平台部署时常常踩坑。
+
+### 1.2 API 设计缺陷
+
+`File` 类的方法命名粗糙、语义模糊：
+
+```java
+File f = new File("/tmp/data.txt");
+f.delete();          // 返回 boolean，失败不抛异常——你不知道为啥失败
+f.mkdir();           // 只创建一级目录
+f.mkdirs();          // 创建多级目录——方法名差一个 s 语义大不同
+f.renameTo(new File("/tmp/data.bak"));  // 返回 boolean，跨盘符失败也不吭声
+System.out.println(f.length());  // 文件不存在时返回 0，和"空文件"无法区分
+```
+
+更致命的是：**几乎所有方法失败都返回 `false` 而不抛异常**——你无从知道是权限不足、路径不存在，还是被占用。调试这种代码让人抓狂。
+
+### 1.3 功能单一
+
+`File` 不支持符号链接、文件属性（权限、所有者）、目录监视等高级操作。要做这些得调 `Runtime.exec` 跑 shell 命令——又脏又脆。
+
+## 二、Path：NIO.2 的路径抽象
+
+Java 7 引入 NIO.2（JSR 203），带来 `java.nio.file.Path` 接口与 `Files` 工具类，彻底替代 `File`。`Path` 的设计哲学是：**路径只是字符串语义的抽象，与具体文件系统解耦**。
+
+### 2.1 创建 Path
+
+`Path` 是接口，通过 `Paths.get()` 工厂方法创建（Java 11+ 也可用 `Path.of()`）：
+
+```java
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+Path p1 = Paths.get("data.txt");                  // 相对路径
+Path p2 = Paths.get("/home", "alice", "data.txt"); // 多段拼接
+Path p3 = Path.of("/var/log/app.log");             // Java 11+
+
+System.out.println(p2);   // /home/alice/data.txt
+```
+
+`Paths.get()` 接受可变参数，自动用平台分隔符拼接——跨平台问题从源头解决。
+
+### 2.2 路径的"零件"
+
+`Path` 提供了一组清晰的方法来拆解路径：
+
+```java
+Path p = Paths.get("/home/alice/docs/report.pdf");
+
+System.out.println(p.getFileName());    // report.pdf     —— 文件名
+System.out.println(p.getParent());      // /home/alice/docs —— 父路径
+System.out.println(p.getRoot());        // /              —— 根路径
+System.out.println(p.getNameCount());   // 4              —— 段数
+System.out.println(p.getName(0));       // home           —— 第 i 段
+System.out.println(p.subpath(0, 2));    // home/alice     —— 子路径（不含根）
+```
+
+这套 API 直白得像在描述路径的"解剖图"。
+
+### 2.3 路径组合
+
+路径操作是 `Path` 的精华——`resolve`、`resolveSibling`、`relativize`、`normalize` 四个方法覆盖了 90% 的路径拼接需求。
+
+**resolve**：把两个路径拼起来，相当于"基于当前路径找子项"。
+
+```java
+Path base = Paths.get("/home/alice");
+Path full = base.resolve("docs/report.pdf");
+// /home/alice/docs/report.pdf
+
+// 若参数是绝对路径，直接返回参数
+Path abs = base.resolve("/etc/hosts");
+// /etc/hosts
+```
+
+**resolveSibling**：把当前路径的"兄弟"路径替换——常用于"换个扩展名"：
+
+```java
+Path p = Paths.get("/data/report.pdf");
+Path bak = p.resolveSibling("report.bak");
+// /data/report.bak
+```
+
+**relativize**：算出从 A 到 B 的相对路径：
+
+```java
+Path a = Paths.get("/home/alice");
+Path b = Paths.get("/home/bob/docs");
+Path r = a.relativize(b);
+// ../bob/docs
+```
+
+**normalize**：消除 `.`（当前目录）和 `..`（上级目录）：
+
+```java
+Path messy = Paths.get("/home/alice/../bob/./docs");
+Path clean = messy.normalize();
+// /home/bob/docs
+```
+
+这四个方法让路径操作变得"像做数学题一样精确"。
+
+## 三、Files 工具类：文件操作全家桶
+
+`Files` 是 NIO.2 的明星——一个类覆盖了几乎所有文件操作。它和 `Path` 配合使用：`Path` 描述"在哪里"，`Files` 执行"做什么"。
+
+### 3.1 创建与删除
+
+```java
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+Path file = Paths.get("/tmp/test.txt");
+Path dir = Paths.get("/tmp/myapp");
+
+Files.createFile(file);            // 创建空文件（已存在则抛 FileAlreadyExistsException）
+Files.createDirectory(dir);        // 创建单级目录
+Files.createDirectories(dir);      // 创建多级目录（不存在的中转目录都建上）
+Files.delete(file);                // 删除，不存在则抛 NoSuchFileException
+Files.deleteIfExists(file);        // 不存在也不报错（推荐）
+```
+
+注意区别——`createDirectory` 只建一级，父目录不存在就抛异常；`createDirectories` 像 `mkdir -p`，建整条链。
+
+### 3.2 复制与移动
+
+```java
+Path src = Paths.get("/tmp/a.txt");
+Path dst = Paths.get("/tmp/b.txt");
+
+Files.copy(src, dst);                       // 复制，目标存在则抛异常
+Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING);  // 覆盖
+Files.move(src, dst, StandardCopyOption.ATOMIC_MOVE);       // 原子移动
+```
+
+`StandardCopyOption` 是个枚举，提供 `REPLACE_EXISTING`（覆盖）、`COPY_ATTRIBUTES`（拷贝属性）、`ATOMIC_MOVE`（原子移动，跨文件系统可能失败）等选项。
+
+### 3.3 查询文件属性
+
+```java
+Path p = Paths.get("/etc/hosts");
+
+Files.exists(p);              // 是否存在
+Files.notExists(p);           // 是否不存在（与 exists 略不同：无权限时都返回 false）
+Files.isDirectory(p);         // 是否目录
+Files.isRegularFile(p);       // 是否普通文件
+Files.isReadable(p);          // 是否可读
+Files.isWritable(p);          // 是否可写
+Files.size(p);                // 字节数
+```
+
+**一次性读所有属性**用 `readAttributes`：
+
+```java
+import java.nio.file.attribute.BasicFileAttributes;
+
+BasicFileAttributes attrs = Files.readAttributes(p, BasicFileAttributes.class);
+System.out.println(attrs.size());
+System.out.println(attrs.creationTime());
+System.out.println(attrs.lastModifiedTime());
+System.out.println(attrs.lastAccessTime());
+```
+
+`BasicFileAttributes` 是个一次性快照，比逐个查询高效得多。
+
+## 四、目录遍历：Stream 形式
+
+NIO.2 的目录遍历是个惊喜——返回 `Stream＜Path＞`，可以接上函数式管道：
+
+### 4.1 list：列当前目录
+
+```java
+Path dir = Paths.get("/tmp");
+try (Stream<Path> stream = Files.list(dir)) {
+    stream.filter(Files::isRegularFile)
+          .forEach(System.out::println);
+}
+```
+
+`Files.list` 只列**直接子项**（不递归），返回的 `Stream` 持有目录句柄，必须用 try-with-resources 关闭。
+
+### 4.2 walk：深度遍历
+
+```java
+try (Stream<Path> stream = Files.walk(dir, 3)) {   // 最多 3 层
+    stream.filter(Files::isRegularFile)
+          .filter(p -> p.toString().endsWith(".java"))
+          .forEach(System.out::println);
+}
+```
+
+`Files.walk` 递归遍历整棵子树，第二个参数是最大深度（默认 `Integer.MAX_VALUE`）。
+
+### 4.3 find：边遍历边过滤
+
+```java
+try (Stream<Path> stream = Files.find(dir, Integer.MAX_VALUE,
+        (path, attrs) -> attrs.isRegularFile() && attrs.size() > 1024)) {
+    stream.forEach(System.out::println);
+}
+```
+
+`find` 接受一个 `BiPredicate＜Path, BasicFileAttributes＞`——遍历时已经拿到了属性，不必再 `Files.size` 二次查询，更高效。
+
+## 五、实战：递归遍历目录树并统计
+
+下面这个例子综合运用 `walk`、`Files.size`、属性查询，统计一个目录下所有 `.java` 文件的数量与总大小：
+
+<CodeRunner code={`import java.io.IOException;
+import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class Main {
+    public static void main(String[] args) throws IOException {
+        // 在工作目录下造一些示例文件，方便演示
+        Path demo = Paths.get("demo-stats");
+        Files.createDirectories(demo.resolve("a/b"));
+        Files.writeString(demo.resolve("A.java"), "public class A {}");
+        Files.writeString(demo.resolve("a/B.java"), "public class B {}");
+        Files.writeString(demo.resolve("a/b/C.java"), "public class C {}");
+        Files.writeString(demo.resolve("readme.txt"), "hello");
+
+        // 用 walk 遍历，统计 .java 文件
+        AtomicLong totalSize = new AtomicLong();
+        AtomicLong count = new AtomicLong();
+
+        try (var stream = Files.walk(demo)) {
+            stream.filter(Files::isRegularFile)
+                  .filter(p -> p.toString().endsWith(".java"))
+                  .forEach(p -> {
+                      try {
+                          long size = Files.size(p);
+                          totalSize.addAndGet(size);
+                          count.incrementAndGet();
+                          System.out.println("发现: " + p + " (" + size + " 字节)");
+                      } catch (IOException e) {
+                          throw new UncheckedIOException(e);
+                      }
+                  });
+        }
+
+        System.out.println("\\n--- 统计结果 ---");
+        System.out.println(".java 文件数: " + count.get());
+        System.out.println("总字节数: " + totalSize.get());
+
+        // 用 find 边遍历边过滤（更高效）
+        System.out.println("\\n--- 用 find 找大于 15 字节的文件 ---");
+        try (var stream = Files.find(demo, Integer.MAX_VALUE,
+                (path, attrs) -> attrs.isRegularFile() && attrs.size() > 15)) {
+            stream.forEach(p -> {
+                try {
+                    System.out.println(p + " -> " + Files.size(p) + " 字节");
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+        }
+
+        // 清理
+        deleteRecursively(demo);
+        System.out.println("\\n清理完毕");
+    }
+
+    // 递归删除目录（Files.walk 逆序）
+    static void deleteRecursively(Path root) throws IOException {
+        if (!Files.exists(root)) return;
+        try (var stream = Files.walk(root)) {
+            stream.sorted(java.util.Comparator.reverseOrder())
+                  .forEach(p -> {
+                      try { Files.deleteIfExists(p); }
+                      catch (IOException e) { throw new UncheckedIOException(e); }
+                  });
+        }
+    }
+}`} />
+
+> 关键点：`Files.walk` 返回的路径是"先根后子"的顺序，删除时要 `reverseOrder()` 反过来——先删子项再删父项，否则非空目录删不掉。
+
+## 六、File 与 Path 互转
+
+旧代码里到处是 `File`，新代码用 `Path`——两者要能互转才行：
+
+```java
+File file = new File("/tmp/data.txt");
+Path path = file.toPath();        // File -> Path
+
+File back = path.toFile();        // Path -> File
+```
+
+迁移建议：新代码一律用 `Path` + `Files`，老代码逐步替换。`File` 在新项目中已经没有理由再用了。
+
+## 七、本章速查表
+
+| 操作 | Path/Files 写法 | 旧 File 写法 |
+| --- | --- | --- |
+| 创建路径 | `Paths.get("a","b")` | `new File("a/b")` |
+| 路径拼接 | `base.resolve("c")` | `new File(base, "c")` |
+| 兄弟路径 | `p.resolveSibling("x")` | （要手动拼） |
+| 标准化 | `p.normalize()` | `f.getCanonicalFile()` |
+| 创建文件 | `Files.createFile(p)` | `f.createNewFile()` |
+| 创建多级目录 | `Files.createDirectories(p)` | `f.mkdirs()` |
+| 删除 | `Files.delete(p)` 抛异常 | `f.delete()` 返回 boolean |
+| 复制 | `Files.copy(src, dst)` | （要手动读写字节流） |
+| 移动 | `Files.move(src, dst)` | `f.renameTo(dst)` |
+| 是否存在 | `Files.exists(p)` | `f.exists()` |
+| 字节数 | `Files.size(p)` | `f.length()` |
+| 遍历 | `Files.walk(p)` 返回 Stream | `f.listFiles()` 返回数组 |
+
+## 结语：从简陋到优雅
+
+旧 `File` 类像一把生锈的瑞士军刀——什么都能凑合干，但每件事都干得别扭。NIO.2 的 `Path` 与 `Files` 是一次彻底的重塑：
+
+- **`Path`** 把"路径"抽象成可计算的对象——`resolve`、`relativize`、`normalize` 让路径运算像数学公式一样精确。
+- **`Files`** 把"文件操作"统一成一个工具类——创建、复制、移动、查询、遍历，方法名清晰，失败抛异常，再不会"哑巴失败"。
+- **Stream 形式的遍历** 让目录操作接入了函数式管道——`Files.walk(dir).filter(...).map(...).collect(...)`，行云流水。
+
+掌握了 `Path` 与 `Files`，你写文件相关代码的体验会从"小心翼翼、查文档、踩坑"变成"一气呵成、读起来像散文"。这是 NIO.2 给 Java 文件 IO 带来的真正礼物——不是更多功能，而是更好的设计。
+
+下一章我们将走进字节流的世界——`InputStream` 与 `OutputStream`，那是 Java IO 最底层、也最经典的抽象。

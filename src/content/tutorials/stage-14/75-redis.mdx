@@ -1,0 +1,560 @@
+---
+title: "Redis"
+chapter: 75
+stage: "第十四阶段"
+stageName: "高级专题与分布式"
+order: 3
+description: "掌握 Redis 五大数据类型与命令、RDB/AOF 持久化、缓存穿透/击穿/雪崩三大问题、SETNX/Redisson 分布式锁、Lettuce/Jedis 客户端使用"
+pubDate: 2026-07-03
+tags: ["Java", "Redis", "缓存", "分布式锁", "Lettuce", "Jedis", "Redisson"]
+---
+
+# Redis
+
+数据库像一位严谨的图书管理员——每次查询都要翻目录、找书架、取书、登记，慢条斯理但绝对可靠。而 Redis（Remote Dictionary Server）更像你桌边那个永远敞开的抽屉——随手一抓就是你要的东西，快得让人怀疑人生。
+
+它快到什么程度？单机 QPS 轻松突破 10 万，所有数据都躺在内存里，读写以微秒计。2009 年意大利程序员 Salvatore Sanfilippo（网名 antirez）为了自己的项目，造了这么一个"内存数据库"。十几年过去，Redis 成了后端工程师的标配武器——缓存、队列、计数器、排行榜、分布式锁，处处是它的身影。
+
+这一章我们看 Redis 的五大数据类型、两种持久化、缓存三大问题、分布式锁，以及 Java 怎么和 Redis 对话。
+
+## 一、为什么需要 Redis
+
+数据库（MySQL/PostgreSQL）把数据存磁盘上——可靠，但慢。一次磁盘 I/O 要几毫秒，而内存访问只要几十纳秒，相差五位数。当你的系统读多写少（比如商品详情页、热门文章），每次都查数据库就是浪费。
+
+**缓存（Cache）** 的思路很简单——把热点数据放内存，读时先查内存，命中就直接返回，没命中再查数据库并写回内存。Redis 就是这个"内存层"的事实标准。
+
+Redis 不只是缓存——它的数据类型丰富，能干很多事：
+
+| 场景 | 用什么 |
+| --- | --- |
+| 缓存热点数据 | String |
+| 排行榜 | ZSet（有序集合） |
+| 点赞/关注 | Set |
+| 购物车 | Hash |
+| 消息队列（轻量） | List |
+| 限流 | ZSet / List |
+| 分布式锁 | String + SETNX |
+| 地理位置 | Geo |
+| 统计 UV | HyperLogLog |
+
+## 二、五大数据类型
+
+Redis 的"数据类型"不是指 int/float 这种——而是指 value 的存储结构。所有 key 都是字符串，value 有五种基本类型。
+
+### 2.1 String：最基础的键值对
+
+```bash
+SET name "redis"        # 设置
+GET name                # 读取, 返回 "redis"
+INCR counter            # 自增 (原子操作)
+EXPIRE name 60          # 60 秒后过期
+SET token "abc" EX 60   # 设置并指定过期 (EX 秒)
+```
+
+String 能存字符串、数字、甚至二进制（图片）。最大 512MB。
+
+### 2.2 List：有序列表
+
+```bash
+LPUSH queue "a" "b"     # 左侧插入
+RPUSH queue "c"         # 右侧插入
+LRANGE queue 0 -1       # 查看全部
+LPOP queue              # 左侧弹出
+```
+
+List 是双向链表，头尾操作都是 O(1)。常用来做队列。
+
+### 2.3 Hash：字段-值表
+
+```bash
+HSET user:1 name "Tom" age 18    # 设置字段
+HGET user:1 name                 # 读单个字段
+HGETALL user:1                   # 读所有字段
+HINCRBY user:1 age 1             # 字段自增
+```
+
+Hash 适合存对象——比把对象序列化成 String 更灵活，改单个字段不用整体重写。
+
+### 2.4 Set：无序集合
+
+```bash
+SADD tags "java" "redis"         # 添加元素
+SMEMBERS tags                    # 查看全部
+SISMEMBER tags "java"            # 判断是否成员
+SINTER set1 set2                 # 交集
+SUNION set1 set2                 # 并集
+```
+
+Set 元素唯一，常用来做标签、去重、共同好友。
+
+### 2.5 ZSet：有序集合
+
+```bash
+ZADD rank 100 "alice" 90 "bob"   # 添加带分数的成员
+ZRANGE rank 0 2                  # 按分数升序取前 3
+ZREVRANGE rank 0 2               # 降序取前 3 (排行榜)
+ZINCRBY rank 5 "alice"           # 增加分数
+```
+
+ZSet（Sorted Set）是 Redis 的"杀手锏"——每个元素带一个分数，按分数排序。排行榜就靠它。
+
+## 三、持久化：内存数据的安全网
+
+Redis 数据在内存里——重启就没了。为了不丢数据，Redis 提供两种持久化方案。
+
+### 3.1 RDB（Redis Database）
+
+**RDB** 是某一时刻的内存快照——把所有数据写入一个 `.rdb` 文件。
+
+- **触发方式**——手动 `SAVE`/`BGSAVE`，或配置 `save 900 1`（900 秒内 1 次修改就触发）。
+- **优点**——文件小，恢复快，适合做备份。
+- **缺点**——两次快照之间的数据可能丢失。
+
+### 3.2 AOF（Append Only File）
+
+**AOF** 把每条写命令追加到日志文件——像数据库的 binlog。
+
+- **触发策略**——`appendfsync always`（每次写都同步，最安全最慢）/ `everysec`（每秒同步，默认，最多丢 1 秒）/ `no`（交给操作系统）。
+- **优点**——数据丢失少（最差 1 秒）。
+- **缺点**——文件大，恢复慢。
+
+### 3.3 混合持久化（Redis 4.0+）
+
+实际生产环境常用**混合模式**——AOF 文件前半段是 RDB 二进制快照，后半段是增量的 AOF 命令。兼顾恢复速度和数据安全。
+
+## 四、缓存三大问题
+
+缓存用不好会出事。三个经典坑——穿透、击穿、雪崩。
+
+### 4.1 缓存穿透
+
+**穿透**——查询一个**根本不存在**的数据，缓存里没有，数据库里也没有。每次请求都打到数据库。恶意攻击常用这招——用不存在的 ID 疯狂查询。
+
+**解法**：
+1. **缓存空值**——数据库查不到，也缓存一个 `null`（带短过期）。
+2. **布隆过滤器（Bloom Filter）**——在缓存前加一层布隆过滤器，快速判断 key 是否"可能存在"。不存在直接返回。
+
+### 4.2 缓存击穿
+
+**击穿**——某个**热点 key** 突然过期，瞬间大量请求同时打到数据库。比如秒杀商品的库存 key 过期了。
+
+**解法**：
+1. **互斥锁**——只让一个线程查数据库，其他线程等结果。
+2. **热点 key 永不过期**——后台异步更新缓存。
+
+### 4.3 缓存雪崩
+
+**雪崩**——**大量 key 同时过期**，或 Redis 宕机，所有请求涌向数据库。
+
+**解法**：
+1. **过期时间加随机数**——`expire = base + random(60)`，避免同时过期。
+2. **多级缓存**——本地缓存（Caffeine）+ Redis，Redis 挂了本地还能顶一会。
+3. **Redis 集群 + 限流降级**——保证 Redis 高可用，数据库加限流保护。
+
+## 五、分布式锁
+
+单机环境下，Java 有 `synchronized` 和 `ReentrantLock`。但分布式系统有多个 JVM，这两个都失效了——需要**分布式锁**。
+
+### 5.1 SETNX 的简单实现
+
+最朴素的分布式锁——用 `SET key value NX EX timeout`：
+
+- `NX`——key 不存在才设置（互斥）。
+- `EX timeout`——设置过期时间，防止持锁进程崩溃导致锁永不释放。
+
+```java
+String lockValue = UUID.randomUUID().toString();
+// 抢锁: NX (不存在才设) + EX (30 秒过期)
+boolean locked = redis.set("lock:order:123", lockValue, "NX", "EX", 30);
+
+if (locked) {
+    try {
+        // 业务逻辑
+    } finally {
+        // 释放锁: 必须验证值, 不能误删别人的锁
+        String script =
+            "if redis.call('get', KEYS[1]) == ARGV[1] then " +
+            "  return redis.call('del', KEYS[1]) " +
+            "else return 0 end";
+        redis.eval(script, Collections.singletonList("lock:order:123"),
+                   Collections.singletonList(lockValue));
+    }
+}
+```
+
+为什么释放锁要用 Lua 脚本？因为"判断值 + 删除"必须是**原子**的——否则判断完准备删时锁过期了，别人抢到了锁，你这一删就把别人的锁删了。
+
+### 5.2 Redisson：生产级方案
+
+SETNX 方案有个问题——业务执行超过锁过期时间，锁被别人抢了，自己却以为还持锁。**Redisson** 用**看门狗（Watchdog）** 解决——后台线程定期给锁续期。
+
+```java
+// Redisson 客户端
+Config config = new Config();
+config.useSingleServer().setAddress("redis://localhost:6379");
+RedissonClient redisson = Redisson.create(config);
+
+RLock lock = redisson.getLock("lock:order:123");
+lock.lock();   // 加锁, 看门狗自动续期
+try {
+    // 业务逻辑
+} finally {
+    lock.unlock();
+}
+```
+
+Redisson 还支持**可重入**、**公平锁**、**读写锁**、**红锁（RedLock，多节点容错）**——生产环境首选。
+
+## 六、Java 客户端：Lettuce 与 Jedis
+
+Java 连 Redis 有两大客户端——**Jedis** 和 **Lettuce**。
+
+### 6.1 Jedis
+
+Jedis 是老牌客户端，API 简单直观，但**非线程安全**——多线程要靠连接池（JedisPool）。
+
+```java
+JedisPool pool = new JedisPool("localhost", 6379);
+try (Jedis jedis = pool.getResource()) {
+    jedis.set("name", "redis");
+    String value = jedis.get("name");
+    jedis.incr("counter");
+}
+```
+
+### 6.2 Lettuce
+
+Lettuce 是新一代客户端——**线程安全**，基于 Netty 异步，支持响应式。Spring Boot 2.x 起默认用 Lettuce。
+
+```java
+RedisClient client = RedisClient.create("redis://localhost:6379");
+StatefulRedisConnection<String, String> conn = client.connect();
+RedisCommands<String, String> sync = conn.sync();
+
+sync.set("name", "redis");
+String value = sync.get("name");
+
+// 异步 API
+RedisAsyncCommands<String, String> async = conn.async();
+async.set("counter", "1");
+
+conn.close();
+client.shutdown();
+```
+
+### 6.3 Spring Boot 整合
+
+Spring Boot 用 `spring-boot-starter-data-redis`，封装了 `RedisTemplate`：
+
+```java
+@Service
+public class UserService {
+    @Autowired
+    private RedisTemplate<String, Object> redis;
+
+    public User getUser(Long id) {
+        String key = "user:" + id;
+        User user = (User) redis.opsForValue().get(key);
+        if (user != null) return user;   // 缓存命中
+
+        user = userMapper.selectById(id); // 查数据库
+        redis.opsForValue().set(key, user, 60, TimeUnit.MINUTES);
+        return user;
+    }
+}
+```
+
+## 七、实战：用 Java SE 模拟 Redis
+
+Piston 在线环境跑不了 Redis 服务器，我们用 Java SE 模拟 Redis 的核心数据结构——String/List/Hash/Set/ZSet 五大类型，演示各自的操作。同时模拟缓存穿透、缓存击穿、互斥锁的解决思路。
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+// 一个迷你 Redis: 用 Java SE 模拟五大数据类型
+class MiniRedis {
+    // String 类型: 简单 key-value
+    private final Map<String, String> strings = new ConcurrentHashMap<>();
+    // List 类型: 双向链表 (用 LinkedList 模拟)
+    private final Map<String, LinkedList<String>> lists = new ConcurrentHashMap<>();
+    // Hash 类型: 字段-值
+    private final Map<String, Map<String, String>> hashes = new ConcurrentHashMap<>();
+    // Set 类型: 无序集合
+    private final Map<String, Set<String>> sets = new ConcurrentHashMap<>();
+    // ZSet 类型: 有序集合 (用 TreeMap 按分数排序)
+    private final Map<String, TreeMap<Double, String>> zsets = new ConcurrentHashMap<>();
+    // 过期时间: key -> 过期时间戳(毫秒)
+    private final Map<String, Long> expireMap = new ConcurrentHashMap<>();
+
+    // === String ===
+    public String set(String key, String value) {
+        strings.put(key, value);
+        return "OK";
+    }
+    public String set(String key, String value, int expireSeconds) {
+        strings.put(key, value);
+        expireMap.put(key, System.currentTimeMillis() + expireSeconds * 1000L);
+        return "OK";
+    }
+    public String get(String key) {
+        if (isExpired(key)) return null;
+        return strings.get(key);
+    }
+    public long incr(String key) {
+        long v = Long.parseLong(strings.getOrDefault(key, "0")) + 1;
+        strings.put(key, String.valueOf(v));
+        return v;
+    }
+    // SETNX: 不存在才设置 (分布式锁基础)
+    public boolean setNx(String key, String value, int expireSeconds) {
+        if (strings.containsKey(key) && !isExpired(key)) return false;
+        strings.put(key, value);
+        expireMap.put(key, System.currentTimeMillis() + expireSeconds * 1000L);
+        return true;
+    }
+    public boolean del(String key) {
+        boolean r = strings.remove(key) != null;
+        expireMap.remove(key);
+        return r;
+    }
+
+    // === List ===
+    public long lPush(String key, String... values) {
+        LinkedList<String> list = lists.computeIfAbsent(key, k -> new LinkedList<>());
+        for (String v : values) list.addFirst(v);
+        return list.size();
+    }
+    public List<String> lRange(String key, int start, int end) {
+        LinkedList<String> list = lists.get(key);
+        if (list == null) return Collections.emptyList();
+        if (end == -1) end = list.size() - 1;
+        return new ArrayList<>(list.subList(start, Math.min(end + 1, list.size())));
+    }
+
+    // === Hash ===
+    public long hSet(String key, String field, String value) {
+        Map<String, String> hash = hashes.computeIfAbsent(key, k -> new HashMap<>());
+        hash.put(field, value);
+        return 1;
+    }
+    public String hGet(String key, String field) {
+        Map<String, String> hash = hashes.get(key);
+        return hash == null ? null : hash.get(field);
+    }
+    public Map<String, String> hGetAll(String key) {
+        return hashes.getOrDefault(key, Collections.emptyMap());
+    }
+
+    // === Set ===
+    public long sAdd(String key, String... members) {
+        Set<String> set = sets.computeIfAbsent(key, k -> new HashSet<>());
+        long added = 0;
+        for (String m : members) if (set.add(m)) added++;
+        return added;
+    }
+    public Set<String> sMembers(String key) {
+        return sets.getOrDefault(key, Collections.emptySet());
+    }
+    public boolean sIsMember(String key, String member) {
+        return sets.getOrDefault(key, Collections.emptySet()).contains(member);
+    }
+
+    // === ZSet (排行榜) ===
+    public long zAdd(String key, double score, String member) {
+        TreeMap<Double, String> zset = zsets.computeIfAbsent(key, k -> new TreeMap<>(Collections.reverseOrder()));
+        // 简化: 移除旧的同名成员
+        zset.values().removeIf(v -> v.equals(member));
+        zset.put(score, member);
+        return 1;
+    }
+    // 按分数降序取前 n 名
+    public List<String> zRevRange(String key, int n) {
+        TreeMap<Double, String> zset = zsets.get(key);
+        if (zset == null) return Collections.emptyList();
+        List<String> r = new ArrayList<>();
+        int i = 0;
+        for (String m : zset.values()) {
+            if (i++ >= n) break;
+            r.add(m);
+        }
+        return r;
+    }
+
+    private boolean isExpired(String key) {
+        Long exp = expireMap.get(key);
+        if (exp == null) return false;
+        if (System.currentTimeMillis() > exp) {
+            strings.remove(key);
+            expireMap.remove(key);
+            return true;
+        }
+        return false;
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Redis 五大数据类型模拟 ===\\n");
+        MiniRedis redis = new MiniRedis();
+
+        // 1. String
+        System.out.println("--- 1. String 类型 ---");
+        redis.set("name", "redis");
+        System.out.println("SET name redis -> " + redis.get("name"));
+        System.out.println("INCR counter 3 次:");
+        for (int i = 0; i < 3; i++) System.out.println("  " + redis.incr("counter"));
+        redis.set("token", "abc", 1);   // 1 秒过期
+        System.out.println("token 立即查: " + redis.get("token"));
+        Thread.sleep(1100);
+        System.out.println("token 1.1 秒后查: " + redis.get("token") + " (已过期)");
+
+        // 2. List
+        System.out.println("\\n--- 2. List 类型 ---");
+        redis.lPush("queue", "a", "b", "c");
+        System.out.println("LPUSH queue a b c");
+        System.out.println("LRANGE queue 0 -1: " + redis.lRange("queue", 0, -1));
+
+        // 3. Hash
+        System.out.println("\\n--- 3. Hash 类型 (存对象) ---");
+        redis.hSet("user:1", "name", "Tom");
+        redis.hSet("user:1", "age", "18");
+        System.out.println("HGETALL user:1: " + redis.hGetAll("user:1"));
+
+        // 4. Set
+        System.out.println("\\n--- 4. Set 类型 (标签) ---");
+        redis.sAdd("tags", "java", "redis", "mysql");
+        System.out.println("SMEMBERS tags: " + redis.sMembers("tags"));
+        System.out.println("SISMEMBER tags java: " + redis.sIsMember("tags", "java"));
+        System.out.println("SISMEMBER tags python: " + redis.sIsMember("tags", "python"));
+
+        // 5. ZSet (排行榜)
+        System.out.println("\\n--- 5. ZSet 类型 (排行榜) ---");
+        redis.zAdd("rank", 100, "alice");
+        redis.zAdd("rank", 90, "bob");
+        redis.zAdd("rank", 95, "carol");
+        System.out.println("排行榜前 3 名: " + redis.zRevRange("rank", 3));
+
+        // 6. 分布式锁模拟
+        System.out.println("\\n--- 6. 分布式锁 (SETNX) ---");
+        boolean locked1 = redis.setNx("lock:order", "uuid-1", 10);
+        System.out.println("线程 A 抢锁: " + locked1);
+        boolean locked2 = redis.setNx("lock:order", "uuid-2", 10);
+        System.out.println("线程 B 抢锁: " + locked2 + " (失败, 锁已被占)");
+        redis.del("lock:order");
+        boolean locked3 = redis.setNx("lock:order", "uuid-2", 10);
+        System.out.println("线程 A 释放后, 线程 B 再抢: " + locked3);
+
+        // 7. 缓存穿透模拟
+        System.out.println("\\n--- 7. 缓存穿透防护 (缓存空值) ---");
+        String userId = "user:999";   // 不存在的用户
+        String cached = redis.get(userId);
+        if (cached == null) {
+            System.out.println("缓存未命中, 查数据库...");
+            String dbResult = null;   // 数据库也没有
+            // 缓存空值, 短过期, 防止穿透
+            redis.set(userId, "NULL", 60);
+            cached = "NULL";
+            System.out.println("数据库无结果, 缓存空值");
+        }
+        System.out.println("再次查询直接返回: " + redis.get(userId) + " (命中, 不打数据库)");
+
+        // 8. 缓存击穿防护 (互斥锁)
+        System.out.println("\\n--- 8. 缓存击穿防护 (互斥锁重建缓存) ---");
+        String hotKey = "hot:product";
+        // 模拟热点 key 过期
+        if (redis.get(hotKey) == null) {
+            System.out.println("热点 key 过期, 用 SETNX 互斥锁重建");
+            if (redis.setNx("lock:" + hotKey, "rebuild", 10)) {
+                try {
+                    System.out.println("抢到锁, 查数据库重建缓存...");
+                    redis.set(hotKey, "product-data", 30);
+                    System.out.println("缓存重建完成");
+                } finally {
+                    redis.del("lock:" + hotKey);
+                }
+            } else {
+                System.out.println("抢锁失败, 等待其他线程重建 (实际会 sleep 重试)");
+            }
+        }
+    }
+}`} />
+
+> **观察重点**：String 的 `INCR` 是原子自增，并发安全；`SETNX` 是分布式锁的基石——返回 `true` 表示抢锁成功；缓存空值能挡住对不存在 key 的反复查询；互斥锁重建避免缓存击穿时数据库被压垮。
+
+## 八、缓存一致性：数据库与缓存谁先更新
+
+缓存引入一个新问题——**数据一致性**。数据库更新了，缓存怎么办？
+
+### 8.1 Cache Aside（旁路缓存）
+
+最常用的模式——读时查缓存，没命中查数据库并写回；写时**更新数据库 + 删除缓存**。
+
+```java
+public User getUser(Long id) {
+    User user = redis.get("user:" + id);
+    if (user == null) {
+        user = db.selectById(id);
+        redis.set("user:" + id, user);   // 回填缓存
+    }
+    return user;
+}
+
+public void updateUser(User user) {
+    db.update(user);
+    redis.del("user:" + user.getId());   // 删除缓存 (不是更新)
+}
+```
+
+为什么是**删除**缓存而不是**更新**缓存？
+1. 避免并发更新导致数据错乱。
+2. 有些缓存值计算复杂，更新一次成本高，不如用时再算。
+
+### 8.2 延迟双删
+
+更新数据库后删缓存，但删完缓存到数据库提交之间可能有旧读请求又把旧数据写回缓存。**延迟双删**——先删缓存，更新数据库，延迟一段时间再删一次缓存。
+
+```java
+redis.del(key);          // 第一次删
+db.update(user);         // 更新数据库
+scheduleDeleteAfter(key, 500);   // 500ms 后再删一次
+```
+
+## 九、Redis 的局限与替代品
+
+Redis 不是银弹——它也有局限：
+- **内存成本高**——比磁盘贵几十倍，不适合存全量数据。
+- **重启数据可能丢失**——AOF 也最多保证不丢 1 秒。
+- **单线程模型**——CPU 密集计算会阻塞（Redis 6 起网络 I/O 多线程，命令执行仍单线程）。
+
+某些场景的替代品：
+- **大容量缓存**——Memcached（更简单，多线程）。
+- **需要事务/复杂查询**——用关系数据库的内存表。
+- **本地缓存**——Caffeine / Guava Cache（无网络开销，但数据不共享）。
+
+## 十、本章小结
+
+| 知识点 | 要点 |
+| --- | --- |
+| 五大数据类型 | String / List / Hash / Set / ZSet |
+| 持久化 | RDB 快照、AOF 日志、混合持久化 |
+| 缓存穿透 | 查不存在的数据 → 缓存空值 / 布隆过滤器 |
+| 缓存击穿 | 热点 key 过期 → 互斥锁 / 永不过期 |
+| 缓存雪崩 | 大量 key 同时过期 → 随机过期 / 多级缓存 |
+| 分布式锁 | SETNX + 过期 + Lua 释放；Redisson 看门狗 |
+| Java 客户端 | Jedis（同步，需连接池）/ Lettuce（异步，Spring 默认） |
+| 缓存一致性 | Cache Aside：写时删除缓存；延迟双删 |
+
+## 记忆口诀
+
+- **五类型**——串（String）列（List）哈（Hash）集（Set）序（ZSet）。
+- **三问题**——穿（穿透，查不存在）击（击穿，热点过期）雪（雪崩，集体过期）。
+- **三解法**——空值挡穿透，互斥防击穿，随机避雪崩。
+- **分布式锁三件套**——SETNX 抢、EXPIRE 防、Lua 释放。
+- **客户端二选一**——Jedis 简单要池化，Lettuce 异步是默认。
+
+## 结语
+
+Redis 把"快"做到了极致——内存存储、单线程模型、丰富数据结构，让它成了后端系统的瑞士军刀。但快不是没代价——内存有限、数据可能丢、缓存一致性要小心。
+
+下一章我们看**消息队列**——当系统需要异步解耦、削峰填谷时，RabbitMQ 和 Kafka 登场。如果说 Redis 是"快"的代名词，那消息队列就是"稳"的守护者——它让生产者和消费者各跑各的，互不阻塞。

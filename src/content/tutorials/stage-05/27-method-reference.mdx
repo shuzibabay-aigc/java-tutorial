@@ -1,0 +1,499 @@
+---
+title: "方法引用与构造器引用"
+chapter: 27
+stage: "第五阶段"
+stageName: "函数式编程"
+order: 3
+description: "掌握四种方法引用形式（静态、实例、类、构造器）与数组构造引用，理解方法引用与 Lambda 的等价转换与何时使用"
+pubDate: 2026-07-03
+tags: ["Java", "方法引用", "Method Reference", "构造器引用", "数组引用", "函数式编程"]
+---
+
+# 方法引用与构造器引用
+
+Lambda 已经够简洁了——`s -> s.length()` 只有 11 个字符。但 Java 还能更简：`String::length`，9 个字符，而且更接近"自然语言"的表述。这就是**方法引用**（Method Reference），Lambda 的"极简形态"——当你写的 Lambda 只是"调用某个现有方法"时，可以直接用方法名替代。
+
+方法引用是函数式编程系列的收尾。它看似只是语法糖，实则让代码更接近"声明式"的理想——读起来像在描述"做什么"，而不是"怎么做"。
+
+## 一、方法引用是什么
+
+方法引用用 `::` 操作符，直接引用一个已存在的方法，作为函数式接口的实现。
+
+```java
+// Lambda 写法
+Function<String, Integer> f1 = s -> s.length();
+
+// 方法引用
+Function<String, Integer> f2 = String::length;
+```
+
+两者完全等价——都表示"接收一个 String，返回它的长度"。区别只是写法：方法引用更简洁，且强调了"复用已有方法"的意图。
+
+`::` 是 Java 8 引入的新操作符，读作"双冒号"。它的左侧是"方法所属者"（类名或对象），右侧是方法名。
+
+## 二、四种方法引用
+
+方法引用有四种形式，按"方法属于谁"分类：
+
+| 形式 | 语法 | 等价 Lambda |
+| --- | --- | --- |
+| 静态方法引用 | `类名::静态方法` | `x -＞ 类名.静态方法(x)` |
+| 实例方法引用（特定对象） | `对象::方法` | `x -＞ 对象.方法(x)` |
+| 类的实例方法引用 | `类名::实例方法` | `(obj, x) -＞ obj.方法(x)` |
+| 构造器引用 | `类名::new` | `x -＞ new 类名(x)` |
+
+外加一个特例：**数组构造引用** `类型[]::new`。
+
+下面逐一详解。
+
+## 三、静态方法引用：类名::静态方法
+
+最直观的一种——引用一个类的静态方法。
+
+```java
+// Lambda
+Function<String, Integer> parser = s -> Integer.parseInt(s);
+
+// 方法引用
+Function<String, Integer> parser = Integer::parseInt;
+```
+
+`Integer.parseInt(s)` 是静态方法调用，所以用 `Integer::parseInt`。
+
+更多例子：
+
+```java
+// 数学函数
+Function<Double, Double> sqrt = Math::sqrt;        // x -> Math.sqrt(x)
+UnaryOperator<Double> negate = Math::negateExact;  // x -> Math.negateExact(x)
+
+// 字符串转大写（valueOf 是静态方法）
+Function<Object, String> toStr = String::valueOf;  // x -> String.valueOf(x)
+```
+
+静态方法引用的语义清晰：参数就是静态方法的参数，返回值就是静态方法的返回值。
+
+## 四、实例方法引用：对象::方法
+
+引用一个**特定对象**的实例方法。这个对象在创建方法引用时就确定了。
+
+```java
+String prefix = "Hello, ";
+
+// Lambda
+Consumer<String> c1 = s -> System.out.println(s);
+
+// 方法引用（System.out 是特定对象）
+Consumer<String> c2 = System.out::println;
+
+// 自定义对象
+Function<String, String> prepend = prefix::concat;   // s -> prefix.concat(s)
+System.out.println(prepend.apply("World"));   // Hello, World
+```
+
+`System.out` 是一个特定的 `PrintStream` 对象，`System.out::println` 引用它的 `println` 方法。
+
+这种形式常用于"把某个对象的方法当函数传"：
+
+```java
+List<String> list = new ArrayList<>(List.of("A", "B", "C"));
+
+// 把 list 的 add 方法当 Consumer 用
+Consumer<String> adder = list::add;
+adder.accept("D");
+adder.accept("E");
+System.out.println(list);   // [A, B, C, D, E]
+```
+
+## 五、类的实例方法引用：类名::实例方法
+
+这是最"烧脑"的一种，但理解后很强大。
+
+### 5.1 第一个参数成为调用者
+
+当你写 `类名::实例方法` 时，**Lambda 的第一个参数成为方法的调用者**，其余参数成为方法的参数：
+
+```java
+// Lambda: 两个参数，第一个调用 toUpperCase
+BiFunction<String, Void, String> f1 = (s, v) -> s.toUpperCase();
+
+// 方法引用：String::toUpperCase
+// 等价于 (s) -> s.toUpperCase()
+Function<String, String> upper = String::toUpperCase;
+```
+
+对比静态方法引用——静态方法引用的参数全部是方法的参数；而类名::实例方法的**第一个参数是调用者**。
+
+```java
+// 静态方法引用：参数是 parseInt 的参数
+Function<String, Integer> f1 = Integer::parseInt;
+// 等价于 s -> Integer.parseInt(s)
+
+// 类的实例方法引用：第一个参数是调用者
+Function<String, String> f2 = String::toUpperCase;
+// 等价于 s -> s.toUpperCase()
+```
+
+区别：`Integer::parseInt` 的参数是传给 parseInt 的；`String::toUpperCase` 的参数是**调用 toUpperCase 的对象**。
+
+### 5.2 两个参数的情况
+
+```java
+// Lambda: 两个参数，第一个调用 compareTo
+Comparator<String> c1 = (a, b) -> a.compareTo(b);
+
+// 方法引用：第一个参数 a 成为调用者，第二个参数 b 成为 compareTo 的参数
+Comparator<String> c2 = String::compareTo;
+```
+
+`String::compareTo` 等价于 `(a, b) -＞ a.compareTo(b)`——第一个参数 `a` 调用 `compareTo`，第二个参数 `b` 传进去。
+
+这种形式在比较器、字符串操作中极其常见：
+
+```java
+// 按字典序排序
+list.sort(String::compareTo);   // 等价于 (a, b) -> a.compareTo(b)
+
+// 是否包含
+BiPredicate<String, String> contains = String::contains;
+// 等价于 (s, sub) -> s.contains(sub)
+contains.test("hello world", "world");   // true
+```
+
+### 5.3 为什么有这种设计
+
+初看"第一个参数当调用者"很别扭，但它解决了"实例方法也是函数"的问题。在面向对象里，方法是属于对象的——`s.length()` 必须有个 `s` 来调用。但在函数式里，我们想把它当成 `String -＞ int` 的函数。`String::length` 正是这种"把方法从对象中解放"的写法——编译器自动把第一个参数当调用者。
+
+## 六、构造器引用：类名::new
+
+构造器引用用 `类名::new` 表示，等价于 `args -＞ new 类名(args)`：
+
+```java
+// Lambda
+Supplier<List<String>> s1 = () -> new ArrayList<>();
+
+// 构造器引用
+Supplier<List<String>> s2 = ArrayList::new;
+
+// 带参数
+Function<Integer, ArrayList<String>> f1 = n -> new ArrayList<>(n);
+Function<Integer, ArrayList<String>> f2 = ArrayList::new;   // 调用 ArrayList(int) 构造器
+```
+
+构造器引用会根据"目标类型"的签名匹配对应构造器——`Supplier` 无参，匹配无参构造器；`Function＜Integer, ...＞` 一参，匹配 `ArrayList(int)` 构造器。
+
+### 6.1 实战：把流元素转成对象
+
+构造器引用在 Stream 中很有用——把元素流"转换成对象流"：
+
+```java
+// 把字符串流转成 Person 流
+List<Person> people = names.stream()
+    .map(Person::new)        // 调用 new Person(name)
+    .collect(Collectors.toList());
+
+// 把字符串流转成 List
+List<List<String>> lists = sizes.stream()
+    .map(ArrayList::new)     // 调用 new ArrayList(size)
+    .collect(Collectors.toList());
+```
+
+### 6.2 复制构造器
+
+```java
+// 用复制构造器做防御性拷贝
+List<String> original = List.of("A", "B", "C");
+ArrayList<String> copy = original.stream()
+    .collect(Collectors.toCollection(ArrayList::new));
+// 或者
+ArrayList<String> copy2 = new ArrayList<>(original);   // 更直接
+```
+
+## 七、数组构造引用：类型[]::new
+
+数组也能用 `new` 创建，所以也有"数组构造引用"：
+
+```java
+// Lambda
+IntFunction<String[]> f1 = n -> new String[n];
+
+// 数组构造引用
+IntFunction<String[]> f2 = String[]::new;
+
+String[] arr = f2.apply(5);   // 长度 5 的 String[]
+```
+
+数组构造引用在 Stream 的 `toArray` 中常用：
+
+```java
+// 把流转成数组
+String[] arr = stream.toArray(String[]::new);
+// 等价于 stream.toArray(size -> new String[size]);
+```
+
+`toArray()` 不带参数返回 `Object[]`，丢失类型。`toArray(String[]::new)` 才能返回 `String[]`——这是个高频技巧。
+
+## 八、方法引用 vs Lambda：何时用哪个
+
+方法引用更简洁，但**不是所有情况都该用**。
+
+**用方法引用**：
+
+- Lambda 体只有一个方法调用，且参数完全对应。
+- 调用的方法名能清晰表达意图。
+
+```java
+// ✅ 清晰，用方法引用
+list.forEach(System.out::println);
+list.sort(String::compareTo);
+names.stream().map(String::toUpperCase).forEach(System.out::println);
+```
+
+**用 Lambda**：
+
+- Lambda 体有额外逻辑（不止一个方法调用）。
+- 参数需要转换或处理。
+- 方法名不能清晰表达意图。
+
+```java
+// ❌ 这里方法引用会丢信息
+list.stream().map(Person::getName)            // 还行，但要猜
+list.stream().map(p -> p.getName())           // 更清晰
+list.stream().map(p -> p.getName().toLowerCase())   // 必须用 Lambda（有额外操作）
+
+// 参数不对应时
+ToIntFunction<String> f = s -> s.length();    // Lambda
+// 不能写 String::length（语义相同但有时不如 Lambda 直观）
+
+// 调用静态方法但需要额外处理
+ToIntFunction<String> f = s -> Integer.parseInt(s.trim());   // 有 trim，必须 Lambda
+```
+
+**经验法则**：如果方法引用让你"一眼看懂"，就用它；如果让你"愣一下才明白"，就用 Lambda。
+
+## 九、实战：综合运用四种方法引用
+
+<CodeRunner code={`import java.util.*;
+import java.util.function.*;
+import java.util.stream.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 静态方法引用
+        System.out.println("--- 静态方法引用 ---");
+        Function<String, Integer> parser = Integer::parseInt;
+        System.out.println("parseInt(42): " + parser.apply("42"));
+
+        List<String> nums = List.of("3", "1", "2");
+        List<Integer> ints = nums.stream().map(Integer::parseInt).collect(Collectors.toList());
+        System.out.println("字符串转数字: " + ints);
+
+        // 2. 实例方法引用（特定对象）
+        System.out.println("\\n--- 实例方法引用（特定对象） ---");
+        String prefix = "Hello, ";
+        Function<String, String> greet = prefix::concat;
+        System.out.println(greet.apply("World"));   // Hello, World
+
+        Consumer<String> printer = System.out::println;
+        printer.accept("用 System.out::println 输出");
+
+        // 3. 类的实例方法引用
+        System.out.println("\\n--- 类的实例方法引用 ---");
+        List<String> names = new ArrayList<>(List.of("Charlie", "Alice", "Bob"));
+        names.sort(String::compareTo);   // 等价于 (a, b) -> a.compareTo(b)
+        System.out.println("排序: " + names);
+
+        names.replaceAll(String::toUpperCase);   // 等价于 s -> s.toUpperCase()
+        System.out.println("全大写: " + names);
+
+        BiPredicate<String, String> contains = String::contains;
+        System.out.println("hello 包含 ell? " + contains.test("hello", "ell"));
+
+        // 4. 构造器引用
+        System.out.println("\\n--- 构造器引用 ---");
+        Supplier<ArrayList<String>> factory = ArrayList::new;
+        ArrayList<String> empty = factory.get();
+        empty.add("构造器引用创建的列表");
+        System.out.println(empty);
+
+        // 把字符串流转成 Person
+        List<String> nameList = List.of("Alice", "Bob", "Charlie");
+        List<Person> people = nameList.stream()
+            .map(Person::new)
+            .collect(Collectors.toList());
+        people.forEach(System.out::println);
+
+        // 5. 数组构造引用
+        System.out.println("\\n--- 数组构造引用 ---");
+        IntFunction<String[]> arrFactory = String[]::new;
+        String[] arr = arrFactory.apply(3);
+        arr[0] = "A"; arr[1] = "B"; arr[2] = "C";
+        System.out.println(Arrays.toString(arr));
+
+        // Stream.toArray
+        String[] namesArr = nameList.stream().toArray(String[]::new);
+        System.out.println("流转数组: " + Arrays.toString(namesArr));
+
+        // 6. 方法引用的组合：分步处理
+        System.out.println("\\n--- 综合实战：数据处理 ---");
+        List<String> data = List.of("  alice  ", "  BOB  ", "  Charlie  ");
+
+        // 全部用方法引用
+        List<String> cleaned = data.stream()
+            .map(String::strip)            // 去空格
+            .map(String::toLowerCase)      // 转小写
+            .sorted(String::compareTo)     // 排序
+            .collect(Collectors.toList());
+        System.out.println("清洗后: " + cleaned);
+
+        // 7. 构造器引用做工厂
+        System.out.println("\\n--- 构造器引用做工厂 ---");
+        Map<String, Supplier<Shape>> factories = Map.of(
+            "circle", Circle::new,
+            "square", Square::new
+        );
+
+        Shape s1 = factories.get("circle").get();
+        Shape s2 = factories.get("square").get();
+        s1.draw();
+        s2.draw();
+
+        // 8. 方法引用在 Collectors 中的应用
+        System.out.println("\\n--- Collectors 中的方法引用 ---");
+        List<Person> allPeople = List.of(
+            new Person("Alice"), new Person("Bob"), new Person("Charlie")
+        );
+
+        // toList 中的 ArrayList::new
+        ArrayList<Person> list = allPeople.stream()
+            .collect(Collectors.toCollection(ArrayList::new));
+        System.out.println("toCollection: " + list);
+
+        // groupingBy + mapping
+        Map<Character, List<Person>> byFirstLetter = allPeople.stream()
+            .collect(Collectors.groupingBy(p -> p.getName().charAt(0)));
+        System.out.println("按首字母分组: " + byFirstLetter);
+    }
+}
+
+class Person {
+    private final String name;
+
+    Person() { this.name = "匿名"; }
+    Person(String name) { this.name = name; }
+
+    String getName() { return name; }
+
+    @Override
+    public String toString() {
+        return "Person(" + name + ")";
+    }
+}
+
+interface Shape { void draw(); }
+class Circle implements Shape {
+    public void draw() { System.out.println("画圆 ○"); }
+}
+class Square implements Shape {
+    public void draw() { System.out.println("画方 □"); }
+}`} />
+
+## 十、方法引用的等价转换速查
+
+把方法引用翻译成 Lambda，关键看"方法属于谁"：
+
+| 方法引用 | 等价 Lambda | 说明 |
+| --- | --- | --- |
+| `Integer::parseInt` | `s -＞ Integer.parseInt(s)` | 静态方法 |
+| `System.out::println` | `s -＞ System.out.println(s)` | 特定对象的方法 |
+| `String::length` | `s -＞ s.length()` | 类的实例方法（一参） |
+| `String::compareTo` | `(a, b) -＞ a.compareTo(b)` | 类的实例方法（两参） |
+| `ArrayList::new` | `() -＞ new ArrayList＜＞()` | 无参构造器 |
+| `ArrayList::new` | `n -＞ new ArrayList＜＞(n)` | 一参构造器 |
+| `String[]::new` | `n -＞ new String[n]` | 数组构造 |
+
+理解这条规则：**类的实例方法引用，第一个参数当调用者，其余参数当方法参数**。其他三种形式参数完全对应。
+
+## 十一、方法引用的陷阱
+
+### 11.1 重载歧义
+
+当一个类有多个同名重载方法，方法引用可能产生歧义：
+
+```java
+// ArrayList 有多个 add：add(E) 和 add(int, E)
+// 下面这个 OK，因为 Consumer<String> 只有一个参数
+Consumer<String> c = list::add;
+
+// 但有时候编译器无法确定用哪个重载
+// 需要显式写 Lambda 消除歧义
+```
+
+### 11.2 泛型方法引用
+
+引用泛型方法时，类型推断有时不够：
+
+```java
+// 通常 OK
+Function<String, List<String>> f = ArrayList::new;
+
+// 偶尔需要显式类型
+Function<String, List<String>> f = (Function<String, List<String>>) ArrayList::new;
+```
+
+### 11.3 方法引用不能有额外逻辑
+
+```java
+// ❌ 不能用方法引用（有 trim 操作）
+Function<String, Integer> f = s -> Integer.parseInt(s.trim());
+
+// ✅ 只能拆成两步
+Function<String, String> trim = String::strip;
+Function<String, Integer> parse = Integer::parseInt;
+Function<String, Integer> combined = trim.andThen(parse);
+```
+
+## 十二、本章小结
+
+| 形式 | 语法 | 示例 | 等价 Lambda |
+| --- | --- | --- | --- |
+| 静态方法引用 | `类名::静态方法` | `Integer::parseInt` | `s -＞ Integer.parseInt(s)` |
+| 实例方法引用 | `对象::方法` | `System.out::println` | `s -＞ System.out.println(s)` |
+| 类的实例方法引用 | `类名::实例方法` | `String::length` | `s -＞ s.length()` |
+| 构造器引用 | `类名::new` | `ArrayList::new` | `() -＞ new ArrayList＜＞()` |
+| 数组构造引用 | `类型[]::new` | `String[]::new` | `n -＞ new String[n]` |
+
+**核心规则**：
+
+- 前三种形式，参数对应方法参数。
+- 类的实例方法引用，**第一个参数当调用者**。
+- 构造器引用按目标类型签名匹配构造器。
+
+**使用原则**：
+
+- 方法引用让代码更简洁，但**只在"一眼看懂"时用**。
+- 有额外逻辑、参数转换、重载歧义时，用 Lambda。
+- 别为了"显得高级"而强行方法引用——可读性优先。
+
+## 结语：极简之美
+
+方法引用是 Java 函数式编程的"最后一公里"。它把 Lambda 进一步压缩到"只写方法名"，让代码读起来像散文：
+
+```java
+names.stream()
+    .map(String::toUpperCase)
+    .sorted()
+    .forEach(System.out::println);
+```
+
+读这行代码就像读一句话："把名字流转大写、排序、打印"——没有 `s -＞`、没有 `{ }`、没有 `return`，只有"做什么"。这就是声明式编程的理想形态。
+
+至此，第五阶段"函数式编程"的三章全部完成：
+
+- **Lambda 表达式**——把函数从对象中解放，`(x) -＞ x * x` 是函数的新形态。
+- **内置函数式接口**——`Function`、`Predicate`、`Consumer`、`Supplier` 是 Lambda 的标准舞台。
+- **方法引用**——`String::length` 把 Lambda 再压缩一步，逼近声明式的极致。
+
+这套函数式编程的能力，配合第四阶段的 Stream API，构成了现代 Java 的"现代风格"。掌握它们，你写的 Java 代码会从"啰嗦的命令式"蜕变为"优雅的声明式"——这是从 Java 8 到今天，每个 Java 程序员都该走的路。
+
+Java 的世界很大，集合框架与函数式编程只是其中两块基石。未来的旅程还有并发编程、IO/NIO、JVM 原理、Spring 生态……但有了这两块基石垫底，你已经站在了扎实的台阶上，足以眺望更远的风景。

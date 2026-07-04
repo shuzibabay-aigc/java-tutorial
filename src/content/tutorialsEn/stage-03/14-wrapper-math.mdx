@@ -1,0 +1,444 @@
+---
+title: "Wrapper Classes and Math Utilities"
+chapter: 14
+stage: "Stage 3"
+stageName: "Java Core Libraries"
+order: 2
+description: "Master the 8 wrapper classes and autoboxing/unboxing, the Integer cache pitfall, the Math utility class, and exact arithmetic with BigInteger and BigDecimal"
+pubDate: 2026-07-03
+tags: ["Java", "包装类", "Integer", "Math", "BigDecimal", "BigInteger"]
+---
+
+# Wrapper Classes and Math Utilities
+
+Java is an "amphibious" language — it has both **primitive types** like `int` and `double`, and **reference types** like `Integer` and `Double`. Primitive types are lightweight and fast, but they're like "naked numbers" that can't take part in the object-oriented world: you can't stuff an `int` into a `List`, you can't call methods on a `double`, and you certainly can't pass a `boolean` around as an `Object`.
+
+**Wrapper classes** are the "safe box" for primitive types — they wrap a bare number inside an object, letting primitive types enjoy object-oriented treatment. And when we need more precise math, the `Math` class provides basic utilities, while `BigInteger` and `BigDecimal` provide an "infinite precision" fallback.
+
+In this chapter we'll open up this set of safe boxes and see exactly how numbers are safely carried around and computed in Java.
+
+## 1. The Eight Wrapper Classes
+
+### 1.1 Primitive types mapped to their wrappers
+
+Java has 8 primitive types, corresponding to 8 wrapper classes, all in the `java.lang` package:
+
+| Primitive | Wrapper | Parent |
+| --- | --- | --- |
+| `byte` | `Byte` | Number |
+| `short` | `Short` | Number |
+| `int` | `Integer` | Number |
+| `long` | `Long` | Number |
+| `float` | `Float` | Number |
+| `double` | `Double` | Number |
+| `char` | `Character` | Object |
+| `boolean` | `Boolean` | Object |
+
+Note two "special cases": the wrapper for `int` is called `Integer` (not `Int`), and the wrapper for `char` is called `Character` (not `Char`). The first six numeric types all extend `Number`, while `Character` and `Boolean` extend `Object` directly.
+
+### 1.2 Why we need wrapper classes
+
+- **Generics and collections**: Java generics only accept object types. `List<int>` is illegal; you must write `List<Integer>`.
+- **API design**: Many frameworks (reflection, serialization, etc.) require `Object`, and primitive types can't be passed directly.
+- **null to mean "absent"**: Primitive types have default values (`int` defaults to 0) and can't express "no value." Wrappers can be `null`, which is critical in database mapping — `null` means "unknown," while `0` means "actually zero."
+- **Utility methods**: Wrappers ship with methods like `parseInt`, `toString`, and `compareTo`.
+
+## 2. Autoboxing and Unboxing
+
+### 2.1 Boxing and unboxing
+
+**Boxing** turns a primitive into its wrapper; **unboxing** does the reverse.
+
+```java
+// Manual boxing (the pre-Java 5 style)
+Integer a = Integer.valueOf(42);
+// Manual unboxing
+int b = a.intValue();
+```
+
+Since Java 5, the compiler has provided the syntactic sugar of **autoboxing/unboxing** — you just write the assignment, and the compiler inserts `valueOf` and `xxxValue` for you:
+
+```java
+Integer a = 42;      // Autoboxing → Integer.valueOf(42)
+int b = a;           // Unboxing → a.intValue()
+
+// Especially common with collections
+List<Integer> nums = new ArrayList<>();
+nums.add(1);         // Autoboxing
+nums.add(2);
+int first = nums.get(0);   // Unboxing
+```
+
+### 2.2 The "traps" of syntactic sugar
+
+Autoboxing looks lovely, but it's compile-time magic — at runtime, objects are still created when they need to be. Consider this seemingly innocent example:
+
+```java
+Integer sum = 0;
+for (int i = 0; i < 1000; i++) {
+    sum += i;   // Equivalent to sum = Integer.valueOf(sum.intValue() + i)
+}
+```
+
+Every `sum += i` **unboxes and then boxes again** — 1000 iterations create roughly 1000 Integer objects (some hit the cache, more on that below). In performance-sensitive code, accumulate with `int` and box only at the end.
+
+Even worse is the **null pointer**:
+
+```java
+Integer x = null;
+int y = x;   // NullPointerException! Unboxing calls null.intValue()
+```
+
+Unboxing a wrapper that's `null` blows up. This is a pit every Java programmer steps into sooner or later.
+
+## 3. The Integer Cache Pitfall
+
+### 3.1 A counterintuitive phenomenon
+
+```java
+Integer a = 127;
+Integer b = 127;
+System.out.println(a == b);   // true
+
+Integer c = 128;
+Integer d = 128;
+System.out.println(c == d);   // false!
+```
+
+Same code, 127 is equal but 128 isn't — this isn't a bug, it's the work of the **Integer cache**.
+
+### 3.2 The truth about the cache
+
+When the value is between **-128 and 127**, `Integer.valueOf(int)` returns the **same object** from a cached array:
+
+```java
+// Simplified logic of Integer.valueOf
+public static Integer valueOf(int i) {
+    if (i >= IntegerCache.low && i <= IntegerCache.high)
+        return IntegerCache.cache[i + (-IntegerCache.low)];
+    return new Integer(i);
+}
+```
+
+So `Integer a = 127` triggers autoboxing, calls `valueOf(127)`, and returns a cached object; but `128` is out of range, so a new object is `new`'d up, and `==` naturally returns false.
+
+> 📍 The cache range can be tweaked with the JVM flag `-XX:AutoBoxCacheMax=1000` (the lower bound is fixed at -128), though few people change it in practice.
+>
+> Besides Integer, `Byte`, `Short`, and `Long` are also cached (Byte caches all of -128~127; Short/Long cache -128~127); `Character` caches 0~127; `Boolean` caches the two constants `TRUE` and `FALSE`.
+
+### 3.3 The correct way to compare
+
+**Always compare wrapper values with `equals`, not `==`:**
+
+```java
+Integer a = 128;
+Integer b = 128;
+System.out.println(a.equals(b));   // true, always reliable
+```
+
+`==` compares references; `equals` compares values. This is an ironclad rule in Java.
+
+## 4. Common Wrapper Methods
+
+Wrappers bridge the gap between primitive types and strings.
+
+### 4.1 Converting between strings and numbers
+
+```java
+// String → number
+int i = Integer.parseInt("42");
+double d = Double.parseDouble("3.14");
+boolean flag = Boolean.parseBoolean("true");
+
+// String → wrapper
+Integer obj = Integer.valueOf("42");
+
+// Number → string
+String s1 = Integer.toString(42);
+String s2 = String.valueOf(42);     // works too
+String s3 = 42 + "";                // crude but common
+```
+
+### 4.2 Base conversion
+
+`Integer` provides handy methods for base conversion:
+
+```java
+System.out.println(Integer.toBinaryString(255));   // 11111111
+System.out.println(Integer.toOctalString(255));    // 377
+System.out.println(Integer.toHexString(255));      // ff
+
+// Parse from a given base
+System.out.println(Integer.parseInt("ff", 16));    // 255
+System.out.println(Integer.parseInt("1010", 2));   // 10
+```
+
+### 4.3 Comparable and compareTo
+
+All numeric wrappers implement `Comparable`, so you can compare with `compareTo`:
+
+```java
+Integer a = 10;
+Integer b = 20;
+System.out.println(a.compareTo(b));   // negative (a < b)
+System.out.println(b.compareTo(a));   // positive (b > a)
+System.out.println(a.compareTo(10));  // 0 (equal)
+```
+
+The return value of `compareTo`: a negative means "less than," 0 means "equal," and a positive means "greater than."
+
+## 5. The Math Class
+
+`java.lang.Math` is a utility class (private constructor, all static methods) that provides basic math operations.
+
+### 5.1 Common methods at a glance
+
+| Method | Purpose | Example |
+| --- | --- | --- |
+| `abs(x)` | Absolute value | `Math.abs(-5)` → 5 |
+| `max(a, b)` | Maximum | `Math.max(3, 7)` → 7 |
+| `min(a, b)` | Minimum | `Math.min(3, 7)` → 3 |
+| `round(x)` | Rounding | `Math.round(2.5)` → 3 |
+| `ceil(x)` | Round up | `Math.ceil(2.1)` → 3.0 |
+| `floor(x)` | Round down | `Math.floor(2.9)` → 2.0 |
+| `pow(a, b)` | Power | `Math.pow(2, 10)` → 1024.0 |
+| `sqrt(x)` | Square root | `Math.sqrt(16)` → 4.0 |
+| `random()` | [0,1) random number | `Math.random()` → 0.37... |
+| `signum(x)` | Sign | `Math.signum(-3)` → -1.0 |
+
+### 5.2 The difference between rounding functions
+
+`round`, `ceil`, and `floor` are easy to confuse:
+
+```java
+// round: round half up, returns long/int (rounds toward positive infinity)
+Math.round(2.4);    // 2
+Math.round(2.5);    // 3
+Math.round(-2.5);   // -2 (note! toward positive infinity, -2 > -2.5)
+Math.round(-2.6);   // -3
+
+// ceil: ceiling, round up, returns double
+Math.ceil(2.1);     // 3.0
+Math.ceil(-2.1);    // -2.0
+
+// floor: floor, round down, returns double
+Math.floor(2.9);    // 2.0
+Math.floor(-2.1);   // -3.0
+```
+
+> ⚠️ `Math.round(-2.5)` returns `-2`, not `-3` — because round uses "round half toward positive infinity," rounding toward the positive direction on a .5. This detail comes up often in interviews and financial calculations.
+
+### 5.3 Constants
+
+```java
+System.out.println(Math.PI);    // 3.141592653589793
+System.out.println(Math.E);     // 2.718281828459045
+```
+
+## 6. BigInteger and BigDecimal
+
+### 6.1 The precision disaster of double
+
+First, a classic "ghost story":
+
+```java
+System.out.println(0.1 + 0.2);   // 0.30000000000000004
+```
+
+`0.1 + 0.2` doesn't equal `0.3`! That's because `double` uses IEEE 754 floating-point representation, and `0.1` is an infinitely recurring binary fraction that can't be stored exactly. This error is harmless in scientific computing but **fatal** in financial calculations — a missing cent is an incident.
+
+### 6.2 BigInteger: arbitrary-precision integers
+
+`BigInteger` (`java.math`) can represent integers of any size, with no 64-bit ceiling like `long`:
+
+```java
+import java.math.BigInteger;
+
+BigInteger big = new BigInteger("999999999999999999999999999999");
+BigInteger result = big.multiply(BigInteger.TEN);
+System.out.println(result);
+// 9999999999999999999999999999990
+```
+
+`BigInteger` is immutable; operations return new objects. It supports arithmetic, modular arithmetic, primality testing, bitwise operations, and more:
+
+```java
+BigInteger a = new BigInteger("123456789");
+BigInteger b = new BigInteger("987654321");
+
+a.add(b);          // addition
+a.subtract(b);     // subtraction
+a.multiply(b);     // multiplication
+a.divide(b);       // division
+a.mod(b);          // modulo
+a.gcd(b);          // greatest common divisor
+a.isProbablePrime(100);   // probably prime?
+```
+
+> Note: `BigInteger` can't use the `+`, `-`, `*` operators — Java doesn't support operator overloading, so you must call methods.
+
+### 6.3 BigDecimal: arbitrary-precision decimals
+
+`BigDecimal` is the "guardian angel" of financial computing. It represents a decimal as an **unscaled integer + a scale**, sidestepping the precision problems of floating-point.
+
+**Key principle: always construct it from a String!**
+
+```java
+// ❌ Wrong: constructing from double keeps the precision problem
+BigDecimal bad = new BigDecimal(0.1);
+System.out.println(bad);
+// 0.1000000000000000055511151231257827021181583404541015625
+
+// ✅ Right: construct from a String
+BigDecimal good = new BigDecimal("0.1");
+System.out.println(good);   // 0.1
+```
+
+`new BigDecimal(double)` faithfully converts the **imprecise value** of the double into a BigDecimal — the precision problem is "recorded as-is," not corrected. So you must pass a string, or use `BigDecimal.valueOf(double)` (which internally calls `Double.toString` first).
+
+### 6.4 Arithmetic and rounding
+
+```java
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+
+BigDecimal a = new BigDecimal("10");
+BigDecimal b = new BigDecimal("3");
+
+a.add(b);                          // 13
+a.subtract(b);                     // 7
+a.multiply(b);                     // 30
+a.divide(b, 2, RoundingMode.HALF_UP);   // 3.33 (2 decimals, round half up)
+```
+
+**Division must specify a rounding mode**, otherwise an infinite repeating decimal (like 10/3) throws `ArithmeticException`.
+
+### 6.5 setScale and RoundingMode
+
+`setScale` sets the number of decimal places:
+
+```java
+BigDecimal price = new BigDecimal("19.999");
+// Keep 2 decimals, round half up
+BigDecimal rounded = price.setScale(2, RoundingMode.HALF_UP);
+System.out.println(rounded);   // 20.00
+```
+
+Common `RoundingMode` values:
+
+| Mode | Meaning |
+| --- | --- |
+| `HALF_UP` | Round half up (the most common) |
+| `HALF_EVEN` | Banker's rounding (round half to even, the financial standard) |
+| `UP` | Round away from zero |
+| `DOWN` | Round toward zero (truncate) |
+| `CEILING` | Round toward positive infinity |
+| `FLOOR` | Round toward negative infinity |
+
+> 💡 **Banker's rounding** (`HALF_EVEN`): when the last digit is 5, round to the nearest **even** number. `2.5` → 2, `3.5` → 4. Statistically it's fairer than "round half up" — large sums of data don't systematically skew high.
+
+### 6.6 The comparison pitfall
+
+`BigDecimal`'s `equals` compares the **scale** (number of decimal places), while `compareTo` compares only the numeric value:
+
+```java
+BigDecimal x = new BigDecimal("1.0");
+BigDecimal y = new BigDecimal("1.00");
+
+System.out.println(x.equals(y));     // false! Different scales
+System.out.println(x.compareTo(y));  // 0 (numerically equal)
+```
+
+**Always use `compareTo` to compare BigDecimal** — yet another ironclad rule.
+
+## 7. Hands-On: A Financial Calculation Demo
+
+The example below demonstrates `double`'s precision problem and how `BigDecimal` rescues it.
+
+<CodeRunner code={`import java.math.BigDecimal;
+import java.math.RoundingMode;
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== 场景：购物车累加 0.1 元商品 10 次 ===\\n");
+
+        // ❌ Accumulating with double: precision loss
+        double doubleTotal = 0.0;
+        for (int i = 0; i < 10; i++) {
+            doubleTotal += 0.1;
+        }
+        System.out.println("double 累加结果: " + doubleTotal);
+        System.out.println("等于 1.0 吗? " + (doubleTotal == 1.0));
+        // Outputs 0.9999999999999999, not equal to 1.0!
+
+        System.out.println();
+
+        // ✅ Accumulating with BigDecimal: exact
+        BigDecimal bdTotal = BigDecimal.ZERO;
+        BigDecimal item = new BigDecimal("0.1");
+        for (int i = 0; i < 10; i++) {
+            bdTotal = bdTotal.add(item);
+        }
+        System.out.println("BigDecimal 累加结果: " + bdTotal);
+        System.out.println("compareTo 1.0 结果: "
+            + bdTotal.compareTo(new BigDecimal("1.0")));   // 0 means equal
+
+        System.out.println();
+        System.out.println("=== 场景：商品折扣计算 ===\\n");
+
+        BigDecimal price = new BigDecimal("199.99");
+        BigDecimal discount = new BigDecimal("0.85");   // 15% off
+        BigDecimal finalPrice = price.multiply(discount)
+                                     .setScale(2, RoundingMode.HALF_UP);
+        System.out.println("原价: " + price);
+        System.out.println("折扣: " + discount);
+        System.out.println("折后价: " + finalPrice);
+
+        System.out.println();
+        System.out.println("=== 场景：三人平分 100 元 ===\\n");
+
+        BigDecimal total = new BigDecimal("100");
+        BigDecimal people = new BigDecimal("3");
+        BigDecimal each = total.divide(people, 2, RoundingMode.HALF_UP);
+        System.out.println("每人分得: " + each);
+        System.out.println("三人合计: " + each.multiply(people));
+        System.out.println("差额(分摊): " + total.subtract(each.multiply(people)));
+
+        System.out.println();
+        System.out.println("=== 场景：Integer 缓存池陷阱 ===\\n");
+
+        Integer a = 127, b = 127;
+        Integer c = 128, d = 128;
+        System.out.println("127 == 127: " + (a == b));        // true (cached)
+        System.out.println("128 == 128: " + (c == d));        // false (out of cache)
+        System.out.println("128 equals 128: " + c.equals(d)); // true (equal values)
+
+        System.out.println();
+        System.out.println("=== 场景：Math 取整对比 ===\\n");
+        System.out.println("round(2.5)  = " + Math.round(2.5));    // 3
+        System.out.println("round(-2.5) = " + Math.round(-2.5));   // -2
+        System.out.println("ceil(2.1)   = " + Math.ceil(2.1));     // 3.0
+        System.out.println("floor(2.9)  = " + Math.floor(2.9));    // 2.0
+    }
+}`} />
+
+## 8. Chapter Summary
+
+| Topic | Key points |
+| --- | --- |
+| The 8 wrappers | Byte/Short/Integer/Long/Float/Double/Character/Boolean |
+| Boxing/unboxing | Compiler syntactic sugar, auto-inserts valueOf / xxxValue |
+| The cache | Integer caches -128~127; Byte/Short/Long/Character also cache |
+| Ironclad comparison rule | Use equals for wrappers, compareTo for BigDecimal |
+| Math | abs/max/min/round/ceil/floor/pow/sqrt/random |
+| round detail | On .5 it rounds toward positive infinity; round(-2.5) = -2 |
+| BigInteger | Arbitrary-precision integer, immutable, operations via methods |
+| BigDecimal | Arbitrary-precision decimal, always construct from a String |
+| Rounding modes | HALF_UP is round half up; HALF_EVEN is banker's rounding |
+| Division | BigDecimal division must specify a rounding mode, or it may throw |
+
+## Conclusion
+
+Numbers are the bedrock of programming, and Java's dual-track design of "primitive types + wrapper classes" balances efficiency with object-oriented elegance. Remember a few key points: **autoboxing/unboxing isn't free** (mind the performance and NPE), **compare wrappers with equals**, **use BigDecimal (constructed from a String) for financial calculations** — these details are often the dividing line between code that "just runs" and code that's truly reliable.
+
+In the next chapter, we'll face another area of Java that has given countless programmers headaches — **the Date and Time API**. You'll see the chaos of the old API and the elegance of the new `java.time` API.

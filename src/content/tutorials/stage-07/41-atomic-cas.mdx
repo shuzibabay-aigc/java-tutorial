@@ -1,0 +1,508 @@
+---
+title: "原子类与 CAS"
+chapter: 41
+stage: "第七阶段"
+stageName: "并发编程"
+order: 8
+description: "掌握 AtomicInteger/AtomicLong/AtomicReference、AtomicStampedReference 解决 ABA、字段更新器、CAS 原理、LongAdder vs AtomicLong 与非阻塞算法"
+pubDate: 2026-07-03
+tags: ["Java", "CAS", "原子类", "AtomicInteger", "LongAdder", "ABA"]
+---
+
+# 原子类与 CAS
+
+上一章讲锁——`ReentrantLock`/`synchronized` 都是"悲观策略"：先加锁再操作，假设一定有冲突。但很多场景冲突并不频繁——悲观锁的开销主要花在"加锁/解锁"本身，而不是冲突。能不能"不加锁"也保证安全？
+
+答案就是 **CAS（Compare-And-Swap）** ——一种"乐观策略"：先操作，提交时检查有没有冲突，冲突就重试。Java 的 `java.util.concurrent.atomic` 包提供了基于 CAS 的原子类——`AtomicInteger`、`AtomicLong`、`AtomicReference` 等。它们是无锁编程的基石，也是 `ConcurrentHashMap`、`LongAdder`、`AtomicStampedReference` 等高级并发工具的底层。
+
+## 一、CAS 原理
+
+### 1.1 CAS 是什么
+
+**CAS（Compare-And-Swap）** 是一条**硬件支持的原子指令**——CPU 直接保证"比较并交换"不可被打断。
+
+伪代码：
+
+```
+boolean CAS(memory, expected, newValue) {
+    if (memory == expected) {     // 比较
+        memory = newValue;        // 交换
+        return true;
+    }
+    return false;                  // 失败
+}
+```
+
+整条指令由 CPU 保证原子。在 x86 上是 `lock cmpxchg` 指令，在 ARM 上是 `LDREX`/`STREX` 指令对。
+
+### 1.2 CAS 的工作流程
+
+`AtomicInteger.incrementAndGet()` 的实现思路：
+
+```
+1. 读当前值 V = value
+2. 计算新值 N = V + 1
+3. CAS(value, V, N)
+   - 如果 value == V，写入 N，返回 true → 成功
+   - 否则返回 false → 被别人改过，重试
+4. 失败就回到第 1 步
+```
+
+整个"读-算-比-写"的过程中没有锁——只有最后一步 CAS 是原子的。如果中间被别人改过，CAS 失败，循环重试。这叫**自旋（spin）**。
+
+### 1.3 Java 里的 CAS：Unsafe 与 VarHandle
+
+Java 通过 `sun.misc.Unsafe`（JDK 9+ 推荐 `VarHandle`）调用 CAS：
+
+```java
+// Unsafe API
+public final native boolean compareAndSwapInt(Object o, long offset,
+                                              int expected, int x);
+
+// VarHandle（JDK 9+）
+VarHandle vh = MethodHandles.lookup().findVarHandle(...)
+vh.compareAndSet(instance, expected, newValue);
+```
+
+`AtomicInteger.compareAndSet` 内部就是调用 `Unsafe.compareAndSwapInt`。
+
+### 1.4 CAS 的三大问题
+
+| 问题 | 描述 | 解决 |
+| --- | --- | --- |
+| **ABA** | 值从 A→B→A，CAS 认为没变过 | `AtomicStampedReference` 加版本号 |
+| **自旋开销** | 高争用下 CAS 反复失败重试，CPU 飙升 | `LongAdder` 分段、限制重试次数 |
+| **只能单变量** | 一次 CAS 只能改一个变量 | `AtomicReference` 包装对象，或用锁 |
+
+## 二、原子类家族
+
+`java.util.concurrent.atomic` 包提供了一系列原子类，分为几类：
+
+### 2.1 基本类型
+
+- **`AtomicBoolean`**
+- **`AtomicInteger`**——常用，`incrementAndGet`/`getAndIncrement`/`addAndGet`/`compareAndSet`
+- **`AtomicLong`**
+
+```java
+AtomicInteger counter = new AtomicInteger(0);
+counter.incrementAndGet();   // ++counter，返回新值
+counter.getAndIncrement();   // counter++，返回旧值
+counter.addAndGet(5);        // counter += 5
+counter.compareAndSet(0, 1); // 如果是 0 才设为 1，返回是否成功
+counter.updateAndGet(x -> x * 2);   // Java 8+，函数式更新
+counter.getAndUpdate(x -> x + 1);
+counter.accumulateAndGet(10, Integer::sum);   // 累加
+```
+
+### 2.2 引用类型
+
+- **`AtomicReference＜V＞`**——引用类型原子更新
+- **`AtomicStampedReference＜V＞`**——带版本号，解决 ABA
+- **`AtomicMarkableReference＜V＞`**——带布尔标记
+
+```java
+AtomicReference<String> ref = new AtomicReference<>("init");
+ref.set("new");
+String old = ref.getAndSet("newer");
+boolean success = ref.compareAndSet("newer", "newest");
+```
+
+### 2.3 数组类型
+
+- **`AtomicIntegerArray`**/`AtomicLongArray`/`AtomicReferenceArray`
+
+```java
+AtomicIntegerArray arr = new AtomicIntegerArray(10);
+arr.incrementAndGet(0);
+arr.compareAndSet(0, 1, 5);
+```
+
+### 2.4 字段更新器
+
+- **`AtomicIntegerFieldUpdater＜T＞`**
+- **`AtomicLongFieldUpdater＜T＞`**
+- **`AtomicReferenceFieldUpdater＜T,V＞`**
+
+让**指定类的指定 `volatile` 字段**变成原子更新——不需要把字段包装成 `AtomicInteger`，节省内存。
+
+```java
+class Person {
+    volatile int age;   // 必须 volatile
+}
+
+AtomicIntegerFieldUpdater<Person> ageUpdater =
+    AtomicIntegerFieldUpdater.newUpdater(Person.class, "age");
+
+Person p = new Person();
+ageUpdater.incrementAndGet(p);
+```
+
+**限制**：字段必须是 `volatile`、非 `private`、非 `static`。
+
+### 2.5 累加器（Java 8+）
+
+- **`LongAdder`**/`DoubleAdder`——高并发累加专用
+- **`LongAccumulator`**/`DoubleAccumulator`——自定义累加函数
+
+`LongAdder` 是 `AtomicLong` 的高并发替代——后面会详讲。
+
+## 三、ABA 问题
+
+### 3.1 什么是 ABA
+
+CAS 只比较"值是否变化"，不关心"变化过程"。如果值从 A→B→A，CAS 认为没变过——但其实中间发生过变化。
+
+**典型场景**——栈的无锁实现：
+
+```
+栈顶 A → B → C
+
+线程 1 准备 pop A：读 top = A，准备 CAS(top, A, B)
+线程 2 在线程 1 CAS 前，pop A、pop B、push A：
+    栈变成 A → C（B 被弹走了，A 被重新压回）
+
+线程 1 CAS(top, A, B)：成功！top 变成 B
+但 B 已经被弹出栈了，现在栈顶指向一个不再栈里的节点——链表损坏！
+```
+
+ABA 的危害：**数据结构被破坏，但 CAS 还以为成功了**。
+
+### 3.2 AtomicStampedReference 解决 ABA
+
+`AtomicStampedReference` 给每个值配一个**版本号**——每次修改版本号递增，CAS 同时比较值和版本号。
+
+```java
+AtomicStampedReference<Integer> ref =
+    new AtomicStampedReference<>(100, 0);   // 初始值 100，版本 0
+
+int[] stampHolder = new int[1];
+Integer current = ref.get(stampHolder);
+int stamp = stampHolder[0];   // 读出当前版本
+
+// 别的线程把 100 改成 200 再改回 100，但 stamp 变了
+ref.compareAndSet(100, 200, 0, 1);   // 100→200, stamp 0→1
+ref.compareAndSet(200, 100, 1, 2);   // 200→100, stamp 1→2
+
+// 我用旧 stamp CAS：失败，因为 stamp 已经是 2 不是 0
+boolean ok = ref.compareAndSet(100, 999, stamp, stamp + 1);
+System.out.println(ok);   // false
+```
+
+`AtomicMarkableReference` 类似，但只用一个 boolean 标记——适合"是否被删除过"这种二元判断。
+
+### 3.3 ABA 实际影响
+
+ABA **只在某些场景下是问题**：
+
+- **单纯计数**（如 `AtomicInteger`）——ABA 没影响，我们只关心最终值。
+- **链式数据结构**（如栈、队列的节点复用）——ABA 会破坏结构，必须用版本号。
+
+## 四、LongAdder vs AtomicLong
+
+这是高并发计数器设计的经典对比。
+
+### 4.1 AtomicLong 的瓶颈
+
+`AtomicLong` 所有线程对同一个 `volatile long value` 做 CAS——高并发下：
+
+- CAS 频繁失败，自旋重试，CPU 飙升。
+- 同一缓存行反复 Invalidate——缓存一致性协议开销大（虚假共享）。
+
+### 4.2 LongAdder 的分段思想
+
+`LongAdder` 把一个计数器**拆成多个 Cell**（base + 若干 Cell），每个线程优先 CAS 自己的 Cell，最后 `sum()` 时把所有 Cell 加起来。
+
+```
+AtomicLong:        value ←── CAS ── 线程 1/2/3/4/.../100   (全部争用一处)
+
+LongAdder:         base      ← CAS（无 Cell 时）
+                   Cell[0]   ← CAS ── 线程 1
+                   Cell[1]   ← CAS ── 线程 2
+                   Cell[2]   ← CAS ── 线程 3
+                   ...
+                   sum() = base + ΣCell[i]
+```
+
+争用被分散到多个 Cell——每个 Cell 的 CAS 失败概率大幅降低。**这就是"分离状态"思想的胜利**——把共享状态分离成多个独立状态，避免争用。
+
+### 4.3 性能对比
+
+| 场景 | AtomicLong | LongAdder |
+| --- | --- | --- |
+| 低并发（＜4 线程） | 接近 | 接近 |
+| 中高并发 | 慢 | 快 2-5 倍 |
+| 极高并发 | 极慢（CAS 风暴） | 快 10+ 倍 |
+| sum() 调用 | O(1) | O(n)，遍历所有 Cell |
+| 内存 | 小 | 大（多个 Cell） |
+
+**适用**：
+
+- **`LongAdder` 适合"高频写、低频读"的计数场景**——统计接口 QPS、采集指标。
+- **`AtomicLong` 适合"读写均衡"或"需要序列号/全局唯一 id"**——因为 `LongAdder.sum()` 不保证强一致性（读期间可能有 Cell 在更新）。
+
+`Cell` 类还用了 `@Contended` 注解——避免虚假共享，进一步加速。
+
+### 4.4 LongAccumulator
+
+`LongAccumulator` 是 `LongAdder` 的泛化——可指定累加函数：
+
+```java
+LongAccumulator max = new LongAccumulator(Long::max, Long.MIN_VALUE);
+max.accumulate(10);
+max.accumulate(20);
+max.get();   // 20
+```
+
+## 五、非阻塞算法简介
+
+**非阻塞算法**（Non-blocking Algorithm）——线程失败或挂起不会导致其他线程无法推进。基于 CAS 的算法是非阻塞的。
+
+### 5.1 阻塞 vs 非阻塞 vs 无锁
+
+| 类别 | 描述 | 例子 |
+| --- | --- | --- |
+| **阻塞** | 线程拿不到锁就挂起 | `synchronized`、`ReentrantLock.lock` |
+| **非阻塞** | 失败不挂起，可重试 | CAS 自旋 |
+| **无锁（lock-free）** | 至少一个线程能进展 | `AtomicInteger`、`ConcurrentLinkedQueue` |
+| **无等待（wait-free）** | 每个线程都保证有限步内完成 | 极少，实现复杂 |
+
+### 5.2 经典非阻塞算法：Treibor Stack
+
+无锁栈——用 `AtomicReference＜Node＞` 保存栈顶，push/pop 都用 CAS：
+
+```java
+class ConcurrentStack<T> {
+    AtomicReference<Node<T>> top = new AtomicReference<>();
+
+    public void push(T value) {
+        Node<T> newNode = new Node<>(value);
+        Node<T> oldTop;
+        do {
+            oldTop = top.get();
+            newNode.next = oldTop;
+        } while (!top.compareAndSet(oldTop, newNode));
+    }
+
+    public T pop() {
+        Node<T> oldTop, newTop;
+        do {
+            oldTop = top.get();
+            if (oldTop == null) return null;
+            newTop = oldTop.next;
+        } while (!top.compareAndSet(oldTop, newTop));
+        return oldTop.value;
+    }
+
+    static class Node<T> {
+        T value;
+        Node<T> next;
+        Node(T v) { value = v; }
+    }
+}
+```
+
+这个栈在 push/pop 时用 CAS——失败就自旋重试。多个线程同时操作时，至少一个能成功——是无锁的。
+
+注意：Treibor Stack 的 pop **存在 ABA 问题**——节点被弹出后又重新 push，CAS 仍可能成功，但语义已被破坏。生产级实现需要用 `AtomicStampedReference` 或 GC 来避免（GC 保证弹出的节点不会被复用）。
+
+`ConcurrentLinkedQueue`（Michael-Scott 算法）就是无锁队列的经典实现，我们下一章会讲。
+
+## 六、实战：原子类与 CAS 演示
+
+下面这个例子对比 `synchronized`/`AtomicInteger`/`LongAdder` 的性能，演示 ABA 问题和 `AtomicStampedReference` 的解决，以及字段更新器的用法。
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        int threads = 10;
+        int perThread = 1_000_000;
+
+        // === 1. 性能对比 ===
+        System.out.println("=== 原子类性能对比 ===");
+        System.out.println("线程数: " + threads + ", 每线程: " + perThread);
+        System.out.println("期望: " + ((long) threads * perThread) + "\\n");
+
+        SyncCounter sync = new SyncCounter();
+        long t1 = testCounter(threads, perThread, sync::increment, sync::get);
+        System.out.printf("%-20s 结果=%-10d 耗时=%d ms%n",
+            "synchronized", sync.get(), t1);
+
+        AtomicCounter atomic = new AtomicCounter();
+        long t2 = testCounter(threads, perThread, atomic::increment, atomic::get);
+        System.out.printf("%-20s 结果=%-10d 耗时=%d ms%n",
+            "AtomicInteger", atomic.get(), t2);
+
+        LongAdderCounter adder = new LongAdderCounter();
+        long t3 = testCounter(threads, perThread, adder::increment, adder::get);
+        System.out.printf("%-20s 结果=%-10d 耗时=%d ms%n",
+            "LongAdder", adder.get(), t3);
+
+        // === 2. ABA 问题演示 ===
+        System.out.println("\\n=== ABA 问题演示 ===");
+        AtomicReference<String> ref = new AtomicReference<>("A");
+        Thread tA = new Thread(() -> {
+            String cur = ref.get();
+            try { Thread.sleep(100); } catch (InterruptedException e) {}
+            // 模拟 ABA：另一线程在期间改 A→B→A
+            boolean ok = ref.compareAndSet(cur, "C");
+            System.out.println("无版本号 CAS(A→C): " + (ok ? "成功（但 ABA 隐患）" : "失败"));
+        });
+
+        Thread tB = new Thread(() -> {
+            try { Thread.sleep(50); } catch (InterruptedException e) {}
+            ref.compareAndSet("A", "B");   // A→B
+            ref.compareAndSet("B", "A");   // B→A
+            System.out.println("另一线程做了 A→B→A");
+        });
+        tA.start(); tB.start();
+        tA.join(); tB.join();
+
+        // === 3. AtomicStampedReference 解决 ABA ===
+        System.out.println("\\n=== AtomicStampedReference 解决 ABA ===");
+        AtomicStampedReference<String> sref =
+            new AtomicStampedReference<>("A", 0);
+        int[] stampHolder = new int[1];
+        String curValue = sref.get(stampHolder);
+        int curStamp = stampHolder[0];
+
+        Thread sA = new Thread(() -> {
+            try { Thread.sleep(100); } catch (InterruptedException e) {}
+            // 用旧 stamp CAS——会失败
+            boolean ok = sref.compareAndSet("A", "C", curStamp, curStamp + 1);
+            System.out.println("带版本号 CAS(A→C, 旧 stamp): " + (ok ? "成功" : "失败（检测到变化）"));
+        });
+        Thread sB = new Thread(() -> {
+            try { Thread.sleep(50); } catch (InterruptedException e) {}
+            sref.compareAndSet("A", "B", 0, 1);   // A→B, stamp 0→1
+            sref.compareAndSet("B", "A", 1, 2);   // B→A, stamp 1→2
+            System.out.println("另一线程做了 A→B→A，stamp 也变了");
+        });
+        sA.start(); sB.start();
+        sA.join(); sB.join();
+
+        // === 4. AtomicIntegerFieldUpdater ===
+        System.out.println("\\n=== 字段更新器 ===");
+        AtomicIntegerFieldUpdater<Account> balUpdater =
+            AtomicIntegerFieldUpdater.newUpdater(Account.class, "balance");
+        Account acc = new Account(100);
+        balUpdater.addAndGet(acc, 50);
+        System.out.println("加 50 后余额: " + acc.balance);
+        balUpdater.compareAndSet(acc, 150, 200);
+        System.out.println("CAS 后余额: " + acc.balance);
+
+        // === 5. AtomicReference 自旋实现锁 ===
+        System.out.println("\\n=== CAS 实现简单自旋锁 ===");
+        SpinLock lock = new SpinLock();
+        AtomicInteger counter = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        CountDownLatch latch = new CountDownLatch(4);
+        for (int i = 0; i < 4; i++) {
+            pool.submit(() -> {
+                for (int j = 0; j < 10000; j++) {
+                    lock.lock();
+                    try { counter.incrementAndGet(); }
+                    finally { lock.unlock(); }
+                }
+                latch.countDown();
+            });
+        }
+        latch.await();
+        pool.shutdown();
+        System.out.println("自旋锁保护下结果: " + counter.get() + " (期望 40000)");
+    }
+
+    static long testCounter(int threads, int perThread, Runnable inc, java.util.function.LongSupplier get) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch go = new CountDownLatch(1);
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                ready.countDown();
+                try { go.await(); } catch (InterruptedException e) { return; }
+                for (int j = 0; j < perThread; j++) inc.run();
+            });
+        }
+        ready.await();
+        long start = System.nanoTime();
+        go.countDown();
+        pool.shutdown();
+        pool.awaitTermination(60, TimeUnit.SECONDS);
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+}
+
+class SyncCounter {
+    long count = 0;
+    synchronized void increment() { count++; }
+    long get() { return count; }
+}
+class AtomicCounter {
+    AtomicInteger count = new AtomicInteger();
+    void increment() { count.incrementAndGet(); }
+    long get() { return count.get(); }
+}
+class LongAdderCounter {
+    LongAdder count = new LongAdder();
+    void increment() { count.increment(); }
+    long get() { return count.sum(); }
+}
+
+class Account {
+    volatile int balance;
+    Account(int b) { balance = b; }
+}
+
+// CAS 自旋锁
+class SpinLock {
+    private final AtomicBoolean locked = new AtomicBoolean(false);
+    public void lock() {
+        while (!locked.compareAndSet(false, true)) {
+            Thread.onSpinWait();   // Java 9+，提示 CPU 在自旋，优化功耗
+        }
+    }
+    public void unlock() {
+        locked.set(false);
+    }
+}`} />
+
+> **观察重点**：
+> - **性能排序**：`LongAdder` > `AtomicInteger` > `synchronized`（高并发下）。
+> - **ABA 演示**：无版本号的 CAS 在 A→B→A 后仍能成功——埋下隐患。
+> - **`AtomicStampedReference`**：用版本号能检测出中间的变化，CAS 失败。
+> - **`AtomicIntegerFieldUpdater`**：让普通 `volatile` 字段获得原子更新能力，不用包装类。
+> - **自旋锁**：用 `AtomicBoolean`+CAS 实现——无锁但可能忙等。`Thread.onSpinWait()`（Java 9+）提示 CPU 自旋。
+
+## 七、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| CAS | 硬件原子指令，比较并交换；Java 通过 `Unsafe`/`VarHandle` 调用 |
+| CAS 三大问题 | ABA、自旋开销、只能单变量 |
+| `AtomicInteger`/`AtomicLong` | 基本类型原子类，`incrementAndGet`/`compareAndSet` |
+| `AtomicReference` | 引用类型原子更新 |
+| `AtomicStampedReference` | 加版本号解决 ABA |
+| `AtomicIntegerFieldUpdater` | 让指定 volatile 字段原子更新，节省内存 |
+| ABA | 值 A→B→A 让 CAS 误判；链式结构致命，纯计数无害 |
+| `LongAdder` | 分段累加，高并发远超 `AtomicLong` |
+| `LongAdder` 适用 | 高频写低频读、统计计数 |
+| `AtomicLong` 适用 | 序列号、读写均衡 |
+| 非阻塞算法 | CAS 自旋，至少一个线程能进展 |
+| `Thread.onSpinWait()` | Java 9+，提示 CPU 自旋优化 |
+
+**记忆口诀**：
+
+- **CAS 是"乐观锁"**——先干再查，失败重试，不加锁。
+- **ABA 在计数无影响，在链式结构致命**——栈/队列要用版本号。
+- **`LongAdder` 是高并发计数之王**——分段思想，分而治之。
+- **`AtomicLong` 适合序列号**——`LongAdder.sum()` 不强一致。
+- **字段更新器省内存**——但字段必须 `volatile` 非 private。
+
+## 结语：从锁到无锁
+
+原子类与 CAS 是 Java 并发的"另一条腿"——它用硬件原子指令替代锁，在低争用场景下性能远胜锁。`AtomicInteger` 让计数器无锁安全，`LongAdder` 让高并发计数器飙升，`AtomicStampedReference` 解决 ABA 难题，CAS 自旋锁展示了无锁的可能。
+
+但 CAS 也不是万能——高争用下自旋开销大，单变量限制存在。下一章我们看 **并发集合**——`ConcurrentHashMap`（CAS + synchronized 锁桶）、`CopyOnWriteArrayList`（写时复制）、`ConcurrentLinkedQueue`（无锁 CAS）、`BlockingQueue` 系列。它们把锁和 CAS 巧妙组合，提供线程安全的容器——是日常并发编程最常用的工具。

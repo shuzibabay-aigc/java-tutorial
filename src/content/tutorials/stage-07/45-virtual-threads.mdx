@@ -1,0 +1,518 @@
+---
+title: "虚拟线程与结构化并发"
+chapter: 45
+stage: "第七阶段"
+stageName: "并发编程"
+order: 12
+description: "掌握虚拟线程 vs 平台线程、适用场景与陷阱、Thread.startVirtualThread、结构化并发 StructuredTaskScope、Scoped Values，实战高并发 HTTP 请求"
+pubDate: 2026-07-03
+tags: ["Java", "虚拟线程", "Virtual Thread", "结构化并发", "Scoped Values", "JDK 21"]
+---
+
+# 虚拟线程与结构化并发
+
+这一章是第七阶段的收官——讲 **虚拟线程（Virtual Thread）** 和 **结构化并发（Structured Concurrency）**。这是 Java 21（2023 年 9 月正式发布）带来的最大变革，也是 Java 并发 20 年来最重要的进步。
+
+前面 11 章我们学的所有并发工具——`Thread`、`synchronized`、`ExecutorService`、`CompletableFuture`——都建立在"线程很贵"这个假设上。一个 Java 线程对应一个 OS 线程，几 MB 内存，所以我们要用线程池复用、用 `CompletableFuture` 异步避免阻塞、用 Reactive Streams 反应式避免线程堆积。
+
+虚拟线程颠覆了这个假设——**线程不再贵**。一个 JVM 可以跑几百万个虚拟线程，每个虚拟线程几 KB 内存，调度由 JVM 自己掌控。这意味着我们可以重新拥抱最简单直观的"一个请求一个线程"模型——用同步代码风格写出异步性能。这是革命性的。
+
+## 一、平台线程 vs 虚拟线程
+
+### 1.1 平台线程（Platform Thread）
+
+JDK 21 之前的 Java 线程都是**平台线程**——一对一映射到 OS 线程。
+
+```
+Java 线程 1 ─→ OS 线程 1
+Java 线程 2 ─→ OS 线程 2
+Java 线程 3 ─→ OS 线程 3
+```
+
+特点：
+
+- 每个线程占用 **几 MB 栈空间**（默认 1MB，可调）。
+- 创建/销毁要陷入内核，开销大。
+- OS 线程数有限——通常几千个就到瓶颈（受内存、调度、上下文切换限制）。
+- 阻塞调用（IO、`sleep`、`wait`）会**占用整个 OS 线程**——线程挂起，OS 调度别的线程，但 OS 线程还在那"等着"，不能干别的。
+
+平台线程的"贵"导致了线程池的必要性——复用线程、控制并发数、避免创建开销。`CompletableFuture` 的"异步回调"模式也是为了"少量线程处理大量任务"。
+
+### 1.2 虚拟线程（Virtual Thread）
+
+虚拟线程是 JVM 调度的轻量级线程——多个虚拟线程复用少量平台线程（**载体线程**，carrier thread）。
+
+```
+虚拟线程 1 ┐
+虚拟线程 2 ├─→ 载体线程 1 (OS 线程)
+虚拟线程 3 ┘
+虚拟线程 4 ┐
+虚拟线程 5 ├─→ 载体线程 2 (OS 线程)
+虚拟线程 6 ┘
+...
+虚拟线程 1,000,000 ─→ (共享数十个载体线程)
+```
+
+特点：
+
+- 每个虚拟线程**几 KB 栈空间**（初始小，按需增长）。
+- 创建/销毁由 JVM 内部调度，开销小。
+- **阻塞调用不浪费载体线程**——虚拟线程阻塞时，JVM 把它从载体线程上"卸载"（unmount），载体线程去跑别的虚拟线程。
+- 数量可达**百万级**——瓶颈是堆内存，不是线程调度。
+
+### 1.3 关键洞察：阻塞变成免费
+
+这是虚拟线程的精髓——**阻塞调用不再浪费 OS 线程**。当一个虚拟线程调用 `socket.read()`、`Thread.sleep()`、`future.get()` 阻塞时，JVM 自动把它卸载，载体线程去跑别的虚拟线程。等阻塞解除（数据来了/sleep 到了），JVM 再把它装载（mount）回某个载体线程继续执行。
+
+这意味着——**你可以写"同步阻塞"代码，但获得"异步非阻塞"性能**。
+
+```java
+// 传统平台线程模式：10000 个连接要 10000 个线程，内存爆炸
+// 用 CompletableFuture：10000 个连接用 4 个线程，但代码异步、嵌套、难写
+
+// 虚拟线程：10000 个连接用 10000 个虚拟线程，同步代码风格
+for (int i = 0; i < 10000; i++) {
+    Thread.startVirtualThread(() -> handleRequest(socket));
+}
+```
+
+`handleRequest` 里可以放心写阻塞调用——`socket.read()`、`db.query()`、`Thread.sleep()` 都不会浪费线程。
+
+## 二、虚拟线程的适用场景
+
+### 2.1 适合：IO 密集型
+
+虚拟线程的"杀手锏"是 IO 密集型场景：
+
+- **Web 服务器**——一个请求一个虚拟线程，阻塞 IO 不浪费线程。
+- **数据库连接池查询**——并发查询多个表，每个查询一个虚拟线程。
+- **微服务网关**——并行调多个下游，等响应时不占线程。
+- **批处理**——IO 等待多的批处理任务。
+
+### 2.2 不适合：CPU 密集型
+
+CPU 密集型任务（纯计算、加密、压缩）——虚拟线程没优势：
+
+- CPU 一直在跑，没有"阻塞卸载"的机会。
+- 虚拟线程不会比平台线程快——它只是省线程数，CPU 还是要算。
+- 用 `parallelStream` 或固定大小的平台线程池更合适。
+
+### 2.3 不适合：极短任务
+
+任务极短（纳秒级）——虚拟线程的创建/调度开销可能超过任务本身。用 `ForkJoinPool` 或直接同步执行。
+
+## 三、虚拟线程的创建
+
+### 3.1 Thread.startVirtualThread
+
+最简单的方式——`Thread.startVirtualThread(Runnable)`：
+
+```java
+Thread.startVirtualThread(() -> {
+    System.out.println("虚拟线程跑在 " + Thread.currentThread());
+});
+```
+
+### 3.2 Thread.ofVirtual
+
+更灵活的方式——`Thread.ofVirtual()`：
+
+```java
+Thread vt = Thread.ofVirtual().name("my-vt").start(() -> {
+    // 任务
+});
+
+// 工厂模式
+Thread.Builder builder = Thread.ofVirtual().name("worker-", 0);
+Thread t1 = builder.start(task1);   // worker-0
+Thread t2 = builder.start(task2);   // worker-1
+```
+
+### 3.3 Executors.newVirtualThreadPerTaskExecutor
+
+`ExecutorService` 风格——每个任务一个虚拟线程：
+
+```java
+try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+    for (int i = 0; i < 10000; i++) {
+        pool.submit(() -> handleRequest(i));
+    }
+}   // try-with-resources 自动等所有任务完成
+```
+
+**这是虚拟线程推荐的"线程池"用法**——它实际上没有"池"（每个任务都新建虚拟线程），但 API 兼容 `ExecutorService`。可以平滑迁移老代码。
+
+### 3.4 是否要池化虚拟线程？
+
+**不要池化虚拟线程**——直接创建销毁即可。平台线程池的目的是"复用昂贵的线程"，虚拟线程不贵，池化反而是反模式。用 `newVirtualThreadPerTaskExecutor` 这种"每任务一线程"模式。
+
+## 四、虚拟线程的陷阱
+
+虚拟线程不是万能——有几个陷阱必须知道。
+
+### 4.1 synchronized 阻塞
+
+虚拟线程在 `synchronized` 块里阻塞时**会钉住（pin）载体线程**——载体线程不能去跑别的虚拟线程，相当于退化成平台线程。
+
+JDK 21 的虚拟线程在 `synchronized` 块内阻塞时无法卸载——这是初期实现的限制（JDK 24 才完整解决）。在虚拟线程里大量 `synchronized` + 阻塞会让虚拟线程失去优势。
+
+**修复**：把 `synchronized` 替换为 `ReentrantLock`：
+
+```java
+// 不好（在虚拟线程里）
+public synchronized void method() {
+    socket.read();   // 阻塞 → pin 载体线程
+}
+
+// 好
+private final ReentrantLock lock = new ReentrantLock();
+public void method() {
+    lock.lock();
+    try {
+        socket.read();   // 阻塞 → 卸载虚拟线程，载体线程可跑别的
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+### 4.2 ThreadLocal 开销
+
+虚拟线程数量可以百万级——每个虚拟线程的 `ThreadLocal` 都占内存。如果 `ThreadLocal` 存的是 `SimpleDateFormat` 这种"大对象"，百万虚拟线程 × 每个 1 个 `SimpleDateFormat` = 内存爆炸。
+
+**修复**：用 **Scoped Values**（后面讲）替代大对象 `ThreadLocal`，或者评估真的需要 ThreadLocal 吗。
+
+### 4.3 阻塞 native 调用 / JNI
+
+虚拟线程无法卸载在 JNI/native 调用中阻塞的线程——会钉住载体线程。例如某些 JNI 库的阻塞 IO。
+
+### 4.4 CPU 密集型无收益
+
+CPU 密集任务用虚拟线程没意义——虚拟线程的并发度受 `availableProcessors()` 限制（载体线程数）。
+
+## 五、结构化并发（Structured Concurrency）
+
+**结构化并发（Structured Concurrency）** 是一种编程范式——并发任务的生命周期被组织成"层次结构"，父任务等所有子任务完成，子任务异常会传播给父任务。JEP 453 在 JDK 21 引入（预览），JEP 480/JEP 505 等持续改进。
+
+### 5.1 为什么需要结构化并发
+
+传统并发的痛点：
+
+```java
+// 两个并行子任务
+Future<String> user = pool.submit(() -> findUser());
+Future<Order> order = pool.submit(() -> findOrder());
+// 如果 findUser 抛异常，findOrder 还在跑——浪费资源
+// 如果 findOrder 卡死，整个流程卡死
+// 异常处理复杂——try/catch 拿不到子任务的异常
+String u = user.get();   // 这里抛异常
+order.get();             // 不会执行，但 order 任务还在后台跑
+```
+
+问题：
+
+- 子任务生命周期"逃逸"——父任务挂了，子任务可能还在跑。
+- 异常处理不优雅——一个失败，另一个还在跑浪费资源。
+- 没有统一的取消机制。
+
+### 5.2 StructuredTaskScope
+
+`StructuredTaskScope` 是结构化并发的核心 API：
+
+```java
+try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+    Subtask<String> user = scope.fork(() -> findUser());
+    Subtask<Order> order = scope.fork(() -> findOrder());
+
+    scope.join();              // 等所有子任务完成
+    scope.throwIfFailed();     // 任一失败就抛异常
+
+    // 两个都成功
+    process(user.get(), order.get());
+}
+```
+
+特点：
+
+- **`fork` 启动子任务**（在虚拟线程上跑）。
+- **`join` 等所有完成**——父任务阻塞等待。
+- **`throwIfFailed`**——任一子任务失败，抛 `ExecutionException`，包含所有异常。
+- **`ShutdownOnFailure`**：任一失败就取消其他子任务——避免浪费资源。
+- **`ShutdownOnSuccess`**：任一成功就取消其他——适合"任一返回即可"。
+- **try-with-resources 关闭时取消所有未完成子任务**——子任务不会逃逸。
+
+### 5.3 自定义 ShutdownPolicy
+
+可以实现 `StructuredTaskScope` 自定义关闭策略——比如"等 90% 完成"、"超时关闭"等。
+
+## 六、Scoped Values（作用域值）
+
+**Scoped Values（作用域值）** 是 `ThreadLocal` 的现代替代——专为虚拟线程设计。JEP 446 在 JDK 21 引入（预览）。
+
+### 6.1 ThreadLocal 的问题
+
+- **可变**——任何代码都能 `set`，难以追踪。
+- **生命周期长**——线程结束才清理，线程池里容易泄漏。
+- **继承开销**——`InheritableThreadLocal` 创建子线程时复制所有值，虚拟线程百万级时开销大。
+- **不限定作用域**——方法调用链上的任何代码都能读到，可能意外修改。
+
+### 6.2 ScopedValue 的优势
+
+```java
+static final ScopedValue<String> USER_ID = ScopedValue.newInstance();
+
+// 在作用域内绑定值
+ScopedValue.where(USER_ID, "user-42").run(() -> {
+    // 这个作用域内 USER_ID.get() == "user-42"
+    processRequest();
+});
+// 作用域外 USER_ID 未绑定
+
+// 也可以返回值
+String result = ScopedValue.where(USER_ID, "user-42").call(() -> compute());
+```
+
+特点：
+
+- **不可变**——绑定时设值，作用域内只能读，不能改。
+- **作用域限定**——只在 `run`/`call` 块内有效，离开自动失效。
+- **零开销继承**——虚拟线程继承父的作用域值不复制。
+- **类型安全**——`ScopedValue＜String＞` 只能放 String。
+
+### 6.3 何时用 ScopedValue
+
+- **请求上下文**（traceId、租户 ID、用户身份）——不可变，作用域限定。
+- **配置参数**——只读配置传给深层调用。
+- **替代 `InheritableThreadLocal`**——虚拟线程百万级时关键。
+
+## 七、实战：用虚拟线程实现高并发
+
+下面这个例子演示虚拟线程的创建、与平台线程的对比、`synchronized` 钉住问题、`StructuredTaskScope` 结构化并发、`ScopedValue`（如可用）。
+
+> **注意**：`StructuredTaskScope` 和 `ScopedValue` 在 JDK 21 是预览特性，需要 `--enable-preview` 启动。在线沙箱可能不支持——下面的代码主要演示**已稳定的虚拟线程 API**（`Thread.startVirtualThread`、`Executors.newVirtualThreadPerTaskExecutor`），结构化并发的部分用注释标注。
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 虚拟线程演示 ===");
+        System.out.println("JVM 版本: " + System.getProperty("java.version"));
+        System.out.println("CPU 核数: " + Runtime.getRuntime().availableProcessors());
+        System.out.println("是否支持虚拟线程: " + Thread.ofVirtual().getClass());
+
+        // === 1. 虚拟线程 vs 平台线程：内存与数量 ===
+        System.out.println("\\n=== 创建大量虚拟线程 ===");
+        int count = 100_000;
+        CountDownLatch latch = new CountDownLatch(count);
+        long start = System.currentTimeMillis();
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int i = 0; i < count; i++) {
+                pool.submit(() -> {
+                    try { Thread.sleep(10); } catch (InterruptedException e) {}
+                    latch.countDown();
+                });
+            }
+        }
+        System.out.println("10万虚拟线程 sleep 10ms，总耗时: "
+            + (System.currentTimeMillis() - start) + " ms");
+        System.out.println("（用平台线程跑 10 万线程会 OOM）");
+
+        // === 2. 虚拟线程做阻塞 IO（模拟）===
+        System.out.println("\\n=== 虚拟线程并发模拟 HTTP 请求 ===");
+        int requests = 1000;
+        AtomicInteger success = new AtomicInteger();
+        long t1 = System.currentTimeMillis();
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<Boolean>> futures = new ArrayList<>();
+            for (int i = 0; i < requests; i++) {
+                futures.add(pool.submit(() -> simulateHttp(i)));
+            }
+            for (Future<Boolean> f : futures) {
+                if (f.get()) success.incrementAndGet();
+            }
+        }
+        System.out.println("1000 个请求（每个 50ms IO），成功 " + success.get()
+            + "，耗时 " + (System.currentTimeMillis() - t1) + " ms");
+        System.out.println("（理论耗时 ≈ 50ms × 1000 / 载体线程数，但因虚拟线程阻塞不占线程，实际很快）");
+
+        // === 3. 平台线程做同样的事，对比 ===
+        System.out.println("\\n=== 平台线程对比（固定 200 线程）===");
+        success.set(0);
+        long t2 = System.currentTimeMillis();
+        try (ExecutorService pool = Executors.newFixedThreadPool(200)) {
+            List<Future<Boolean>> futures = new ArrayList<>();
+            for (int i = 0; i < requests; i++) {
+                futures.add(pool.submit(() -> simulateHttp(i)));
+            }
+            for (Future<Boolean> f : futures) {
+                if (f.get()) success.incrementAndGet();
+            }
+        }
+        System.out.println("1000 个请求，固定 200 平台线程，成功 " + success.get()
+            + "，耗时 " + (System.currentTimeMillis() - t2) + " ms");
+        System.out.println("（受线程数限制，并发度只有 200）");
+
+        // === 4. 虚拟线程的 synchronized pin 问题 ===
+        System.out.println("\\n=== synchronized 钉住问题演示 ===");
+        System.out.println("（在虚拟线程里 synchronized + 阻塞会钉住载体线程）");
+        ReentrantLock lock = new ReentrantLock();
+        AtomicInteger counter = new AtomicInteger();
+
+        // 用 ReentrantLock（推荐）
+        long t3 = System.currentTimeMillis();
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < 1000; i++) {
+                futures.add(pool.submit(() -> {
+                    lock.lock();
+                    try { counter.incrementAndGet(); }
+                    finally { lock.unlock(); }
+                }));
+            }
+            for (Future<?> f : futures) f.get();
+        }
+        System.out.println("用 ReentrantLock，1000 次累加 = " + counter.get()
+            + "，耗时 " + (System.currentTimeMillis() - t3) + " ms");
+
+        // === 5. Thread.startVirtualThread 直接使用 ===
+        System.out.println("\\n=== Thread.startVirtualThread ===");
+        Thread vt = Thread.startVirtualThread(() -> {
+            System.out.println("虚拟线程名: " + Thread.currentThread());
+            System.out.println("是否虚拟: " + Thread.currentThread().isVirtual());
+            try { Thread.sleep(50); } catch (InterruptedException e) {}
+            System.out.println("虚拟线程完成");
+        });
+        vt.join();
+        System.out.println("虚拟线程状态: " + vt.getState() + " (TERMINATED)");
+
+        // === 6. 结构化并发（注释：需 --enable-preview）===
+        System.out.println("\\n=== 结构化并发（演示思路）===");
+        System.out.println("/* JDK 21 预览特性，需要 --enable-preview：");
+        System.out.println("try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {");
+        System.out.println("    Subtask<String> user = scope.fork(() -> findUser());");
+        System.out.println("    Subtask<String> order = scope.fork(() -> findOrder());");
+        System.out.println("    scope.join();          // 等所有子任务");
+        System.out.println("    scope.throwIfFailed(); // 任一失败就抛");
+        System.out.println("    return user.get() + \", \" + order.get();");
+        System.out.println("}");
+        System.out.println("*/");
+
+        // === 7. 用 CompletableFuture 模拟"两个并行任务+任一失败取消" ===
+        System.out.println("\\n=== 用现有 API 模拟结构化并发 ===");
+        long t4 = System.currentTimeMillis();
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+            CompletableFuture<String> userF = CompletableFuture.supplyAsync(() -> {
+                sleep(100); return "User-Alice";
+            }, pool);
+            CompletableFuture<String> orderF = CompletableFuture.supplyAsync(() -> {
+                sleep(150); return "Order-99";
+            }, pool);
+
+            CompletableFuture<Void> all = CompletableFuture.allOf(userF, orderF);
+            try {
+                all.get(500, TimeUnit.MILLISECONDS);
+                System.out.println("聚合: " + userF.get() + " / " + orderF.get());
+            } catch (Exception e) {
+                System.out.println("失败: " + e.getMessage());
+            }
+        }
+        System.out.println("耗时 " + (System.currentTimeMillis() - t4) + " ms (并行 max(100,150)=150ms)");
+    }
+
+    static boolean simulateHttp(int i) {
+        try {
+            Thread.sleep(50);   // 模拟网络 IO
+            return true;
+        } catch (InterruptedException e) {
+            return false;
+        }
+    }
+
+    static void sleep(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException e) {}
+    }
+}`} />
+
+> **观察重点**：
+> - **10 万虚拟线程**：能轻松创建，每个虚拟线程几 KB——同样数量的平台线程会 OOM。
+> - **1000 个 HTTP 请求（虚拟线程）**：因为阻塞 IO 不占线程，并发度高，耗时短。
+> - **1000 个 HTTP 请求（200 平台线程）**：受线程数限制，要排队，耗时长。
+> - **`ReentrantLock` 替代 `synchronized`**：在虚拟线程里推荐这样做，避免 pin。
+> - **`Thread.currentThread().isVirtual()`**：判断当前线程是否虚拟。
+> - **结构化并发**：JDK 21 预览，需要 `--enable-preview`。在稳定前可用 `CompletableFuture` + `newVirtualThreadPerTaskExecutor` 模拟。
+> - **try-with-resources 关闭 `ExecutorService`**：自动 `awaitTermination`——优雅关闭。
+
+## 八、迁移建议：从平台线程到虚拟线程
+
+### 8.1 什么时候迁移
+
+- **IO 密集型的服务器**——立刻能受益。
+- **大量阻塞调用的批处理**——立刻能受益。
+- **CPU 密集型**——保持 `parallelStream`/`ForkJoinPool`。
+- **任务极短（纳秒级）**——保持平台线程池。
+
+### 8.2 迁移步骤
+
+1. **检查 `synchronized` 阻塞**——替换为 `ReentrantLock`。
+2. **检查 `ThreadLocal` 大对象**——评估能否用 `ScopedValue` 或方法参数。
+3. **检查 native/JNI 阻塞调用**——可能 pin。
+4. **替换线程池**——`Executors.newFixedThreadPool` → `Executors.newVirtualThreadPerTaskExecutor`。
+5. **简化异步代码**——`CompletableFuture` 链可以替换为同步代码 + 虚拟线程。
+
+### 8.3 不要做的
+
+- **不要池化虚拟线程**——直接 `newVirtualThreadPerTaskExecutor`。
+- **不要在虚拟线程跑 CPU 密集任务**——没收益。
+- **不要假设虚拟线程立即执行**——还是受载体线程数（CPU）限制。
+- **不要在虚拟线程里大量 `synchronized`+阻塞**——会 pin。
+
+## 九、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| 平台线程 | 一对一映射 OS 线程，几 MB 栈，数量受限 |
+| 虚拟线程 | JVM 调度，几 KB 栈，百万级，阻塞不浪费载体线程 |
+| `Thread.startVirtualThread` | 创建并启动虚拟线程 |
+| `Thread.ofVirtual()` | 工厂模式创建虚拟线程 |
+| `Executors.newVirtualThreadPerTaskExecutor` | 每任务一虚拟线程的 ExecutorService |
+| 适用场景 | IO 密集型（Web、DB、网关、批处理） |
+| 不适用 | CPU 密集型、极短任务 |
+| `synchronized` pin | 虚拟线程在 sync 块内阻塞钉住载体线程——用 `ReentrantLock` |
+| ThreadLocal 开销 | 百万虚拟线程 × ThreadLocal 内存爆炸——用 ScopedValue |
+| 结构化并发 | `StructuredTaskScope`——父等所有子，子异常传播，统一取消（JDK 21 预览） |
+| Scoped Values | 不可变、限定作用域、零继承开销——替代 ThreadLocal（JDK 21 预览） |
+| 不要池化虚拟线程 | 池化是反模式，每任务新建即可 |
+
+**记忆口诀**：
+
+- **平台线程贵，虚拟线程轻**——百万级不是梦。
+- **虚拟线程适合 IO，不适合 CPU**——纯计算无收益。
+- **不要池化虚拟线程**——直接 `newVirtualThreadPerTaskExecutor`。
+- **`synchronized` 阻塞要钉住**——换 `ReentrantLock`。
+- **`ThreadLocal` 内存爆炸**——用 `ScopedValue` 或方法参数。
+- **结构化并发治"子任务逃逸"**——父等子、子异常传播、统一取消。
+
+## 结语：第七阶段完结——从裸线程到虚拟线程
+
+第七阶段到这里就结束了。回望这 12 章，Java 并发的故事是这样展开的：
+
+- **第 34 章 并发基础**——进程与线程、并发与并行、共享状态与分离状态、Java 并发史。
+- **第 35 章 线程基础**——三种创建方式、六种状态、`start`/`sleep`/`join`/`interrupt`。
+- **第 36 章 线程安全**——竞态条件、临界区、原子性/可见性/有序性、不可变对象。
+- **第 37 章 JMM**——主内存与工作内存、Happens-Before 八规则、指令重排、内存屏障。
+- **第 38 章 同步机制**——`synchronized`/monitor/锁升级、`volatile`、`ThreadLocal`、`wait`/`notify`、MESI。
+- **第 39 章 并发典型问题**——死锁四条件、饥饿与公平、活锁、嵌套监视器死锁、虚假共享。
+- **第 40 章 锁与同步器**——`ReentrantLock`/`ReadWriteLock`/`StampedLock`/`Condition`/`Semaphore`/`CountDownLatch`/`CyclicBarrier`/`Phaser`/`Exchanger`。
+- **第 41 章 原子类与 CAS**——`AtomicInteger`/`LongAdder`/`AtomicStampedReference`、CAS 原理、ABA、非阻塞算法。
+- **第 42 章 并发集合**——`ConcurrentHashMap`/`CopyOnWriteArrayList`/`ConcurrentLinkedQueue`/`BlockingQueue`/`ConcurrentSkipListMap`。
+- **第 43 章 线程池**——`ThreadPoolExecutor` 七参数、四种拒绝策略、`Executors` 陷阱、`ForkJoinPool`。
+- **第 44 章 CompletableFuture**——异步回调、链式编排、异常处理、多任务组合。
+- **第 45 章 虚拟线程与结构化并发**——Java 21 的革命、ScopedValue、结构化并发。
+
+这套能力从最底层的内存模型，到中间的锁/CAS/集合，再到上层的线程池/异步/虚拟线程，构成了 Java 处理"同时做多件事"的完整图景。每一层都解决了上一层的痛点，又为下一层铺好了路。
+
+掌握并发不只是为了应付面试——它是写出高性能、高可用 Java 应用的核心能力。从 Web 服务器到大数据处理，从数据库到游戏服务器，并发无处不在。希望这 12 章能让你在面对"同时做多件事"时，有理论的底气、工具的熟练、避坑的清醒——这是并发工程师的真正段位。
+
+并发编程结束了，但 Java 的旅程还在继续。下一阶段我们会进入 **网络编程与 NIO**——把"线程"和"数据"延伸到网络上，打开分布式与高并发服务的大门。虚拟线程让并发变得简单，网络编程让并发变得"远在天边，近在眼前"。我们下一阶段见。

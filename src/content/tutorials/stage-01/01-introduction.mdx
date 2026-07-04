@@ -1,0 +1,180 @@
+---
+title: "走进 Java 的世界"
+chapter: 1
+stage: "第一阶段"
+stageName: "Java 基础入门"
+order: 1
+description: "了解 Java 的历史、特性、JVM/JRE/JDK 的关系，安装 JDK 并运行第一个 HelloWorld 程序"
+pubDate: 2026-07-03
+tags: ["Java", "JVM", "JDK", "入门", "HelloWorld"]
+---
+
+# 走进 Java 的世界
+
+想象一杯热气腾腾的印尼爪哇咖啡（Java Coffee），浓郁的香气在空气中弥漫。1995 年，当 Sun Microsystems 的一群工程师在为一种新的编程语言命名时，他们手中正握着这样一杯咖啡。于是，一个注定会改变整个软件世界的名字诞生了——**Java**。
+
+这并非一段杜撰的轶事。Java 的图标——一杯冒着热气的咖啡杯，正是这段历史的见证。而我们要讲述的故事，就从这里开始。
+
+## 一、Java 的前世今生
+
+### 1.1 一杯咖啡的起源
+
+时间倒回 1991 年，Sun Microsystems 公司内部启动了一个名为 "Green Project"（绿色计划）的秘密项目。由 James Gosling（詹姆斯·高斯林）领导的团队，最初目标是开发一种用于家用电器、机顶盒等消费电子产品的小型分布式系统。他们创造的语言最初被命名为 **Oak**（橡树），灵感来自 Gosling 办公室外的一棵橡树。
+
+然而命运弄人，当他们准备注册商标时，发现 "Oak" 已经被另一家公司占用。于是在 1995 年，团队决定改名。据传，在一次咖啡馆的讨论中，"Java" 这个词从一群候选名称中脱颖而出——它简洁、好记，又带着一丝异域风情。同年 5 月 23 日，Java 在 SunWorld 大会上正式发布，从此踏上了它的传奇之路。
+
+### 1.2 Oracle 的接手
+
+故事在 2009 年迎来转折。这一年，数据库巨头 Oracle（甲骨文）公司以 74 亿美元收购了 Sun Microsystems，Java 的所有权随之易主。这一收购曾在开发者社区引发不小的担忧，但 Oracle 继续推动着 Java 的发展，并维持着每半年发布一个新版本的节奏。如今，Java 已经走过了三十个年头，依然稳居全球编程语言排行榜的前列。
+
+## 二、Java 的核心特性
+
+为什么 Java 能够历久弥新？答案藏在它的设计哲学中。让我们像品鉴咖啡一样，逐一品味它的核心特性。
+
+### 2.1 跨平台："一次编写，到处运行"
+
+这是 Java 最著名的口号（Write Once, Run Anywhere，简称 WORA）。想象你写了一封家书，如果用某种"通用语言"书写，无论收信人在北京、纽约还是东京，都能读懂——这就是 Java 跨平台的精髓。
+
+Java 源代码经过编译后，并不会生成特定平台的机器码，而是生成一种称为**字节码**（Bytecode）的中间格式。只要目标平台安装了 Java 虚拟机（JVM），字节码就能在其上运行。Windows、macOS、Linux，同一份字节码，到处可运行。
+
+### 2.2 面向对象
+
+Java 是一门纯粹的面向对象语言（Object-Oriented Programming，OOP）。在 Java 的世界里，万物皆对象——就像咖啡店里的每杯咖啡都有它的杯型、温度、糖度等属性，以及"被点单""被饮用"等行为。对象将数据与操作数据的方法封装在一起，使程序结构清晰、易于维护。
+
+### 2.3 自动内存管理
+
+在 C/C++ 的世界里，程序员必须手动分配和释放内存，稍有不慎就会导致内存泄漏或程序崩溃。Java 引入了**垃圾回收机制**（Garbage Collection，GC），由 JVM 自动追踪对象的引用，当对象不再被使用时自动回收其内存。这让程序员可以把更多精力放在业务逻辑上。
+
+### 2.4 多线程
+
+Java 从诞生之初就内置了对多线程（Multithreading）的支持。就像咖啡店里多个咖啡师同时制作不同的咖啡，Java 程序可以同时执行多个任务，充分利用现代多核处理器的性能。
+
+## 三、JVM、JRE 与 JDK 的关系
+
+初学 Java 时，这三个缩写常常让人困惑。让我们用一个咖啡店的比喻来厘清它们。
+
+- **JVM（Java Virtual Machine，Java 虚拟机）**：相当于咖啡机本身。它负责执行字节码，是 Java 跨平台的关键。不同操作系统有不同的 JVM 实现，但它们都能运行同一份字节码。
+
+- **JRE（Java Runtime Environment，Java 运行时环境）**：相当于咖啡机加上咖啡豆、滤纸等耗材——它是运行 Java 程序所需的最小环境，包含 JVM 和 Java 核心类库。如果你只需要"喝咖啡"（运行 Java 程序），JRE 就够了。
+
+- **JDK（Java Development Kit，Java 开发工具包）**：相当于整个咖啡店——包含 JRE，再加上编译器（javac）、调试工具（jdb）、文档生成工具（javadoc）等开发工具。如果你要"做咖啡"（开发 Java 程序），就需要安装 JDK。
+
+简单来说：**JDK ⊃ JRE ⊃ JVM**。现代 Java（从 Java 11 起）逐渐弱化了 JRE 的概念，开发者通常直接安装 JDK。
+
+## 四、Java 版本的演进
+
+Java 的版本演进犹如咖啡的烘焙曲线，每个阶段都有其风味。这里我们重点关注几个**长期支持版本**（Long Term Support，LTS），它们是生产环境的首选。
+
+| 版本 | 发布年份 | 重要特性 |
+| --- | --- | --- |
+| Java 8 | 2014 | Lambda 表达式、Stream API、新的日期时间 API |
+| Java 11 | 2018 | 局部变量类型推断（var）、HTTP Client API |
+| Java 17 | 2021 | 密封类（Sealed Classes）、模式匹配初版 |
+| Java 21 | 2023 | 虚拟线程（Virtual Threads）、记录模式 |
+
+Java 8 是里程碑式的版本，至今仍被广泛使用；Java 11 让 `var` 关键字走入日常；Java 17 是当前许多新项目的基线；而 Java 21 引入的虚拟线程，则为高并发编程带来了革命性的简化。本教程将基于 **JDK 21** 进行讲解。
+
+## 五、安装 JDK 21
+
+### 5.1 下载 JDK
+
+目前主流的 JDK 发行版有多个选择：
+- **Oracle JDK**：Oracle 官方版本，商业使用需付费许可。
+- **OpenJDK**：开源版本，是其他发行版的基础。
+- **Eclipse Temurin**（原 AdoptOpenJDK）：社区维护，免费可用，推荐初学者使用。
+
+你可以从 [Adoptium 官网](https://adoptium.net/) 下载适合你操作系统的 JDK 21 安装包。
+
+### 5.2 配置环境变量
+
+安装完成后，需要配置环境变量，让系统知道 `javac` 和 `java` 命令的位置。
+
+**macOS / Linux**：编辑 `~/.zshrc` 或 `~/.bashrc`，添加：
+
+```bash
+export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home
+export PATH=$JAVA_HOME/bin:$PATH
+```
+
+**Windows**：在"系统属性 → 环境变量"中：
+1. 新建系统变量 `JAVA_HOME`，值为 JDK 安装路径（如 `C:\Program Files\Java\jdk-21`）。
+2. 编辑 `Path` 变量，添加 `%JAVA_HOME%\bin`。
+
+配置完成后，打开终端，输入：
+
+```bash
+java -version
+```
+
+如果看到类似 `openjdk version "21.0.x"` 的输出，恭喜你，JDK 已安装成功！
+
+## 六、第一个 HelloWorld 程序
+
+按照编程界的传统，我们用一行 "Hello, World!" 来开启 Java 之旅。
+
+新建一个文件 `HelloWorld.java`（文件名必须与公共类名一致）：
+
+```java
+public class HelloWorld {
+    public static void main(String[] args) {
+        System.out.println("Hello, World!");
+    }
+}
+```
+
+在命令行中编译并运行：
+
+```bash
+javac HelloWorld.java   # 编译，生成 HelloWorld.class
+java HelloWorld         # 运行
+```
+
+让我们逐行解读这段代码：
+
+- `public class HelloWorld`：声明一个公共类，名为 HelloWorld。Java 是面向对象的语言，所有代码都必须在类中。
+- `public static void main(String[] args)`：这是程序的入口方法（main 方法）。`public` 表示公开可见，`static` 表示无需创建对象即可调用，`void` 表示无返回值，`String[] args` 是命令行参数。
+- `System.out.println("Hello, World!")`：向标准输出打印一行文本。`System.out` 是标准输出流，`println` 会打印内容并换行。
+
+现在，让我们在浏览器中直接运行这段代码，亲身体验 Java 的魅力：
+
+<CodeRunner code={`public class Main {
+    public static void main(String[] args) {
+        System.out.println("Hello, World!");
+        System.out.println("你好，Java！");
+        System.out.println("让我们一起开启这段咖啡飘香的旅程。");
+    }
+}`} />
+
+试着修改 `println` 中的内容，点击运行，看看输出会有什么变化。这是你与 Java 的第一次对话。
+
+## 七、选择一款趁手的 IDE
+
+工欲善其事，必先利其器。在 Java 的世界里，有几款优秀的集成开发环境（IDE）可供选择。
+
+### 7.1 IntelliJ IDEA
+
+由捷克公司 JetBrains 开发，被誉为"最聪明的 Java IDE"。它拥有强大的代码补全、重构、调试功能，对新手也非常友好。社区版（Community Edition）免费，对于学习 Java 已经足够。**强烈推荐初学者使用。**
+
+### 7.2 Visual Studio Code
+
+微软出品的轻量级编辑器，通过安装 "Extension Pack for Java" 插件包，可以变成一个不错的 Java 开发环境。如果你喜欢轻量工具，VS Code 是不错的选择。
+
+### 7.3 Eclipse
+
+老牌开源 IDE，曾长期占据 Java 开发的统治地位。虽然近年来风头被 IntelliJ IDEA 盖过，但它依然功能强大、完全免费，许多企业仍在使用。
+
+## 八、本系列教程的约定
+
+在接下来的篇章中，我们将沿着这条 Java 之旅一路前行：
+
+- 每篇文章都会先讲"为什么"，再讲"是什么"，最后讲"怎么用"。
+- 所有代码示例都可以在线运行，鼓励你动手修改、实验。
+- 我们会用"咖啡"的比喻贯穿始终，让抽象的概念变得可触可感。
+
+## 结语
+
+1995 年的那杯咖啡，至今仍在散发着香气。三十年来，无数程序员用 Java 编写了从手机游戏到企业系统、从大数据平台到金融交易的各类软件。而你，正站在这个庞大生态的入口。
+
+下一篇文章，我们将正式踏入 Java 的语法世界，学习变量、数据类型、注释等基础构件。就像咖啡师必须先认识咖啡豆、水和温度，才能煮出一杯好咖啡一样，掌握语法是写出优雅 Java 程序的第一步。
+
+让我们端起这杯 Java，一饮而尽。

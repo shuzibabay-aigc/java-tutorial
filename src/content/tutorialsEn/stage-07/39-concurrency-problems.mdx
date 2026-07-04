@@ -1,0 +1,418 @@
+---
+title: "Typical Concurrency Problems"
+chapter: 39
+stage: "Stage 7"
+stageName: "Concurrent Programming"
+order: 6
+description: "Deep dive into the four Coffman conditions for deadlocks plus detection and prevention, starvation and fairness, livelock, nested monitor lockout, false sharing, and the @Contended annotation"
+pubDate: 2026-07-03
+tags: ["Java", "Deadlock", "Starvation", "Livelock", "False Sharing", "Fair Lock"]
+---
+
+# Typical Concurrency Problems
+
+In the previous chapters we learned how to "start threads" and "acquire locks." But locks used incorrectly introduce subtler, harder-to-debug problems — that is what this chapter is about: **typical concurrency problems**.
+
+Deadlock, livelock, starvation, false sharing — these are pitfalls single-threaded programs never meet but that crop up daily in concurrent programs. Among them **deadlock** is the most classic and the most lethal, once nicknamed "public enemy number one of concurrent programming." A single production deadlock can paralyze an entire service; the logs show no obvious anomaly, a restart fixes it, and after a while it strikes again — the kind of bug that keeps the on-call engineer awake all night.
+
+## 1. Deadlock
+
+### 1.1 What Is a Deadlock
+
+**Deadlock**: two or more threads hold the locks each other needs, causing them to wait forever.
+
+Classic scenario:
+
+```
+Thread A holds lock 1, waits for lock 2
+Thread B holds lock 2, waits for lock 1
+→ Neither lets go, they wait forever
+```
+
+Code example:
+
+```java
+Object lock1 = new Object();
+Object lock2 = new Object();
+
+// Thread A: acquire lock1 first, then lock2
+new Thread(() -> {
+    synchronized (lock1) {
+        sleep(100);
+        synchronized (lock2) { /* ... */ }
+    }
+}).start();
+
+// Thread B: acquire lock2 first, then lock1
+new Thread(() -> {
+    synchronized (lock2) {
+        sleep(100);
+        synchronized (lock1) { /* ... */ }
+    }
+}).start();
+// Deadlock!
+```
+
+### 1.2 The Four Necessary Conditions for Deadlock
+
+Coffman proposed in 1971 that **a deadlock occurs only when all four conditions hold simultaneously** — break any one and you prevent the deadlock:
+
+| Condition | Meaning |
+| --- | --- |
+| **Mutual Exclusion** | A resource can be held by only one thread at a time |
+| **Hold and Wait** | A thread holding resources may request new ones |
+| **No Preemption** | Allocated resources cannot be forcibly taken; the thread must release them voluntarily |
+| **Circular Wait** | Multiple threads form a circular "I wait for you, you wait for me" chain |
+
+### 1.3 Deadlock Prevention
+
+Break one of the four conditions:
+
+- **Break "mutual exclusion"**: use read-write locks or `StampedLock` so reads are not exclusive; use lock-free CAS algorithms. But in many scenarios mutual exclusion is unavoidable.
+- **Break "hold and wait"**: acquire all resources at once — merge several locks into one, or grab a "global lock" first before acquiring finer-grained locks.
+- **Break "no preemption"**: replace blocking `lock` with `tryLock(timeout)` — if you cannot get it, release what you already hold and retry.
+- **Break "circular wait"**: all threads acquire locks **in a fixed order** — this is the most common prevention strategy.
+
+```java
+// Break circular wait: every thread locks in the order lock1 → lock2
+synchronized (lock1) {
+    synchronized (lock2) { /* ... */ }
+}
+```
+
+### 1.4 Deadlock Detection
+
+The JDK ships **deadlock detection tools** — `jstack`, `jconsole`, and `VisualVM` can all detect deadlocks automatically. In code you can also use `ThreadMXBean`:
+
+```java
+ThreadMXBean bean = ManagementFactory.getThreadMXBean();
+long[] deadlockedThreads = bean.findDeadlockedThreads();
+if (deadlockedThreads != null) {
+    System.out.println("Deadlock detected!");
+}
+```
+
+`ThreadMXBean.findDeadlockedThreads()` detects monitor deadlocks; `findMonitorDeadlockedThreads()` also detects `synchronized` deadlocks. JUC lock (`ReentrantLock`) deadlocks, however, require `findDeadlockedThreads()` to be detected.
+
+## 2. Starvation and Fairness
+
+### 2.1 Starvation
+
+**Starvation**: a thread cannot acquire a resource for a long time and is unable to execute.
+
+Typical scenario: `synchronized` is a **non-fair lock** — when the lock is released all waiting threads "scramble" for it, and some threads may never win. Low-priority threads, or threads constantly cut in line by newcomers, can starve.
+
+```java
+// Non-fair lock: a new thread may grab it immediately while older threads keep waiting
+ReentrantLock lock = new ReentrantLock();   // non-fair by default
+```
+
+### 2.2 Fair Lock
+
+**Fair lock**: threads acquire the lock in "first come, first served" order — avoiding starvation.
+
+```java
+ReentrantLock lock = new ReentrantLock(true);   // fair lock
+```
+
+Fair lock implementation: internally it uses a FIFO queue; a new thread must enqueue and wait, no cutting in line.
+
+**The cost**: fair lock throughput is 5%-20% lower than non-fair. The reason is thread-switching overhead — a non-fair lock lets a new thread "cut in" and acquire the lock immediately, sparing the cost of waking a queued thread.
+
+**Practice**: default to non-fair (throughput first) and switch to fair only when starvation is a real problem. In most scenarios the non-fairness of `synchronized` does not cause noticeable starvation.
+
+## 3. Livelock
+
+**Livelock**: the thread is not blocked, it keeps running, but the task makes no progress — mutual yielding means neither side can proceed.
+
+Classic analogy: two people walking toward each other in a hallway, both step to the same side and bump again; step again, bump again; step again... infinite loop.
+
+```java
+// Thread A: detects conflict, backs off and retries
+// Thread B: detects conflict, backs off and retries
+// Both back off in sync → retry in sync → conflict again → ...
+```
+
+A deadlock is "waiting to death"; a livelock is "busy to death" — CPU is occupied, nothing gets done. Livelock is even harder to diagnose because the thread is not blocked and monitoring tools see nothing wrong.
+
+**Solutions**:
+
+- **Introduce random backoff** — add a random delay when retrying to desynchronize the two parties.
+- **Change the retry strategy** — don't just mechanically retry, change behavior (for example pick a different resource).
+
+Ethernet's CSMA/CD protocol is the classic case of solving livelock with "random backoff."
+
+## 4. Nested Monitor Lockout
+
+**Nested monitor lockout** is sneakier than ordinary deadlock: a thread holds lock A and, inside A, calls `wait` on lock B — lock A is never released, so no other thread can wake it up.
+
+```java
+class BadQueue {
+    Object lockA = new Object();
+    Object lockB = new Object();
+
+    public void badMethod() throws InterruptedException {
+        synchronized (lockA) {
+            synchronized (lockB) {
+                lockB.wait();   // releases lockB but NOT lockA!
+            }
+        }
+    }
+
+    public void wake() {
+        synchronized (lockA) {   // can never acquire lockA
+            synchronized (lockB) {
+                lockB.notify();
+            }
+        }
+    }
+}
+```
+
+When thread 1 calls `lockB.wait()` it releases lockB, but lockA is still held. Thread 2 must acquire lockA before calling `notify` — it cannot, so it blocks forever. Thread 1 waits for a notify, thread 2 waits for the lock — deadlock.
+
+**How to avoid**: never `wait` on one lock while holding another. `wait` should be called on the same object whose lock you own.
+
+## 5. False Sharing and @Contended
+
+### 5.1 CPU Cache Line
+
+CPU caches load data in units of **cache lines**, usually **64 bytes**. If two variables sit on the same cache line, when one CPU modifies variable A it invalidates the entire cache line on the other CPU — even if the other CPU only cares about variable B.
+
+### 5.2 False Sharing
+
+```java
+class Counter {
+    volatile long a;   // 8 bytes
+    volatile long b;   // 8 bytes
+    // a and b may live on the same cache line
+}
+```
+
+Thread A keeps doing `a++`, thread B keeps doing `b++` — logically they don't interfere, but physically every write invalidates the other's cache — performance collapses. This is **false sharing**: the variables share no relationship but are "hard-wired" together by the cache line.
+
+Measured impact: false sharing can slow code down **10-50x** — a must-consider problem for high-performance concurrent code.
+
+### 5.3 Solution: Padding
+
+Keep the two variables off the same cache line — pad with useless data in between:
+
+```java
+class PaddedCounter {
+    volatile long a;
+    public long p1, p2, p3, p4, p5, p6, p7;   // 56 bytes of padding
+    volatile long b;   // guaranteed to be on another cache line
+}
+```
+
+### 5.4 The @Contended Annotation
+
+JDK 8 introduced `@sun.misc.Contended` (JDK 9+ uses `@jdk.internal.vm.annotation.Contended`) — it lets the JVM pad automatically, no hand-written padding required.
+
+```java
+@Contended
+class PaddedCounter {
+    volatile long a;
+    volatile long b;
+}
+```
+
+But `@Contended` by default only takes effect for internal JDK classes — user code must add the JVM flag `-XX:-RestrictContended` to use it. `AtomicLong` uses padding internally, and `LongAdder`'s `Cell` class is also annotated with `@Contended`.
+
+## 6. Hands-On: Demonstrating Deadlock, Livelock, and False Sharing
+
+The example below demonstrates deadlock (with a `jstack`-style thread dump), livelock, the performance impact of false sharing, and deadlock detection.
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.lang.management.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // === 1. Deadlock demo ===
+        System.out.println("=== Deadlock demo ===");
+        Object lock1 = new Object();
+        Object lock2 = new Object();
+
+        Thread deadA = new Thread(() -> {
+            synchronized (lock1) {
+                try { Thread.sleep(100); } catch (InterruptedException e) {}
+                synchronized (lock2) {
+                    System.out.println("A acquired both locks");
+                }
+            }
+        }, "deadlock-A");
+
+        Thread deadB = new Thread(() -> {
+            synchronized (lock2) {
+                try { Thread.sleep(100); } catch (InterruptedException e) {}
+                synchronized (lock1) {
+                    System.out.println("B acquired both locks");
+                }
+            }
+        }, "deadlock-B");
+
+        deadA.start();
+        deadB.start();
+        Thread.sleep(500);
+
+        // Deadlock detection
+        ThreadMXBean bean = ManagementFactory.getThreadMXBean();
+        long[] deadlocks = bean.findDeadlockedThreads();
+        if (deadlocks != null) {
+            System.out.println("✓ Deadlock detected! thread count: " + deadlocks.length);
+            for (long tid : deadlocks) {
+                ThreadInfo info = bean.getThreadInfo(tid);
+                System.out.println("  " + info.getThreadName() + " state=" + info.getThreadState());
+            }
+        }
+
+        // Force-interrupt the deadlocked threads (demo only; in production, prevent deadlocks instead)
+        deadA.interrupt();
+        deadB.interrupt();
+
+        // === 2. Deadlock prevention: fixed lock ordering ===
+        System.out.println("\\n=== Deadlock prevention: fixed order ===");
+        Thread safeA = new Thread(() -> safeMethod(lock1, lock2, "A"), "safe-A");
+        Thread safeB = new Thread(() -> safeMethod(lock1, lock2, "B"), "safe-B");
+        safeA.start(); safeB.start();
+        safeA.join(); safeB.join();
+        System.out.println("✓ Both threads finished (no deadlock)");
+
+        // === 3. Livelock demo ===
+        System.out.println("\\n=== Livelock demo ===");
+        AtomicBoolean[] forks = { new AtomicBoolean(false), new AtomicBoolean(false) };
+        AtomicInteger retries = new AtomicInteger(0);
+
+        Thread livA = new Thread(() -> liveWork(forks, 0, retries, "A"), "livelock-A");
+        Thread livB = new Thread(() -> liveWork(forks, 1, retries, "B"), "livelock-B");
+        livA.start(); livB.start();
+        Thread.sleep(500);
+        livA.interrupt(); livB.interrupt();
+        livA.join(); livB.join();
+        System.out.println("Retries during livelock: " + retries.get());
+
+        // === 4. False-sharing performance comparison ===
+        System.out.println("\\n=== False sharing ===");
+        long shareTime = testFalseSharing();
+        long paddedTime = testNoFalseSharing();
+        System.out.printf("False sharing took: %d ms%n", shareTime);
+        System.out.printf("Padded took:        %d ms%n", paddedTime);
+        if (shareTime > 0 && paddedTime > 0) {
+            System.out.printf("Performance gap: %.1fx%n", (double) shareTime / paddedTime);
+        }
+    }
+
+    // Fixed-order locking — break circular wait
+    static void safeMethod(Object l1, Object l2, String name) {
+        synchronized (l1) {
+            try { Thread.sleep(50); } catch (InterruptedException e) { return; }
+            synchronized (l2) {
+                System.out.println(name + " acquired both locks");
+            }
+        }
+    }
+
+    // Livelock: two threads grab and yield in sync
+    static void liveWork(AtomicBoolean[] forks, int idx, AtomicInteger retries, String name) {
+        try {
+            while (!Thread.currentThread().isInterrupted()) {
+                if (forks[idx].compareAndSet(false, true)) {
+                    Thread.sleep(10);
+                    if (forks[(idx + 1) % 2].compareAndSet(false, true)) {
+                        System.out.println(name + " got both forks, eating!");
+                        forks[idx].set(false);
+                        forks[(idx + 1) % 2].set(false);
+                        return;
+                    } else {
+                        forks[idx].set(false);   // yield
+                        retries.incrementAndGet();
+                    }
+                }
+                Thread.sleep(10);
+            }
+        } catch (InterruptedException e) {
+            // exit
+        }
+    }
+
+    // False sharing: two volatile longs side by side
+    static class Shared {
+        volatile long a;
+        volatile long b;
+    }
+
+    static long testFalseSharing() throws Exception {
+        Shared s = new Shared();
+        Thread t1 = new Thread(() -> {
+            for (long i = 0; i < 100_000_000L; i++) s.a = i;
+        });
+        Thread t2 = new Thread(() -> {
+            for (long i = 0; i < 100_000_000L; i++) s.b = i;
+        });
+        long start = System.nanoTime();
+        t1.start(); t2.start();
+        t1.join(); t2.join();
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+
+    // Padding to avoid false sharing
+    @jdk.internal.vm.annotation.Contended
+    static class Padded {
+        volatile long a;
+        volatile long b;
+    }
+
+    static long testNoFalseSharing() throws Exception {
+        Padded p = new Padded();
+        Thread t1 = new Thread(() -> {
+            for (long i = 0; i < 100_000_000L; i++) p.a = i;
+        });
+        Thread t2 = new Thread(() -> {
+            for (long i = 0; i < 100_000_000L; i++) p.b = i;
+        });
+        long start = System.nanoTime();
+        t1.start(); t2.start();
+        t1.join(); t2.join();
+        return (System.nanoTime() - start) / 1_000_000;
+   }`} />
+
+> **What to watch for**:
+> - **Deadlock detection**: `ThreadMXBean.findDeadlockedThreads()` returns the deadlocked thread IDs, enabling precise diagnosis.
+> - **Fixed lock ordering**: safeA and safeB both go lock1→lock2, so there is no circular wait.
+> - **Livelock**: the two threads may keep yielding (retries shoot up); random backoff or a strategy change is needed.
+> - **False sharing**: `@Contended` keeps a and b off the same cache line — the performance gap can be several-fold (depending on whether the JVM allows @Contended on user classes; the sandbox may not honor it).
+
+> **Note**: `@jdk.internal.vm.annotation.Contended` requires `--add-exports` to compile/run on a standard JVM, and `-XX:-RestrictContended` to take effect on user classes. The online sandbox may not support it — in that case both versions perform similarly. In production, hand-written padding is a fallback.
+
+## 7. Chapter Summary
+
+| Problem | Description | Solution |
+| --- | --- | --- |
+| **Deadlock** | Threads hold each other's needed locks, wait forever | Break one of the four conditions (most common: fixed lock ordering) |
+| **Starvation** | A thread cannot acquire a lock for a long time | Fair lock (but throughput drops) |
+| **Livelock** | Not blocked but no progress, mutual yielding | Random backoff, change strategy |
+| **Nested monitor lockout** | Hold A, wait on B, A never releases | Don't `wait` on another lock while holding one |
+| **False sharing** | Variables on the same cache line interfere | Padding or `@Contended` |
+
+| Concept | Key point |
+| --- | --- |
+| Four deadlock conditions | Mutual exclusion / hold and wait / no preemption / circular wait — break any one to prevent |
+| Detection tools | `jstack`, `jconsole`, `ThreadMXBean.findDeadlockedThreads()` |
+| Fair lock | `new ReentrantLock(true)` — FIFO, prevents starvation but lower throughput |
+| @Contended | JVM auto-padding, requires `-XX:-RestrictContended` |
+| Cache line | Usually 64 bytes, the load unit of the CPU cache |
+
+**Mnemonics**:
+
+- **All four deadlock conditions must hold** — break any one; "fixed lock ordering" is the most common fix.
+- **`jstack` finds deadlocks instantly** — and `ManagementFactory.getThreadMXBean()` lets you check inside code.
+- **Fair locks prevent starvation but cost performance** — default to non-fair, switch only when needed.
+- **Livelock is "busy to death," not "waiting to death"** — random backoff is the classic antidote.
+- **False sharing is the hidden pit of the CPU cache** — a performance killer, padding to the rescue.
+
+## Closing: Know the Traps to Avoid Them
+
+This chapter on typical concurrency problems is not about "how to do it" but "don't fall in" — these are cautionary tales. Deadlock, livelock, starvation, false sharing — each has toppled countless production systems. Understanding their causes and prevention is required homework for writing robust concurrent code.
+
+The next chapter covers **locks and synchronizers** — `ReentrantLock`, `ReadWriteLock`, `StampedLock`, `Condition`, `Semaphore`, `CountDownLatch`, `CyclicBarrier`, `Phaser`, `Exchanger`. They are the "enhanced versions" of `synchronized`/`wait`/`notify`, providing timeout acquisition, interruptibility, fair locks, read-write separation, multiple condition queues, and more — and they are also the weapons for dodging the problems in this chapter (for example `tryLock` to prevent deadlock).

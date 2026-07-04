@@ -1,0 +1,517 @@
+---
+title: "JDBC In Depth"
+chapter: 59
+stage: "Stage 11"
+stageName: "Database and Networking"
+order: 1
+description: "Master the JDBC architecture and driver types, DriverManager, Statement vs PreparedStatement, ResultSet, batch processing, auto-increment primary keys, transaction management and Savepoint, and implement a generic DAO wrapper"
+pubDate: 2026-07-03
+tags: ["Java", "JDBC", "数据库", "PreparedStatement", "事务"]
+---
+
+# JDBC In Depth
+
+Welcome to Stage 11 — **Database and Networking**. In the previous ten stages our programs stayed inside the JVM — reading and writing files, operating on memory. But real-world applications must talk to databases and communicate over the network. This stage opens two doors: databases (JDBC, connection pools) and networking (Socket, HttpClient). The first door is JDBC — Java's "native tongue" for accessing databases.
+
+JDBC (Java Database Connectivity) is Java's standard API for accessing relational databases. Whether it's MySQL, PostgreSQL, Oracle, or SQLite — as long as the vendor provides a JDBC driver, Java code can operate on it with the same API. This is the "one set of code, many databases" abstraction.
+
+## 1. JDBC Architecture and Driver Types
+
+JDBC is a two-layer architecture:
+
+- **JDBC API** (`java.sql` package) — applications program against it, vendor-agnostic.
+- **JDBC Driver API** — vendors implement it, translating JDBC calls into a specific database's protocol.
+
+Drivers come in 4 types (just for understanding; modern usage is all Type 4):
+
+| Type | Principle | Status |
+| --- | --- | --- |
+| **Type 1** | JDBC-ODBC bridge | Obsolete (removed in Java 8) |
+| **Type 2** | Partly Java + native library | Rare |
+| **Type 3** | Pure Java, via network middleware | Rare |
+| **Type 4** | Pure Java, direct database connection | **Mainstream** (MySQL/PG drivers are this) |
+
+Type 4 is a pure Java implementation, cross-platform, no native library needed — so almost all modern JDBC drivers are Type 4.
+
+## 2. Connecting to a Database
+
+`DriverManager.getConnection` is the entry point for connections:
+
+```java
+// Load the driver (auto-loaded since JDBC 4.0+, can be omitted)
+Class.forName("com.mysql.cj.jdbc.Driver");
+
+// three arguments: url, username, password
+String url = "jdbc:mysql://localhost:3306/test?useSSL=false&serverTimezone=UTC";
+try (Connection conn = DriverManager.getConnection(url, "root", "123456")) {
+    System.out.println("连接成功: " + conn);
+} catch (SQLException e) {
+    e.printStackTrace();
+}
+```
+
+URL format: `jdbc:＜subprotocol＞://＜host＞:＜port＞/＜database＞?＜params＞`. Different databases have different subprotocols — MySQL is `mysql`, PostgreSQL is `postgresql`, Oracle is `oracle:thin`, SQLite is `sqlite`.
+
+Since JDBC 4.0 (Java 6), drivers are auto-discovered via `META-INF/services/java.sql.Driver`, so `Class.forName` can be omitted — as long as the driver jar is on the classpath.
+
+## 3. Statement vs PreparedStatement
+
+There are two main ways to execute SQL — `Statement` and `PreparedStatement`.
+
+### 3.1 Statement: Concatenating SQL Directly (SQL Injection Risk)
+
+```java
+Statement stmt = conn.createStatement();
+String name = "张三";   // suppose this comes from user input
+ResultSet rs = stmt.executeQuery("SELECT * FROM users WHERE name = '" + name + "'");
+```
+
+The problem: if the user inputs `' OR '1'='1`, the SQL becomes `SELECT * FROM users WHERE name = '' OR '1'='1` — **SQL injection**! Every user gets returned.
+
+### 3.2 PreparedStatement: Precompiled + Parameterized (Injection-Proof)
+
+```java
+String sql = "SELECT * FROM users WHERE name = ?";
+PreparedStatement ps = conn.prepareStatement(sql);
+ps.setString(1, "张三");    // index starts at 1!
+ResultSet rs = ps.executeQuery();
+```
+
+`?` is a placeholder, filled via `setString`/`setInt`/`setObject` and friends. The driver escapes the parameters — single quotes become `\'`, so injection fails. **Always use `PreparedStatement`; never concatenate user input with `Statement`!**
+
+```java
+ps.setString(1, "' OR '1'='1");   // treated as a plain string, no injection
+```
+
+`PreparedStatement` has two extra benefits:
+
+1. **Precompilation** — when the same SQL runs many times, the database compiles the execution plan once, with high performance.
+2. **Type safety** — `setInt` on a non-number is a compile error, avoiding type confusion.
+
+## 4. ResultSet and Cursors
+
+`ResultSet` is the query result set — it's a "cursor," initially positioned before the first row; `next()` moves to the next row and returns whether there's data.
+
+```java
+ResultSet rs = ps.executeQuery();
+while (rs.next()) {           // move to the next row
+    int id = rs.getInt("id");          // get by column name
+    String name = rs.getString(2);     // get by column index (starts at 1!)
+    Date created = rs.getDate("created_at");
+    System.out.println(id + ", " + name + ", " + created);
+}
+```
+
+Note that JDBC indexes **start at 1** (not 0) — a historical relic; many JDBC APIs are 1-based.
+
+By default, a `ResultSet` can only scroll forward with `next()` and is read-only. To make it scrollable and updatable:
+
+```java
+Statement stmt = conn.createStatement(
+    ResultSet.TYPE_SCROLL_INSENSITIVE,   // scrollable
+    ResultSet.CONCUR_UPDATABLE           // updatable
+);
+// now rs.previous()/rs.first()/rs.absolute(3) etc. all work
+```
+
+In practice, scrollable result sets are rarely used — they consume memory for large datasets; usually `LIMIT`/`OFFSET` paging is used instead.
+
+## 5. Batch Processing
+
+To execute large numbers of INSERT/UPDATE, sending them one by one is too slow — `addBatch` + `executeBatch` sends them all at once:
+
+```java
+conn.setAutoCommit(false);
+PreparedStatement ps = conn.prepareStatement("INSERT INTO logs(msg) VALUES(?)");
+for (int i = 0; i < 1000; i++) {
+    ps.setString(1, "log " + i);
+    ps.addBatch();          // add to batch
+    if (i % 100 == 0) {
+        ps.executeBatch();   // execute every 100
+        ps.clearBatch();
+    }
+}
+ps.executeBatch();           // the remainder
+conn.commit();
+```
+
+Batch processing compresses 1000 network round trips into 10, a 10x+ performance boost.
+
+## 6. Getting Auto-Increment Primary Keys
+
+After an INSERT, you often need the auto-increment primary key generated by the database:
+
+```java
+String sql = "INSERT INTO users(name) VALUES(?)";
+PreparedStatement ps = conn.prepareStatement(
+    sql,
+    Statement.RETURN_GENERATED_KEYS     // declare you want the keys back
+);
+ps.setString(1, "张三");
+ps.executeUpdate();
+
+ResultSet keys = ps.getGeneratedKeys();
+if (keys.next()) {
+    long id = keys.getLong(1);   // auto-increment primary key
+    System.out.println("新用户 id: " + id);
+}
+```
+
+## 7. Transaction Management
+
+JDBC **auto-commits** by default — every SQL statement commits immediately upon execution. For transaction control, first turn off auto-commit:
+
+```java
+Connection conn = DriverManager.getConnection(url, user, pwd);
+conn.setAutoCommit(false);   // turn off auto-commit
+
+try {
+    // transfer: A loses 100, B gains 100
+    ps1.executeUpdate("UPDATE account SET balance = balance - 100 WHERE id = 1");
+    ps2.executeUpdate("UPDATE account SET balance = balance + 100 WHERE id = 2");
+    conn.commit();            // both succeed -> commit
+} catch (SQLException e) {
+    conn.rollback();          // any failure -> rollback
+    throw e;
+}
+```
+
+### 7.1 Savepoint: Partial Rollback
+
+Sometimes within a transaction you only want to roll back part of it, leaving earlier successful operations intact — `Savepoint` comes to the rescue:
+
+```java
+conn.setAutoCommit(false);
+try {
+    ps1.executeUpdate("INSERT ...");   // operation 1
+
+    Savepoint sp = conn.setSavepoint("before_risky");   // set a savepoint
+    try {
+        ps2.executeUpdate("INSERT ...");   // operation 2 (might fail)
+    } catch (SQLException e) {
+        conn.rollback(sp);    // only roll back to sp, operation 1 preserved
+    }
+
+    conn.commit();            // operation 1 + operation 2 (if successful) commit together
+} catch (SQLException e) {
+    conn.rollback();
+}
+```
+
+## 8. Hands-On: A Generic DAO Wrapper
+
+Since the Piston online environment has no real database driver, I'll demonstrate the full flow with a **mock JDBC API** — all the signatures match real JDBC; only the underlying layer uses an in-memory Map to simulate the database. Swap in a real JDBC driver and the code logic is exactly the same.
+
+<CodeRunner code={`import java.sql.*;
+import java.util.*;
+import java.lang.reflect.*;
+
+// === 模拟 JDBC 核心 API (签名与真 JDBC 一致) ===
+class MockConnection {
+    private boolean autoCommit = true;
+    private final List<String> executedSql = new ArrayList<>();
+    void setAutoCommit(boolean v) { this.autoCommit = v; }
+    boolean getAutoCommit() { return autoCommit; }
+    void commit() { System.out.println("  [DB] COMMIT"); }
+    void rollback() { System.out.println("  [DB] ROLLBACK"); }
+    void rollback(Object savepoint) { System.out.println("  [DB] ROLLBACK TO " + savepoint); }
+    Object setSavepoint(String name) {
+        System.out.println("  [DB] SAVEPOINT " + name);
+        return "SP:" + name;
+    }
+    void execute(String sql) { executedSql.add(sql); System.out.println("  [DB] 执行: " + sql); }
+    Object executeQuery(String sql) { executedSql.add(sql); System.out.println("  [DB] 查询: " + sql); return sql; }
+    void close() {}
+}
+
+class MockPreparedStatement {
+    private final String sql;
+    private final Map<Integer, Object> params = new HashMap<>();
+    public MockPreparedStatement(String sql) { this.sql = sql; }
+    public void setString(int i, String v) { params.put(i, v); }
+    public void setInt(int i, int v) { params.put(i, v); }
+    public void setObject(int i, Object v) { params.put(i, v); }
+    public int executeUpdate() {
+        System.out.println("  [DB] 执行更新: " + sql + " 参数=" + params);
+        return 1;
+    }
+    public List<Map<String, Object>> executeQuery() {
+        System.out.println("  [DB] 执行查询: " + sql + " 参数=" + params);
+        // 模拟返回结果
+        List<Map<String, Object>> rows = new ArrayList<>();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("id", params.getOrDefault(1, 1));
+        row.put("name", "模拟用户");
+        row.put("age", 20);
+        rows.add(row);
+        return rows;
+    }
+    public void addBatch() {}
+    public int[] executeBatch() { return new int[]{1, 1, 1}; }
+    public void close() {}
+}
+
+// === 真实项目里直接用 java.sql.Connection / PreparedStatement ===
+// 这里用 Mock 演示, 逻辑完全一致
+
+// 通用 DAO 基类
+abstract class BaseDao<T> {
+    protected final MockConnection conn;
+    public BaseDao(MockConnection conn) { this.conn = conn; }
+
+    // 模板方法: 子类实现具体映射
+    protected abstract T mapRow(Map<String, Object> row);
+    protected abstract String table();
+
+    // 通用查询: 按 id
+    public T findById(int id) {
+        String sql = "SELECT * FROM " + table() + " WHERE id = ?";
+        MockPreparedStatement ps = new MockPreparedStatement(sql);
+        ps.setInt(1, id);
+        List<Map<String, Object>> rows = ps.executeQuery();
+        return rows.isEmpty() ? null : mapRow(rows.get(0));
+    }
+
+    // 通用查询: 返回所有
+    public List<T> findAll() {
+        String sql = "SELECT * FROM " + table();
+        MockPreparedStatement ps = new MockPreparedStatement(sql);
+        return rowsToEntities(ps.executeQuery());
+    }
+
+    protected List<T> rowsToEntities(List<Map<String, Object>> rows) {
+        List<T> list = new ArrayList<>();
+        for (Map<String, Object> row : rows) list.add(mapRow(row));
+        return list;
+    }
+}
+
+// 用户实体
+class User {
+    int id; String name; int age;
+    public User(int id, String name, int age) {
+        this.id = id; this.name = name; this.age = age;
+    }
+    @Override public String toString() { return "User{id=" + id + ", name='" + name + "', age=" + age + "}"; }
+}
+
+class UserDao extends BaseDao<User> {
+    public UserDao(MockConnection conn) { super(conn); }
+    @Override protected String table() { return "users"; }
+    @Override protected User mapRow(Map<String, Object> row) {
+        return new User((int) row.get("id"), (String) row.get("name"), (int) row.get("age"));
+    }
+
+    public int insert(User u) {
+        String sql = "INSERT INTO users(name, age) VALUES(?, ?)";
+        MockPreparedStatement ps = new MockPreparedStatement(sql);
+        ps.setString(1, u.name);
+        ps.setInt(2, u.age);
+        return ps.executeUpdate();
+    }
+
+    public int[] batchInsert(List<User> users) {
+        String sql = "INSERT INTO users(name, age) VALUES(?, ?)";
+        MockPreparedStatement ps = new MockPreparedStatement(sql);
+        for (User u : users) {
+            ps.setString(1, u.name);
+            ps.setInt(2, u.age);
+            ps.addBatch();
+        }
+        return ps.executeBatch();
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== JDBC 实战: 通用 DAO 封装 (模拟) ===\\n");
+
+        // 1. 获取连接 (真实: DriverManager.getConnection)
+        MockConnection conn = new MockConnection();
+
+        // 2. 基本 CRUD
+        System.out.println("--- 1. 基本 CRUD ---");
+        UserDao dao = new UserDao(conn);
+        dao.insert(new User(0, "张三", 20));
+        dao.insert(new User(0, "李四", 22));
+
+        User u = dao.findById(1);
+        System.out.println("查到: " + u);
+
+        List<User> all = dao.findAll();
+        System.out.println("全部: " + all);
+
+        // 3. 批处理
+        System.out.println("\\n--- 2. 批处理 ---");
+        List<User> batch = Arrays.asList(
+            new User(0, "王五", 25),
+            new User(0, "赵六", 28),
+            new User(0, "钱七", 30)
+        );
+        int[] counts = dao.batchInsert(batch);
+        System.out.println("批处理影响行数: " + Arrays.toString(counts));
+
+        // 4. 事务管理
+        System.out.println("\\n--- 3. 事务管理 ---");
+        conn.setAutoCommit(false);
+        try {
+            new UserDao(conn).insert(new User(0, "事务A", 1));
+            new UserDao(conn).insert(new User(0, "事务B", 2));
+            conn.commit();
+            System.out.println("事务成功, 已提交");
+        } catch (Exception e) {
+            conn.rollback();
+            System.out.println("事务失败, 已回滚");
+        }
+
+        // 5. 事务回滚演示
+        System.out.println("\\n--- 4. 事务回滚演示 ---");
+        conn.setAutoCommit(false);
+        try {
+            new UserDao(conn).insert(new User(0, "成功操作", 1));
+            System.out.println("第一个操作成功");
+            throw new RuntimeException("第二个操作失败!");
+        } catch (Exception e) {
+            conn.rollback();
+            System.out.println("捕获异常: " + e.getMessage() + ", 整个事务回滚");
+        }
+
+        // 6. Savepoint 部分回滚
+        System.out.println("\\n--- 5. Savepoint 部分回滚 ---");
+        conn.setAutoCommit(false);
+        try {
+            new UserDao(conn).insert(new User(0, "必成功", 1));
+            Object sp = conn.setSavepoint("before_risky");
+            try {
+                throw new RuntimeException("危险操作失败");
+            } catch (Exception inner) {
+                conn.rollback(sp);   // 只回滚危险操作
+                System.out.println("危险操作回滚, 但 '必成功' 保留");
+            }
+            new UserDao(conn).insert(new User(0, "之后操作", 2));
+            conn.commit();
+        } catch (Exception e) {
+            conn.rollback();
+        }
+
+        System.out.println("\\n=== JDBC 关键点 ===");
+        System.out.println("1. PreparedStatement 防 SQL 注入 (永远不要拼字符串)");
+        System.out.println("2. JDBC 索引从 1 开始 (历史遗留)");
+        System.out.println("3. setAutoCommit(false) + commit/rollback 控制事务");
+        System.out.println("4. Savepoint 实现部分回滚");
+        System.out.println("5. addBatch + executeBatch 批处理提性能");
+        System.out.println("6. getGeneratedKeys 获取自增主键");
+    }
+}`} />
+
+Below is a complete real-JDBC code template (runnable locally with MySQL):
+
+```java
+import java.sql.*;
+
+public class JdbcDemo {
+    public static void main(String[] args) throws SQLException {
+        String url = "jdbc:mysql://localhost:3306/test?useSSL=false&serverTimezone=UTC";
+        try (Connection conn = DriverManager.getConnection(url, "root", "123456")) {
+            // create table
+            try (Statement st = conn.createStatement()) {
+                st.execute("CREATE TABLE IF NOT EXISTS users ("
+                    + "id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50), age INT)");
+            }
+
+            // insert (PreparedStatement + get auto-increment key)
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO users(name, age) VALUES(?, ?)",
+                    Statement.RETURN_GENERATED_KEYS)) {
+                ps.setString(1, "张三");
+                ps.setInt(2, 20);
+                ps.executeUpdate();
+                try (ResultSet keys = ps.getGeneratedKeys()) {
+                    if (keys.next()) System.out.println("新 id: " + keys.getLong(1));
+                }
+            }
+
+            // query
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT * FROM users WHERE age > ?")) {
+                ps.setInt(1, 18);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        System.out.println(rs.getInt("id") + " "
+                            + rs.getString("name") + " " + rs.getInt("age"));
+                    }
+                }
+            }
+
+            // transaction
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "UPDATE users SET age = age + ? WHERE id = ?")) {
+                ps.setInt(1, 1); ps.setInt(2, 1); ps.executeUpdate();
+                ps.setInt(1, -1); ps.setInt(2, 2); ps.executeUpdate();
+                conn.commit();
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            }
+        }
+    }
+}
+```
+
+> **Key observations**:
+> - **`PreparedStatement` uses `?` placeholders + `setXxx` to fill parameters** — the core of SQL-injection defense.
+> - **JDBC indexes start at 1** — `setString(1, ...)` not `0`; a historical relic.
+> - **Transactions in three steps** — `setAutoCommit(false)` → business logic → `commit`/`rollback`.
+> - **`try-with-resources` auto-closes** — Connection/Statement/ResultSet must all be closed, otherwise they leak.
+> - **Savepoint rolls back to a specific point** — operations before the savepoint are unaffected.
+
+## 9. JDBC Resource Management and Pitfalls
+
+JDBC resources (Connection/Statement/ResultSet) are "heavy" objects that must be closed promptly, or they leak. Best practice:
+
+```java
+// recommended: try-with-resources auto-closes
+try (Connection conn = dataSource.getConnection();
+     PreparedStatement ps = conn.prepareStatement(sql)) {
+    try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) { ... }
+    }
+}
+```
+
+**Common pitfalls**:
+
+1. **Not closing a Connection** — the database has a limited number of connections (MySQL default 151); too many leaks cause denial of service.
+2. **Not closing a ResultSet** — cursors hold database resources; leaving them open long-term can blow things up.
+3. **Creating a Statement inside a loop** — new one each iteration, resources explode.
+4. **`SELECT *`** — fetching columns you don't need wastes bandwidth; list columns explicitly.
+5. **Transactions crossing methods** — after `setAutoCommit(false)`, calls across methods make it easy to forget commit.
+
+## 10. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| `DriverManager.getConnection` | Obtain a connection |
+| `Statement` vs `PreparedStatement` | The latter prevents SQL injection |
+| `?` placeholder | `setString`/`setInt` fill params, index from 1 |
+| `ResultSet` | Cursor-style traversal, `next()` moves |
+| Batch processing | `addBatch`/`executeBatch` |
+| Auto-increment key | `RETURN_GENERATED_KEYS` + `getGeneratedKeys` |
+| Transactions | `setAutoCommit(false)` + `commit`/`rollback` |
+| Savepoint | Partial rollback |
+| Resource management | `try-with-resources` auto-closes |
+
+**Mnemonic**:
+
+- **Always use `PreparedStatement`** — don't concatenate user input with `Statement`.
+- **JDBC indexes start at 1** — historical relic, don't count from 0.
+- **Transaction trio** — turn off auto-commit, commit, rollback.
+- **Resources use try-with-resources** — Connection/Statement/ResultSet all need closing.
+- **Batch: add then execute** — 10x performance for bulk inserts.
+
+## Closing: From JDBC to Connection Pools
+
+This chapter used a mock environment to demonstrate the full JDBC flow — connection, CRUD, batch processing, transactions, Savepoint. In real projects you rarely write JDBC directly — you use frameworks like MyBatis/JPA to wrap it. But understanding JDBC is the prerequisite for understanding these frameworks — MyBatis's `#{}` is `PreparedStatement`'s `?`, and `@Transactional` is `setAutoCommit(false)`.
+
+The next chapter looks at a real-world problem — what if `getConnection` per request is too slow? The answer is **connection pools**.

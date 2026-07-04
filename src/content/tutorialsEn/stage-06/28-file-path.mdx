@@ -1,0 +1,354 @@
+---
+title: "File and Path"
+chapter: 28
+stage: "Stage 6"
+stageName: "I/O and NIO"
+order: 1
+description: "Understand the shortcomings of the legacy File class, master NIO.2 Path operations, the Files utility for creating, deleting, copying, and moving files, and Stream-based directory traversal"
+pubDate: 2026-07-03
+tags: ["Java", "IO", "File", "Path", "NIO.2", "Files"]
+---
+
+# File and Path
+
+Files are where data comes to rest. Everything a program touches at runtime — variables, objects, collections — lives in memory and vanishes the moment power is cut. Only when data lands in a file can it survive across time (still there on the next launch) and across space (shipped to another machine). Java has shipped with a `File` class for file operations since its very beginning, but twenty years later it was superseded by NIO.2's `Path` and `Files` — an evolution "from crude to elegant."
+
+In this chapter, we first look at why the old `File` class was "not good enough," then see how `Path` and `Files` reshape file operations into a fluent, modern API.
+
+## 1. The Problems with the Legacy File Class
+
+`java.io.File` has been around since JDK 1.0 — a veritable veteran. It represents a file or directory pathname and provides methods for creation, deletion, and querying. It looks serviceable enough, but hides a fair number of traps.
+
+### 1.1 Cross-Platform Path Issues
+
+`File` is tightly bound to the platform separator — Windows uses `\`, Unix uses `/`:
+
+```java
+// Works on Windows, but the path breaks on Linux
+File f = new File("C:\\Users\\alice\\data.txt");
+
+// Cross-platform version requires manual concatenation
+File f2 = new File("data" + File.separator + "data.txt");
+```
+
+This kind of "hardcoded backslash" code routinely bites developers during cross-platform deployment.
+
+### 1.2 API Design Flaws
+
+The `File` class has crude method names and ambiguous semantics:
+
+```java
+File f = new File("/tmp/data.txt");
+f.delete();          // Returns boolean, throws no exception on failure — you never know why
+f.mkdir();           // Creates only a single directory level
+f.mkdirs();          // Creates multiple levels — one letter's difference, very different semantics
+f.renameTo(new File("/tmp/data.bak"));  // Returns boolean, stays silent on cross-filesystem failure
+System.out.println(f.length());  // Returns 0 when the file doesn't exist — indistinguishable from an empty file
+```
+
+The killer issue: **nearly every method returns `false` on failure instead of throwing an exception** — you have no idea whether it was insufficient permissions, a missing path, or a locked file. Debugging this kind of code drives people mad.
+
+### 1.3 Limited Functionality
+
+`File` doesn't support symbolic links, file attributes (permissions, owner), directory watching, or other advanced operations. To do any of those you have to shell out via `Runtime.exec` — dirty and brittle.
+
+## 2. Path: NIO.2's Path Abstraction
+
+Java 7 introduced NIO.2 (JSR 203), bringing the `java.nio.file.Path` interface and the `Files` utility class to fully replace `File`. The design philosophy behind `Path` is: **a path is merely a string-level abstraction, decoupled from any concrete filesystem.**
+
+### 2.1 Creating a Path
+
+`Path` is an interface, created via the `Paths.get()` factory method (Java 11+ also offers `Path.of()`):
+
+```java
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+Path p1 = Paths.get("data.txt");                  // relative path
+Path p2 = Paths.get("/home", "alice", "data.txt"); // multi-segment join
+Path p3 = Path.of("/var/log/app.log");             // Java 11+
+
+System.out.println(p2);   // /home/alice/data.txt
+```
+
+`Paths.get()` accepts varargs and joins them with the platform separator — solving the cross-platform problem at the source.
+
+### 2.2 The "Parts" of a Path
+
+`Path` provides a clear set of methods for dissecting a path:
+
+```java
+Path p = Paths.get("/home/alice/docs/report.pdf");
+
+System.out.println(p.getFileName());    // report.pdf       — file name
+System.out.println(p.getParent());      // /home/alice/docs — parent path
+System.out.println(p.getRoot());        // /                — root
+System.out.println(p.getNameCount());   // 4                — segment count
+System.out.println(p.getName(0));       // home             — i-th segment
+System.out.println(p.subpath(0, 2));    // home/alice       — subpath (excluding root)
+```
+
+This API is as straightforward as an anatomical diagram of a path.
+
+### 2.3 Path Composition
+
+Path manipulation is the heart of `Path` — four methods cover 90% of path-joining needs: `resolve`, `resolveSibling`, `relativize`, and `normalize`.
+
+**resolve**: joins two paths, equivalent to "find a child of the current path."
+
+```java
+Path base = Paths.get("/home/alice");
+Path full = base.resolve("docs/report.pdf");
+// /home/alice/docs/report.pdf
+
+// If the argument is an absolute path, it is returned directly
+Path abs = base.resolve("/etc/hosts");
+// /etc/hosts
+```
+
+**resolveSibling**: replaces the current path's "sibling" — commonly used to "change the extension":
+
+```java
+Path p = Paths.get("/data/report.pdf");
+Path bak = p.resolveSibling("report.bak");
+// /data/report.bak
+```
+
+**relativize**: computes the relative path from A to B:
+
+```java
+Path a = Paths.get("/home/alice");
+Path b = Paths.get("/home/bob/docs");
+Path r = a.relativize(b);
+// ../bob/docs
+```
+
+**normalize**: eliminates `.` (current directory) and `..` (parent directory):
+
+```java
+Path messy = Paths.get("/home/alice/../bob/./docs");
+Path clean = messy.normalize();
+// /home/bob/docs
+```
+
+These four methods make path manipulation "as precise as a math problem."
+
+## 3. The Files Utility Class: The All-in-One File Toolkit
+
+`Files` is the star of NIO.2 — a single class covering nearly every file operation. It works in tandem with `Path`: `Path` describes "where," `Files` performs "what."
+
+### 3.1 Creating and Deleting
+
+```java
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+Path file = Paths.get("/tmp/test.txt");
+Path dir = Paths.get("/tmp/myapp");
+
+Files.createFile(file);            // create empty file (throws FileAlreadyExistsException if it exists)
+Files.createDirectory(dir);        // create a single directory level
+Files.createDirectories(dir);      // create multiple levels (creates missing intermediate directories)
+Files.delete(file);                // delete; throws NoSuchFileException if absent
+Files.deleteIfExists(file);        // no error if absent (recommended)
+```
+
+Note the distinction — `createDirectory` creates only one level and throws if the parent doesn't exist; `createDirectories` acts like `mkdir -p`, building the entire chain.
+
+### 3.2 Copying and Moving
+
+```java
+Path src = Paths.get("/tmp/a.txt");
+Path dst = Paths.get("/tmp/b.txt");
+
+Files.copy(src, dst);                       // copy; throws if destination exists
+Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING);  // overwrite
+Files.move(src, dst, StandardCopyOption.ATOMIC_MOVE);       // atomic move
+```
+
+`StandardCopyOption` is an enum offering options like `REPLACE_EXISTING` (overwrite), `COPY_ATTRIBUTES` (copy attributes), and `ATOMIC_MOVE` (atomic move, which may fail across filesystems).
+
+### 3.3 Querying File Attributes
+
+```java
+Path p = Paths.get("/etc/hosts");
+
+Files.exists(p);              // does it exist
+Files.notExists(p);           // does it not exist (subtly different from exists: both return false when you lack permission)
+Files.isDirectory(p);         // is it a directory
+Files.isRegularFile(p);       // is it a regular file
+Files.isReadable(p);          // is it readable
+Files.isWritable(p);          // is it writable
+Files.size(p);                // size in bytes
+```
+
+**To read all attributes at once**, use `readAttributes`:
+
+```java
+import java.nio.file.attribute.BasicFileAttributes;
+
+BasicFileAttributes attrs = Files.readAttributes(p, BasicFileAttributes.class);
+System.out.println(attrs.size());
+System.out.println(attrs.creationTime());
+System.out.println(attrs.lastModifiedTime());
+System.out.println(attrs.lastAccessTime());
+```
+
+`BasicFileAttributes` is a one-shot snapshot — far more efficient than querying each attribute individually.
+
+## 4. Directory Traversal: The Stream Form
+
+NIO.2's directory traversal is a delightful surprise — it returns a `Stream＜Path＞`, so you can plug it straight into a functional pipeline:
+
+### 4.1 list: Listing the Current Directory
+
+```java
+Path dir = Paths.get("/tmp");
+try (Stream<Path> stream = Files.list(dir)) {
+    stream.filter(Files::isRegularFile)
+          .forEach(System.out::println);
+}
+```
+
+`Files.list` lists only **direct children** (non-recursive), and the returned `Stream` holds a directory handle that must be closed with try-with-resources.
+
+### 4.2 walk: Depth-First Traversal
+
+```java
+try (Stream<Path> stream = Files.walk(dir, 3)) {   // at most 3 levels deep
+    stream.filter(Files::isRegularFile)
+          .filter(p -> p.toString().endsWith(".java"))
+          .forEach(System.out::println);
+}
+```
+
+`Files.walk` recursively traverses the entire subtree; the second argument is the maximum depth (defaults to `Integer.MAX_VALUE`).
+
+### 4.3 find: Traverse and Filter in One Pass
+
+```java
+try (Stream<Path> stream = Files.find(dir, Integer.MAX_VALUE,
+        (path, attrs) -> attrs.isRegularFile() && attrs.size() > 1024)) {
+    stream.forEach(System.out::println);
+}
+```
+
+`find` accepts a `BiPredicate＜Path, BasicFileAttributes＞` — it already has the attributes in hand during traversal, so there's no need for a second `Files.size` query. More efficient.
+
+## 5. In Practice: Recursively Walking a Directory Tree
+
+The following example combines `walk`, `Files.size`, and attribute queries to count all `.java` files under a directory and tally their total size:
+
+<CodeRunner code={`import java.io.IOException;
+import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class Main {
+    public static void main(String[] args) throws IOException {
+        // 在工作目录下造一些示例文件，方便演示
+        Path demo = Paths.get("demo-stats");
+        Files.createDirectories(demo.resolve("a/b"));
+        Files.writeString(demo.resolve("A.java"), "public class A {}");
+        Files.writeString(demo.resolve("a/B.java"), "public class B {}");
+        Files.writeString(demo.resolve("a/b/C.java"), "public class C {}");
+        Files.writeString(demo.resolve("readme.txt"), "hello");
+
+        // 用 walk 遍历，统计 .java 文件
+        AtomicLong totalSize = new AtomicLong();
+        AtomicLong count = new AtomicLong();
+
+        try (var stream = Files.walk(demo)) {
+            stream.filter(Files::isRegularFile)
+                  .filter(p -> p.toString().endsWith(".java"))
+                  .forEach(p -> {
+                      try {
+                          long size = Files.size(p);
+                          totalSize.addAndGet(size);
+                          count.incrementAndGet();
+                          System.out.println("发现: " + p + " (" + size + " 字节)");
+                      } catch (IOException e) {
+                          throw new UncheckedIOException(e);
+                      }
+                  });
+        }
+
+        System.out.println("\\n--- 统计结果 ---");
+        System.out.println(".java 文件数: " + count.get());
+        System.out.println("总字节数: " + totalSize.get());
+
+        // 用 find 边遍历边过滤（更高效）
+        System.out.println("\\n--- 用 find 找大于 15 字节的文件 ---");
+        try (var stream = Files.find(demo, Integer.MAX_VALUE,
+                (path, attrs) -> attrs.isRegularFile() && attrs.size() > 15)) {
+            stream.forEach(p -> {
+                try {
+                    System.out.println(p + " -> " + Files.size(p) + " 字节");
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+        }
+
+        // 清理
+        deleteRecursively(demo);
+        System.out.println("\\n清理完毕");
+    }
+
+    // 递归删除目录（Files.walk 逆序）
+    static void deleteRecursively(Path root) throws IOException {
+        if (!Files.exists(root)) return;
+        try (var stream = Files.walk(root)) {
+            stream.sorted(java.util.Comparator.reverseOrder())
+                  .forEach(p -> {
+                      try { Files.deleteIfExists(p); }
+                      catch (IOException e) { throw new UncheckedIOException(e); }
+                  });
+        }
+    }
+}`} />
+
+> Key point: `Files.walk` returns paths in "parent before children" order, so when deleting you must apply `reverseOrder()` — delete children first, then parents, otherwise non-empty directories can't be removed.
+
+## 6. Converting Between File and Path
+
+Old code is full of `File`, new code uses `Path` — the two need to interconvert:
+
+```java
+File file = new File("/tmp/data.txt");
+Path path = file.toPath();        // File -> Path
+
+File back = path.toFile();        // Path -> File
+```
+
+Migration advice: use `Path` + `Files` exclusively in new code, and gradually replace it in old code. There's no longer any reason to use `File` in new projects.
+
+## 7. Quick Reference Table
+
+| Operation | Path/Files | Legacy File |
+| --- | --- | --- |
+| Create path | `Paths.get("a","b")` | `new File("a/b")` |
+| Join paths | `base.resolve("c")` | `new File(base, "c")` |
+| Sibling path | `p.resolveSibling("x")` | (manual concatenation) |
+| Normalize | `p.normalize()` | `f.getCanonicalFile()` |
+| Create file | `Files.createFile(p)` | `f.createNewFile()` |
+| Create multi-level dir | `Files.createDirectories(p)` | `f.mkdirs()` |
+| Delete | `Files.delete(p)` throws | `f.delete()` returns boolean |
+| Copy | `Files.copy(src, dst)` | (manual byte-stream read/write) |
+| Move | `Files.move(src, dst)` | `f.renameTo(dst)` |
+| Exists | `Files.exists(p)` | `f.exists()` |
+| Byte count | `Files.size(p)` | `f.length()` |
+| Traverse | `Files.walk(p)` returns Stream | `f.listFiles()` returns array |
+
+## Conclusion: From Crude to Elegant
+
+The old `File` class is like a rusty Swiss Army knife — it can barely manage every job, but every task feels awkward. NIO.2's `Path` and `Files` are a thorough redesign:
+
+- **`Path`** abstracts "path" into a computable object — `resolve`, `relativize`, `normalize` make path operations as precise as math formulas.
+- **`Files`** unifies "file operations" into a single utility class — create, copy, move, query, traverse. Method names are clear, failures throw exceptions, and "silent failures" are a thing of the past.
+- **Stream-based traversal** plugs directory operations into the functional pipeline — `Files.walk(dir).filter(...).map(...).collect(...)`, smooth as flowing water.
+
+Once you master `Path` and `Files`, writing file-related code shifts from "tread carefully, check the docs, hit pitfalls" to "one fluid sweep that reads like prose." That's NIO.2's true gift to Java file IO — not more features, but better design.
+
+In the next chapter we step into the world of byte streams — `InputStream` and `OutputStream`, the most foundational and classic abstraction in Java IO.

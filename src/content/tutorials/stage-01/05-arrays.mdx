@@ -1,0 +1,411 @@
+---
+title: "数组"
+chapter: 5
+stage: "第一阶段"
+stageName: "Java 基础入门"
+order: 5
+description: "掌握一维与多维数组的声明、初始化、遍历，Arrays 工具类，数组内存分析，并实战冒泡排序与二分查找"
+pubDate: 2026-07-03
+tags: ["Java", "数组", "Arrays", "排序", "基础入门"]
+---
+
+# 数组
+
+想象一家咖啡店的储物架——每个格子里放一杯咖啡，格子从 0 开始编号。店员喊"3 号位的咖啡"，你能立刻找到它。这就是**数组**（Array）的现实写照：一组连续的、相同类型的数据集合，每个元素都有一个编号（索引，Index）。
+
+数组是 Java 中最基础的数据结构，也是学习集合框架（Collections Framework）的前置知识。本章我们将深入数组的方方面面，并用它实现两个经典算法：冒泡排序与二分查找。
+
+## 一、为什么需要数组？
+
+假设你要统计一家咖啡店一周（7 天）的销量。如果没有数组，你只能这样写：
+
+```java
+int sales1 = 45;
+int sales2 = 52;
+int sales3 = 38;
+// ... 7 个变量
+int total = sales1 + sales2 + sales3 + ...;  // 手动相加
+```
+
+如果有 365 天的数据呢？写 365 个变量？遍历求和？这显然不可行。数组解决了这个问题：用一个变量名管理一组数据，用索引访问其中的任意元素，用循环批量处理。
+
+## 二、一维数组的声明与初始化
+
+### 2.1 声明
+
+Java 中声明一维数组有两种写法（推荐第一种）：
+
+```java
+int[] sales;     // 推荐：类型是"int 数组"
+int sales[];     // C 风格，来自 C/C++ 的习惯
+```
+
+声明只是定义了一个数组类型的变量，**尚未分配内存**，此时 `sales` 为 `null`。
+
+### 2.2 初始化
+
+数组必须经过初始化才能使用。初始化分为两种：
+
+**静态初始化**：在声明时直接给出所有元素值。
+
+```java
+int[] sales = {45, 52, 38, 60, 55, 70, 48};  // 简写形式
+// 或完整写法：
+int[] sales2 = new int[]{45, 52, 38, 60, 55, 70, 48};
+```
+
+> ⚠️ 注意：简写形式 `{...}` 只能用在声明的同时。如果分开写，必须用 `new int[]{...}`：
+> ```java
+> int[] sales;
+> sales = {45, 52, 38};           // 编译错误！
+> sales = new int[]{45, 52, 38};  // 正确
+> ```
+
+**动态初始化**：指定长度，由系统赋予默认值（数值类型为 `0`，`boolean` 为 `false`，引用类型为 `null`）。
+
+```java
+int[] sales = new int[7];  // 长度为 7，所有元素默认为 0
+sales[0] = 45;  // 再逐个赋值
+sales[1] = 52;
+// ...
+```
+
+### 2.3 length 属性
+
+每个数组都有一个 `length` 属性，表示数组的长度（元素个数）。注意它是**属性**而非方法，不要加括号：
+
+```java
+int[] sales = {45, 52, 38, 60, 55, 70, 48};
+System.out.println(sales.length);  // 7（不是 sales.length()！）
+```
+
+数组一旦创建，**长度就固定不变**。这是数组与 `ArrayList` 等动态集合的核心区别。
+
+## 三、数组的访问与遍历
+
+### 3.1 通过索引访问
+
+数组索引从 **0** 开始，到 `length - 1` 结束。访问越界会抛出 `ArrayIndexOutOfBoundsException`：
+
+```java
+int[] sales = {45, 52, 38, 60, 55, 70, 48};
+System.out.println(sales[0]);    // 45（第一个元素）
+System.out.println(sales[6]);    // 48（最后一个元素）
+sales[3] = 65;                   // 修改第四个元素
+// sales[7] = 100;               // 运行时异常！索引越界
+```
+
+### 3.2 遍历数组
+
+**经典 for 循环**：需要索引时使用。
+
+```java
+int[] sales = {45, 52, 38, 60, 55, 70, 48};
+for (int i = 0; i < sales.length; i++) {
+    System.out.printf("第 %d 天销量：%d 杯%n", i + 1, sales[i]);
+}
+```
+
+**增强 for 循环（for-each）**：只需元素值、不需索引时更简洁。
+
+```java
+int total = 0;
+for (int s : sales) {
+    total += s;
+}
+System.out.println("总销量：" + total + " 杯");
+```
+
+## 四、多维数组
+
+### 4.1 Java 的多维数组本质
+
+在 C/C++ 中，二维数组是一片连续的矩形内存。而 **Java 的多维数组是"数组的数组"**——一个二维数组实际上是一个一维数组，其中每个元素又是一个一维数组。
+
+```
+int[][] matrix = {
+    {1, 2, 3},
+    {4, 5, 6},
+    {7, 8, 9}
+};
+```
+
+`matrix` 是一个长度为 3 的一维数组，`matrix[0]`、`matrix[1]`、`matrix[2]` 各自又是一个长度为 3 的一维数组。
+
+### 4.2 声明与初始化
+
+```java
+// 静态初始化
+int[][] matrix = {
+    {1, 2, 3},
+    {4, 5, 6},
+    {7, 8, 9}
+};
+
+// 动态初始化（规则矩形）
+int[][] grid = new int[3][4];  // 3 行 4 列，全为 0
+
+// 动态初始化（不规则数组）
+int[][] jagged = new int[3][];
+jagged[0] = new int[]{1, 2};
+jagged[1] = new int[]{3, 4, 5, 6};
+jagged[2] = new int[]{7, 8, 9};
+```
+
+### 4.3 不规则数组（Jagged Array）
+
+因为 Java 的二维数组是"数组的数组"，所以**每一行的长度可以不同**——这就是不规则数组：
+
+```java
+int[][] triangle = {
+    {1},
+    {2, 3},
+    {4, 5, 6},
+    {7, 8, 9, 10}
+};
+```
+
+这种灵活性在打印杨辉三角等场景中很有用。
+
+### 4.4 遍历二维数组
+
+```java
+int[][] matrix = {
+    {1, 2, 3},
+    {4, 5, 6},
+    {7, 8, 9}
+};
+
+for (int i = 0; i < matrix.length; i++) {           // 遍历行
+    for (int j = 0; j < matrix[i].length; j++) {    // 遍历列
+        System.out.printf("%4d", matrix[i][j]);
+    }
+    System.out.println();
+}
+```
+
+注意内层循环用 `matrix[i].length` 而非固定值——这样能正确处理不规则数组。
+
+## 五、Arrays 工具类
+
+`java.util.Arrays` 是 Java 提供的数组工具类，封装了大量实用方法，免去了重复造轮子。
+
+### 5.1 常用方法一览
+
+| 方法 | 功能 |
+| --- | --- |
+| `Arrays.toString(arr)` | 将数组转为字符串，如 `[1, 2, 3]` |
+| `Arrays.sort(arr)` | 对数组排序（升序） |
+| `Arrays.binarySearch(arr, key)` | 二分查找（数组须已排序），返回索引，未找到返回负值 |
+| `Arrays.fill(arr, val)` | 用指定值填充整个数组 |
+| `Arrays.copyOf(arr, newLength)` | 复制数组，指定新长度 |
+| `Arrays.copyOfRange(arr, from, to)` | 复制数组的指定范围 `[from, to)` |
+| `Arrays.equals(arr1, arr2)` | 比较两个数组的内容是否相同 |
+| `Arrays.asList(arr)` | 将数组转为 `List`（注意：返回的是固定大小的 List） |
+
+### 5.2 使用示例
+
+```java
+import java.util.Arrays;
+
+int[] arr = {5, 2, 8, 1, 9, 3};
+
+// 排序
+Arrays.sort(arr);
+System.out.println(Arrays.toString(arr));  // [1, 2, 3, 5, 8, 9]
+
+// 二分查找（必须先排序）
+int idx = Arrays.binarySearch(arr, 8);
+System.out.println("8 的索引：" + idx);  // 4
+
+// 填充
+int[] filled = new int[5];
+Arrays.fill(filled, 100);
+System.out.println(Arrays.toString(filled));  // [100, 100, 100, 100, 100]
+
+// 复制
+int[] copy = Arrays.copyOf(arr, 3);
+System.out.println(Arrays.toString(copy));  // [1, 2, 3]
+```
+
+> ⚠️ **`Arrays.asList()` 的陷阱**：该方法返回的 `List` 大小固定，不能 `add`/`remove`，否则抛出 `UnsupportedOperationException`。如果需要可变 List，请用 `new ArrayList＜＞(Arrays.asList(arr))`。此外，`int[]` 传入 `asList` 会被视为单个元素，需要用 `Integer[]`。
+
+## 六、数组的内存分析
+
+### 6.1 数组是引用类型
+
+在 Java 中，数组是**引用类型**（Reference Type），而非基本类型。这意味着数组变量存储的不是数据本身，而是数据在**堆内存**（Heap）中的地址。
+
+```java
+int[] a = {1, 2, 3};
+int[] b = a;     // b 和 a 指向同一个数组！
+b[0] = 100;
+System.out.println(a[0]);  // 100！a 也被改变了
+```
+
+这就像两张会员卡指向同一个账户——无论用哪张卡消费，账户余额都会变化。
+
+### 6.2 内存布局
+
+```java
+int[] arr = new int[3];
+arr[0] = 10;
+```
+
+执行过程：
+1. **栈（Stack）** 中创建变量 `arr`。
+2. **堆（Heap）** 中分配 3 个 `int` 的连续空间，初始值为 `0`。
+3. `arr` 存储堆中数组对象的地址（引用）。
+4. `arr[0] = 10` 通过引用找到堆中的对象，修改第一个元素。
+
+### 6.3 数组与泛型的限制
+
+Java 的泛型（Generics）有一个著名限制：**不能创建泛型数组** `new List＜String＞[]`。这是因为泛型使用"类型擦除"（Type Erasure），运行时 `List＜String＞` 和 `List＜Integer＞` 都是 `List`，泛型数组无法保证类型安全。这也是为什么 Java 集合框架优先使用 `ArrayList` 而非数组。
+
+## 七、实战：冒泡排序
+
+冒泡排序（Bubble Sort）是最经典的排序算法之一，虽然效率不高（时间复杂度 O(n²)），但它是理解排序思想的绝佳入门。
+
+### 7.1 算法思想
+
+想象一杯咖啡中的气泡——较大的气泡会先浮到顶部。冒泡排序也是如此：**相邻元素两两比较，较大的往后"冒泡"**，每一轮结束后，最大的元素就到了末尾。重复 n-1 轮，数组就有序了。
+
+```
+初始：    [5, 3, 8, 1, 9]
+第 1 轮：[3, 5, 1, 8, 9]  ← 9 已到位
+第 2 轮：[3, 1, 5, 8, 9]  ← 8 已到位
+第 3 轮：[1, 3, 5, 8, 9]  ← 5 已到位
+第 4 轮：[1, 3, 5, 8, 9]  ← 全部有序
+```
+
+### 7.2 代码实现
+
+<CodeRunner code={`public class Main {
+    public static void main(String[] args) {
+        int[] arr = {64, 34, 25, 12, 22, 11, 90, 5};
+
+        System.out.println("排序前：");
+        printArray(arr);
+
+        // 冒泡排序
+        bubbleSort(arr);
+
+        System.out.println("\\n排序后：");
+        printArray(arr);
+
+        // 用 Arrays 工具类验证
+        System.out.println("\\n--- 二分查找验证 ---");
+        int target = 25;
+        // 手写二分查找
+        int index = binarySearch(arr, target);
+        if (index >= 0) {
+            System.out.printf("数字 %d 的索引是 %d%n", target, index);
+        } else {
+            System.out.printf("数字 %d 不存在%n", target);
+        }
+    }
+
+    // 冒泡排序：相邻元素两两比较，大的往后冒
+    static void bubbleSort(int[] arr) {
+        int n = arr.length;
+        for (int i = 0; i < n - 1; i++) {           // 外层：n-1 轮
+            boolean swapped = false;                 // 优化：记录本轮是否发生交换
+            for (int j = 0; j < n - 1 - i; j++) {   // 内层：每轮少比较一次（末尾已有序）
+                if (arr[j] > arr[j + 1]) {
+                    // 交换相邻元素
+                    int temp = arr[j];
+                    arr[j] = arr[j + 1];
+                    arr[j + 1] = temp;
+                    swapped = true;
+                }
+            }
+            // 如果本轮没有交换，说明数组已有序，提前结束
+            if (!swapped) {
+                System.out.println("第 " + (i + 1) + " 轮后已有序，提前结束");
+                break;
+            }
+        }
+    }
+
+    // 二分查找：在已排序数组中查找目标值
+    static int binarySearch(int[] arr, int target) {
+        int low = 0;
+        int high = arr.length - 1;
+        while (low <= high) {
+            int mid = (low + high) / 2;
+            if (arr[mid] == target) {
+                return mid;        // 找到，返回索引
+            } else if (arr[mid] < target) {
+                low = mid + 1;     // 目标在右半部分
+            } else {
+                high = mid - 1;    // 目标在左半部分
+            }
+        }
+        return -1;  // 未找到
+    }
+
+    // 打印数组
+    static void printArray(int[] arr) {
+        for (int i = 0; i < arr.length; i++) {
+            System.out.printf("%4d", arr[i]);
+        }
+        System.out.println();
+    }
+}`} />
+
+### 7.3 冒泡排序的优化
+
+上例代码中有两个优化点：
+
+1. **减少内层循环次数**：`j ＜ n - 1 - i`。每轮结束后，最大的 i+1 个元素已到位，无需再比较。
+2. **提前退出**：用 `swapped` 标志。如果某一轮没有发生任何交换，说明数组已经有序，可以提前结束。这在"几乎有序"的数组上能显著提升性能。
+
+## 八、二分查找：O(log n) 的魔法
+
+二分查找（Binary Search）要求数组**必须已排序**。它的核心思想是：每次取中间元素与目标比较，排除掉一半的数据。
+
+```
+在 [11, 12, 22, 25, 34, 64, 90] 中查找 25：
+第 1 次：mid=25 → 找到！
+```
+
+二分查找的时间复杂度是 **O(log n)**——每比较一次，数据量减半。在 10 亿个数据中查找一个数，最多只需 30 次比较（2³⁰ ≈ 10 亿）。这就是对数级复杂度的威力。
+
+> ⚠️ **整数溢出陷阱**：计算中间索引时，`int mid = (low + high) / 2;` 在 `low` 和 `high` 都很大时可能溢出。更安全的写法是 `int mid = low + (high - low) / 2;`，或 Java 18+ 的 `int mid = Math.floorDiv(low + high, 2);`。
+
+## 九、数组常用操作速查表
+
+| 操作 | 代码 |
+| --- | --- |
+| 创建数组 | `int[] arr = new int[5];` |
+| 静态初始化 | `int[] arr = {1, 2, 3};` |
+| 获取长度 | `arr.length` |
+| 访问元素 | `arr[0]`（第一个）、`arr[arr.length - 1]`（最后一个） |
+| 遍历 | `for (int x : arr) { ... }` |
+| 排序 | `Arrays.sort(arr);` |
+| 查找 | `Arrays.binarySearch(arr, key);` |
+| 转字符串 | `Arrays.toString(arr);` |
+| 复制 | `Arrays.copyOf(arr, newLen);` |
+| 比较内容 | `Arrays.equals(a, b);` |
+
+## 十、数组 vs 集合：何时用哪个？
+
+| 特性 | 数组 | 集合（如 `ArrayList`） |
+| --- | --- | --- |
+| 长度 | 固定 | 动态可变 |
+| 类型 | 可存基本类型 | 只能存对象（用包装类） |
+| 性能 | 直接内存访问，最快 | 略有开销，但仍高效 |
+| 功能 | 基础 | 丰富（增删改查、排序等） |
+| 泛型 | 受限 | 完整支持 |
+
+**经验法则**：
+- 长度已知且不变、追求极致性能 → 数组
+- 需要动态增删、丰富操作 → `ArrayList` 等集合
+- 多维数值计算（矩阵运算）→ 二维数组
+- API 接口、业务逻辑 → 集合
+
+## 结语
+
+数组是 Java 数据结构的"第一课"。它简单——一组连续的同类型数据；它强大——支撑了排序、查找等经典算法；它深刻——揭示了引用类型与内存布局的奥秘。
+
+掌握数组之后，你就具备了批量处理数据的能力。在后续的章节中，我们将进入面向对象的世界——学习类、对象、继承、多态。如果说数组和流程控制是 Java 的"骨架"，那么面向对象就是 Java 的"灵魂"。咖啡的故事才刚刚展开最精彩的篇章。

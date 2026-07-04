@@ -1,0 +1,324 @@
+---
+title: "字符流"
+chapter: 30
+stage: "第六阶段"
+stageName: "I/O 与 NIO"
+order: 3
+description: "掌握 Reader/Writer 抽象类、InputStreamReader/OutputStreamWriter 桥梁、BufferedReader/PrintWriter，深入理解字符编码从 ASCII 到 UTF-8 的演进"
+pubDate: 2026-07-03
+tags: ["Java", "IO", "字符流", "Reader", "Writer", "字符编码", "UTF-8", "Charset"]
+---
+
+# 字符流
+
+字节流能读写一切，但有个别扭的角落——文本。一个汉字在 UTF-8 里占 3 字节，在 GBK 里占 2 字节；如果用字节流读取，你必须自己判断"这 3 字节是一个汉字还是 3 个英文字母"。这种事让人头大。
+
+字符流（character stream）就是为此而生。它把"字节到字符"的转换封装起来——你只管 `read` 一个 `char`、`write` 一行字符串，编码的事交给它。这一章我们从 `Reader`/`Writer` 抽象类讲到桥梁流、缓冲流、`PrintWriter`，最后讲透字符编码的前世今生——ASCII、GBK、Unicode、UTF-8 到底什么关系。
+
+## 一、Reader 与 Writer 抽象类
+
+字符流的顶层抽象是 `Reader`（读）和 `Writer`（写），对应字节流的 `InputStream`/`OutputStream`。
+
+```java
+public abstract class Reader implements Readable, Closeable {
+    public int read() throws IOException;                    // 读 1 个字符（0~65535，到末尾 -1）
+    public int read(char[] cbuf) throws IOException;         // 批量读入
+    public abstract int read(char[] cbuf, int off, int len);
+    public long transferTo(Writer out);                      // Java 10+
+    public abstract void close();
+}
+
+public abstract class Writer implements Appendable, Closeable, Flushable {
+    public void write(int c) throws IOException;             // 写 1 个字符
+    public void write(char[] cbuf) throws IOException;
+    public abstract void write(char[] cbuf, int off, int len);
+    public void write(String str) throws IOException;        // 直接写字符串
+    public Writer append(CharSequence csq);                  // 追加（来自 Appendable）
+    public abstract void flush();
+    public abstract void close();
+}
+```
+
+注意：字符流的单位是 `char`（16 位 Unicode 码元），不是 `byte`。`read()` 返回 `int`，0~65535 是有效字符，-1 是末尾——和字节流同样的 -1 模式。
+
+## 二、InputStreamReader / OutputStreamWriter：字节到字符的桥梁
+
+字符流不能凭空读字符——数据源最终还是字节（文件、网络都是字节）。`InputStreamReader` 是"字节流到字符流"的桥梁：它持有一个 `InputStream`，按指定 `Charset` 把字节解码成字符。
+
+```java
+import java.io.*;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+
+// 用 UTF-8 编码读
+Reader r = new InputStreamReader(
+    new FileInputStream("poem.txt"),
+    StandardCharsets.UTF_8);
+
+// 写 GBK
+Writer w = new OutputStreamWriter(
+    new FileOutputStream("out.txt"),
+    Charset.forName("GBK"));
+```
+
+`InputStreamReader`/`OutputStreamWriter` 是字符流里**唯一**直接接触字节的类。所有其他字符流（`FileReader`、`BufferedReader` 等）内部都依赖它们。
+
+### 2.1 编码必须显式指定
+
+如果你不传 `Charset`，JDK 会用**平台默认编码**——这在不同机器上结果不同：
+
+- Windows 中文版默认 GBK
+- Linux/macOS 默认 UTF-8
+- Docker 容器里可能是 ASCII
+
+这种"同样的代码在不同机器跑出乱码"的 bug 极其难排查。**规则：永远显式指定编码**，别依赖默认值。`StandardCharsets` 提供了三个常量：`UTF_8`、`UTF_16`、`ISO_8859_1`、`US_ASCII`，省得你拼字符串。
+
+## 三、FileReader / FileWriter：便捷类
+
+`FileReader`/`FileWriter` 是 `InputStreamReader`/`OutputStreamWriter` 的便捷封装——直接传文件路径，省去一层嵌套。
+
+```java
+// Java 11+ 支持显式指定编码
+Reader r = new FileReader("poem.txt", StandardCharsets.UTF_8);
+Writer w = new FileWriter("out.txt", StandardCharsets.UTF_8, true);  // true=追加
+```
+
+**坑提醒**：Java 11 之前，`FileReader` 没有接受 `Charset` 的构造器——只能用平台默认编码，这是历史遗留的"便捷类陷阱"。在新代码里：要么用 Java 11+ 的 `FileReader(path, charset)`，要么直接用 `InputStreamReader` + `FileInputStream` 显式组合。
+
+## 四、BufferedReader / BufferedWriter：行读写
+
+裸 `Reader.read()` 一次读一个字符，调一次解码——慢。`BufferedReader` 加缓冲区，并提供**按行读取**的 `readLine()`——这是处理文本文件最常用的方法。
+
+```java
+import java.io.*;
+
+try (BufferedReader br = new BufferedReader(
+        new InputStreamReader(
+            new FileInputStream("poem.txt"), StandardCharsets.UTF_8))) {
+    String line;
+    while ((line = br.readLine()) != null) {   // 读到末尾返回 null
+        System.out.println(line);
+    }
+}
+```
+
+`readLine()` 返回的内容**不包含**换行符——`\n`、`\r`、`\r\n` 都会被识别并剥除。要原样保留得用 `read()`。
+
+`BufferedWriter` 对应 `newLine()`——写出平台相关的换行符：
+
+```java
+try (BufferedWriter bw = new BufferedWriter(
+        new OutputStreamWriter(
+            new FileOutputStream("out.txt"), StandardCharsets.UTF_8))) {
+    bw.write("第一行");
+    bw.newLine();          // 平台换行符（Linux \n，Windows \r\n）
+    bw.write("第二行");
+}
+```
+
+## 五、PrintWriter：格式化输出
+
+`PrintWriter` 提供 `print`、`println`、`printf` 一套方法，和 `System.out` 一脉相承。它最大的特点是**不抛 `IOException`**——出错只设置一个 `checkError()` 标志，让"打印日志"这种场景不被异常打断。
+
+```java
+import java.io.*;
+
+try (PrintWriter pw = new PrintWriter(
+        new OutputStreamWriter(
+            new FileOutputStream("log.txt"), StandardCharsets.UTF_8),
+        true)) {   // 第二参 true = 自动 flush
+    pw.println("开始处理");
+    pw.printf("用户 %s, 年龄 %d%n", "Alice", 30);
+    pw.printf("Pi = %.4f%n", Math.PI);
+}
+```
+
+**自动 flush**：`PrintWriter` 可以开启"println 时自动 flush"模式——这在写日志、与用户交互时有用。底层 `BufferedWriter` 默认不 flush，关流时才 flush。
+
+`PrintWriter` 的"不抛异常"是双刃剑——方便但也容易掩盖错误。如果你关心写入是否真的成功，调一下 `pw.checkError()`。
+
+## 六、字符编码详解：从 ASCII 到 UTF-8
+
+理解字符流绕不开"编码"。我们用一节讲透它的来龙去脉。
+
+### 6.1 ASCII：英语的 128 个字符
+
+1963 年的 ASCII（American Standard Code for Information Interchange）用 7 位二进制表示 128 个字符——26 个英文字母（大小写）、数字、标点、控制符。`'A'` 是 65、`'a'` 是 97、`'0'` 是 48。这是字符编码的起源。
+
+### 6.2 ISO-8859-1：补完一个字节
+
+ASCII 只用了 7 位，第 8 位空着。ISO-8859-1（又叫 Latin-1）把第 8 位也用上，扩展到 256 个字符——补充了西欧语言的字母（é、ü、ñ 等）。一个字节一个字符，简洁但只能表示西欧语言。
+
+### 6.3 GBK：中文的方案
+
+中文有上万个汉字，1 字节 256 个字符根本不够。GB2312（1980）和它的扩展 GBK（1995）用**变长编码**——ASCII 字符 1 字节，汉字 2 字节。一个 GBK 文件里 `'A'` 占 1 字节、`'中'` 占 2 字节。Windows 中文版至今默认 GBK。
+
+### 6.4 Unicode：统一全世界
+
+每个国家一套编码（中文 GBK、日文 Shift-JIS、韩文 EUC-KR），互相不通——同一份文档在不同机器乱码。Unicode（1991）的目标是：**给全世界每个字符一个唯一编号**。
+
+Unicode 是个**字符集**（character set），不是编码方案。它给每个字符分配一个码点（code point）——`U+0041` 是 `A`、`U+4E2D` 是 `中`、`U+1F600` 是 `😀`。目前 Unicode 已收录 14 万+ 字符，还在持续增加。
+
+但 Unicode 只规定"哪个码点对应哪个字符"，没规定"码点在文件里怎么存"。
+
+### 6.5 UTF-8：Unicode 的最佳实现
+
+UTF-8 是 Unicode 的一种**编码方案**（encoding form），把码点存成字节序列。它变长：
+
+| 字符范围 | 字节数 | 示例 |
+| --- | --- | --- |
+| ASCII（U+0000~U+007F） | 1 字节 | `'A'` → `41` |
+| 拉丁扩展（U+0080~U+07FF） | 2 字节 | `'é'` → `C3 A9` |
+| BMP 基本多文种平面（U+0800~U+FFFF） | 3 字节 | `'中'` → `E4 B8 AD` |
+| 辅助平面（U+10000+，含 emoji） | 4 字节 | `'😀'` → `F0 9F 98 80` |
+
+UTF-8 的妙处：
+
+- **完全兼容 ASCII**——纯英文的 UTF-8 文件就是 ASCII 文件。
+- **变长但自同步**——读到中间字节能识别"这是某个字符的第几字节"，不会错位。
+- **空间高效**——英文 1 字节，中文 3 字节，比 UTF-16/UTF-32 节省。
+
+这是为什么 UTF-8 成了互联网的事实标准——HTML、JSON、源代码默认都是 UTF-8。
+
+### 6.6 一句话区分
+
+| 术语 | 是什么 |
+| --- | --- |
+| ASCII | 128 字符的英文字符集 + 编码 |
+| ISO-8859-1 | 256 字符的西欧扩展，1 字节 1 字符 |
+| GBK | 中文编码，变长（1 或 2 字节） |
+| Unicode | 全球字符集，给每个字符一个码点 |
+| UTF-8 | Unicode 的编码方案，变长（1~4 字节） |
+| UTF-16 | Unicode 的编码方案，2 或 4 字节 |
+| `Charset` | Java 中表示编码方案的类 |
+
+记住：**Unicode 是"谁是谁"，UTF-8 是"怎么存"**。
+
+## 七、实战：读取 UTF-8 文本文件并统计行数
+
+下面这个例子用 `BufferedReader` 读取一个 UTF-8 文本文件，统计行数、字数、字符数：
+
+<CodeRunner code={`import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+
+public class Main {
+    public static void main(String[] args) throws IOException {
+        // 准备一个 UTF-8 测试文件（含中文和 emoji）
+        Path poem = Paths.get("poem.txt");
+        String content = "静夜思\\n李白\\n\\n床前明月光，\\n疑是地上霜。\\n举头望明月，\\n低头思故乡。\\n😀 The End.";
+        Files.writeString(poem, content, StandardCharsets.UTF_8);
+
+        // 用 BufferedReader 按行读取
+        int lineCount = 0;
+        int wordCount = 0;
+        long charCount = 0;
+
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(
+                    new FileInputStream(poem.toFile()),
+                    StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                lineCount++;
+                charCount += line.length();
+                // 简单分词：按空格、标点切
+                String[] words = line.split("[\\\\s，。！？.,!?:;]+");
+                for (String w : words) if (!w.isEmpty()) wordCount++;
+                System.out.println("第 " + lineCount + " 行: " + line);
+            }
+        }
+
+        System.out.println("\\n--- 统计 ---");
+        System.out.println("行数: " + lineCount);
+        System.out.println("词数（粗略）: " + wordCount);
+        System.out.println("字符数（不含换行）: " + charCount);
+        System.out.println("文件字节数: " + Files.size(poem));
+
+        // 对比：用 Files.readAllLines 一行搞定
+        System.out.println("\\n--- 用 Files.readAllLines 一行读取 ---");
+        long lines = Files.readAllLines(poem, StandardCharsets.UTF_8).size();
+        System.out.println("Files.readAllLines 统计行数: " + lines);
+
+        // 对比：用 Files.lines 流式读取（适合大文件）
+        System.out.println("\\n--- 用 Files.lines 流式读取 ---");
+        try (var stream = Files.lines(poem, StandardCharsets.UTF_8)) {
+            stream.filter(l -> !l.isEmpty())
+                  .forEach(l -> System.out.println("  非空行: " + l));
+        }
+
+        // 清理
+        Files.deleteIfExists(poem);
+        System.out.println("\\n清理完毕");
+    }
+}`} />
+
+> **三种读取方式对比**：
+> - `BufferedReader.readLine()`：经典方式，可控性最强。
+> - `Files.readAllLines`：一次性读完所有行到 `List＜String＞`，简单但大文件占内存。
+> - `Files.lines`：返回 `Stream＜String＞`，惰性读取，适合大文件 + 流式处理（下章详解）。
+
+## 八、字符流 vs 字节流：何时用哪个
+
+| 场景 | 用字节流 | 用字符流 |
+| --- | --- | --- |
+| 文本文件（txt/csv/json/html） | ❌ | ✅ |
+| 二进制文件（图片/视频/zip） | ✅ | ❌ |
+| 序列化对象 | ✅ | ❌ |
+| 网络原始字节 | ✅ | ❌ |
+| HTTP 文本响应 | 可以 | ✅（指定编码后更安全） |
+
+**铁律**：**文本用字符流，二进制用字节流**。混用必有坑——比如用 `Reader` 读 PNG 文件，字节被错误解码成字符，再 `write` 回去必然损坏。
+
+## 九、常见编码陷阱
+
+### 9.1 乱码来源
+
+乱码无非两种：
+
+1. **解码错误**：用 GBK 解码 UTF-8 文件——UTF-8 的 3 字节汉字被当成 GBK 的 1.5 个汉字。
+2. **编码缺失**：字符在目标编码里不存在——比如 emoji `😀` 在 GBK 里没有对应码点，写入时变成 `?`。
+
+### 9.2 String 与字节互转
+
+```java
+String s = "你好";
+byte[] utf8 = s.getBytes(StandardCharsets.UTF_8);       // 6 字节
+byte[] gbk  = s.getBytes(Charset.forName("GBK"));        // 4 字节
+
+String back = new String(utf8, StandardCharsets.UTF_8);  // 正确还原
+String wrong = new String(utf8, Charset.forName("GBK")); // 乱码
+```
+
+**永远传 `Charset` 参数**——`getBytes()` 不带参数会用平台默认编码，是跨平台 bug 的常见根源。
+
+### 9.3 检查文件编码
+
+Java 没有内置"猜编码"的方法。常见做法：
+
+- 优先信任元信息（HTTP 头 `Content-Type: text/html; charset=utf-8`、HTML 里的 `＜meta charset＞`）。
+- 没有元信息时用第三方库 `juniversalchardet`。
+- 实在不行试 UTF-8（失败再降级到 GBK）——UTF-8 的字节有严格模式，错误的字节会抛 `MalformedInputException`。
+
+## 十、本章速查表
+
+| 类 | 用途 | 关键方法 |
+| --- | --- | --- |
+| `Reader` / `Writer` | 字符流抽象基类 | `read` / `write` / `append` |
+| `InputStreamReader` / `OutputStreamWriter` | 字节↔字符桥梁（指定编码） | 构造器传 `Charset` |
+| `FileReader` / `FileWriter` | 文件便捷类（Java 11+ 支持编码） | 构造器 |
+| `BufferedReader` / `BufferedWriter` | 加缓冲、按行读写 | `readLine` / `newLine` |
+| `PrintWriter` | 格式化输出、不抛异常 | `print` / `println` / `printf` |
+| `StringReader` / `StringWriter` | 字符串当源/目标 | 内存读写 |
+
+## 结语：让文本处理变得优雅
+
+字符流是字节流之上的"语义层"——它把"字节流按编码解码成字符"这件麻烦事封装掉，让你专注处理文本本身。掌握它的关键有三：
+
+- **桥梁流是核心**：`InputStreamReader`/`OutputStreamWriter` 是字符流唯一接触字节的地方，编码在这里指定。
+- **永远显式指定编码**：`StandardCharsets.UTF_8` 是你最好的朋友。不指定就用默认值，是乱码 bug 的源头。
+- **BufferedReader.readLine 是神器**：处理文本文件 90% 的需求，用 `readLine` + try-with-resources 就够了。
+
+理解了字符编码从 ASCII 到 UTF-8 的演进，你对"为什么会出现乱码"会有一种透视感——乱码不是玄学，是字节和字符之间编码错配的结果。
+
+下一章我们看序列化——把内存中的对象"冻结"成字节流，存到文件或传到网络。那是另一种"对象 ↔ 字节"的转换艺术。

@@ -1,0 +1,426 @@
+---
+title: "控制流程"
+chapter: 4
+stage: "第一阶段"
+stageName: "Java 基础入门"
+order: 4
+description: "掌握 if-else、switch 表达式、while、for、break/continue 等控制流程语句，并实战猜数字游戏"
+pubDate: 2026-07-03
+tags: ["Java", "控制流程", "switch", "循环", "基础入门"]
+---
+
+# 控制流程
+
+到目前为止，我们写的程序都是"从上到下"依次执行的——像一条笔直的高速公路，没有任何分叉。但现实世界的问题远比这复杂：咖啡师要根据客人要求决定加不加糖，要根据库存决定能不能出杯，要根据订单数量决定萃取几杯……程序需要**选择**和**重复**的能力。
+
+这就是**控制流程**（Control Flow）的职责。它让程序学会"做决策"和"重复劳动"。本章我们将学习 Java 的两大控制结构：**分支**（Branching）与**循环**（Looping），最后用一个经典的"猜数字"游戏来综合演练。
+
+## 一、if-else：选择的智慧
+
+`if-else` 是最基础的条件判断语句，它像咖啡师询问客人："要加糖吗？"——根据回答走不同的分支。
+
+### 1.1 基本形式
+
+```java
+// 1. 单分支
+if (条件) {
+    // 条件为 true 时执行
+}
+
+// 2. 双分支
+if (条件) {
+    // 条件为 true 时执行
+} else {
+    // 条件为 false 时执行
+}
+
+// 3. 多分支
+if (条件1) {
+    // 条件1 为 true
+} else if (条件2) {
+    // 条件2 为 true
+} else if (条件3) {
+    // 条件3 为 true
+} else {
+    // 以上条件都不满足
+}
+```
+
+### 1.2 示例：根据温度推荐咖啡
+
+```java
+int temperature = 35;  // 气温 35°C
+
+if (temperature >= 30) {
+    System.out.println("天气炎热，推荐冰美式 ☕🧊");
+} else if (temperature >= 20) {
+    System.out.println("天气温和，推荐拿铁 ☕");
+} else if (temperature >= 10) {
+    System.out.println("天气微凉，推荐卡布奇诺 ☕");
+} else {
+    System.out.println("天气寒冷，推荐热可可 🍫");
+}
+```
+
+`else if` 和 `else` 都是可选的。`if` 会从上到下依次判断，**一旦某个条件为 true，执行其代码块后就跳过后续所有分支**。
+
+### 1.3 注意事项
+
+- **大括号不可省**：虽然单条语句可以省略大括号，但这会导致难以察觉的 bug（著名的 Apple `goto fail` 漏洞就源于此）。**始终使用大括号**。
+- **悬空 else**：`else` 总是与最近的 `if` 配对。当代码缩进有误导性时容易出错，用大括号可以避免歧义。
+- **避免过深的嵌套**：超过三层的 `if` 嵌套会让代码难以阅读。可以用"提前返回"（Early Return）或"卫语句"（Guard Clause）来简化：
+
+```java
+// 不推荐：嵌套过深
+public String check(int score) {
+    if (score >= 0) {
+        if (score >= 60) {
+            if (score >= 90) {
+                return "优秀";
+            } else {
+                return "及格";
+            }
+        } else {
+            return "不及格";
+        }
+    } else {
+        return "无效分数";
+    }
+}
+
+// 推荐：卫语句，扁平化
+public String check(int score) {
+    if (score < 0) return "无效分数";
+    if (score < 60) return "不及格";
+    if (score < 90) return "及格";
+    return "优秀";
+}
+```
+
+## 二、switch：多路分支的利器
+
+当需要根据一个变量的多个取值走不同分支时，`if-else if` 会变得冗长。`switch` 语句专为此而生，更清晰、更高效。
+
+### 2.1 传统 switch 语句
+
+```java
+int dayOfWeek = 3;  // 1=周一...7=周日
+switch (dayOfWeek) {
+    case 1:
+        System.out.println("星期一，意式浓缩提神");
+        break;
+    case 2:
+        System.out.println("星期二，美式续命");
+        break;
+    case 3:
+        System.out.println("星期三，拿铁小确幸");
+        break;
+    case 6:
+    case 7:
+        System.out.println("周末，摩卡享受时光");
+        break;
+    default:
+        System.out.println("其他日子，喝什么都行");
+        break;
+}
+```
+
+switch 支持的类型：`byte`、`short`、`int`、`char`、`String`（Java 7+）、`enum`（枚举，Java 5+）。不支持 `long`、`float`、`double`、`boolean`。
+
+### 2.2 fall-through 与 break
+
+switch 的一个重要特性是 **fall-through（贯穿）**：如果某个 `case` 后没有 `break`，执行会"贯穿"到下一个 `case`，直到遇到 `break` 或 switch 结束。
+
+这有时是 bug 的来源（忘记写 `break`），但有时也有意为之——如上例中 `case 6` 和 `case 7` 共享同一段代码，利用了 fall-through。
+
+### 2.3 Switch 表达式（Java 14+）
+
+Java 14 引入了**Switch 表达式**（Switch Expression），用更简洁的"箭头语法"（`-＞`）替代传统的 `:` 和 `break`，且**没有 fall-through**：
+
+```java
+int dayOfWeek = 3;
+String coffee = switch (dayOfWeek) {
+    case 1 -> "意式浓缩";
+    case 2 -> "美式";
+    case 3 -> "拿铁";
+    case 4 -> "卡布奇诺";
+    case 5 -> "摩卡";
+    case 6, 7 -> "周末特调";
+    default -> "随便";
+};
+System.out.println("今天的咖啡：" + coffee);
+```
+
+特点：
+- 使用 `-＞` 箭头，无需 `break`，自动不贯穿。
+- **switch 现在是表达式**，可以有返回值，用 `=` 赋值。
+- 多个值用逗号合并：`case 6, 7 -＞`。
+- 箭头右侧可以是单条语句、代码块或值。
+- 必须覆盖所有可能的情况，或提供 `default`。
+
+### 2.4 yield 关键字
+
+当箭头右侧是代码块（`{}`）且需要返回值时，使用 `yield` 关键字：
+
+```java
+int dayOfWeek = 3;
+int price = switch (dayOfWeek) {
+    case 1, 2, 3, 4, 5 -> {
+        System.out.println("工作日，原价");
+        yield 28;  // 代码块中用 yield 返回值
+    }
+    case 6, 7 -> {
+        System.out.println("周末，打八折");
+        yield 22;
+    }
+    default -> 0;
+};
+```
+
+> 💡 **何时用 switch，何时用 if-else**？
+> - 等值匹配（变量等于某个具体值）→ `switch`
+> - 范围判断、复杂条件 → `if-else`
+> switch 在等值匹配场景下通常更清晰，且 JVM 会优化为跳表（tableswitch），性能更优。
+
+## 三、while 循环：不确定的重复
+
+`while` 循环用于"只要条件成立，就重复执行"的场景。它像一台自动咖啡机——只要还有订单（条件为 true），就一直做咖啡。
+
+### 3.1 while 循环
+
+```java
+while (条件) {
+    // 循环体
+}
+// 先判断条件，再执行循环体
+```
+
+```java
+int cups = 1;
+while (cups <= 5) {
+    System.out.println("制作第 " + cups + " 杯咖啡");
+    cups++;
+}
+System.out.println("5 杯咖啡全部完成！");
+```
+
+> ⚠️ **死循环陷阱**：如果循环体中没有改变条件的操作，循环将永不结束，程序会"卡死"。务必确保循环条件最终会变为 `false`。
+
+### 3.2 do-while 循环
+
+```java
+do {
+    // 循环体
+} while (条件);
+// 先执行一次循环体，再判断条件
+```
+
+`do-while` 与 `while` 的区别：**循环体至少执行一次**。它适用于"先做一次，再决定是否继续"的场景。
+
+```java
+int password;
+do {
+    System.out.println("请输入密码：");
+    // password = scanner.nextInt();  // 假设读取用户输入
+    password = 1234;  // 演示用
+} while (password != 1234);
+System.out.println("密码正确，登录成功！");
+```
+
+## 四、for 循环：确定的重复
+
+`for` 循环用于"已知循环次数"的场景，它将初始化、条件判断、迭代步进三要素集中在一行，结构清晰。
+
+### 4.1 经典 for 循环
+
+```java
+for (初始化; 条件; 步进) {
+    // 循环体
+}
+```
+
+```java
+// 打印 1 到 10 的平方
+for (int i = 1; i <= 10; i++) {
+    System.out.printf("%d 的平方是 %d%n", i, i * i);
+}
+```
+
+执行顺序：
+1. **初始化**（`int i = 1`）—— 仅在循环开始时执行一次。
+2. **条件判断**（`i ＜= 10`）—— 为 true 执行循环体，为 false 退出循环。
+3. **循环体** —— 执行具体逻辑。
+4. **步进**（`i++`）—— 修改循环变量。
+5. 回到第 2 步，循环往复。
+
+三个部分都可省略，但分号不能省：`for (;;)` 是一个死循环（等价于 `while (true)`）。
+
+### 4.2 增强 for 循环（for-each）
+
+Java 5 引入了增强 for 循环（Enhanced for Loop），也叫 for-each，用于遍历数组或集合，语法更简洁：
+
+```java
+int[] scores = {90, 85, 78, 92, 88};
+for (int score : scores) {
+    System.out.println("分数：" + score);
+}
+// 等价于：
+// for (int i = 0; i < scores.length; i++) {
+//     int score = scores[i];
+//     System.out.println("分数：" + score);
+// }
+```
+
+`for (元素类型 变量 : 容器)` 会依次取出容器中的每个元素。它的优势是简洁、不易越界，但**无法获取索引**，也**不能在遍历时修改容器**。
+
+## 五、break 与 continue：循环的控制
+
+### 5.1 break：跳出循环
+
+`break` 用于立即终止当前所在的循环：
+
+```java
+for (int i = 1; i <= 100; i++) {
+    if (i * i > 500) {
+        System.out.println("找到第一个平方大于 500 的数：" + i);
+        break;  // 立即跳出循环
+    }
+}
+```
+
+### 5.2 continue：跳过本次
+
+`continue` 用于跳过当前迭代，直接进入下一次循环：
+
+```java
+// 打印 1-10 中的所有奇数
+for (int i = 1; i <= 10; i++) {
+    if (i % 2 == 0) {
+        continue;  // 跳过偶数
+    }
+    System.out.println(i);
+}
+```
+
+### 5.3 带标签的 break
+
+Java 支持**带标签的 break**，可以跳出多层嵌套循环——这是其他许多语言没有的特性：
+
+```java
+outer:  // 标签
+for (int i = 1; i <= 10; i++) {
+    for (int j = 1; j <= 10; j++) {
+        if (i * j > 50) {
+            System.out.printf("第一个 i*j>50 的组合：i=%d, j=%d%n", i, j);
+            break outer;  // 直接跳出外层循环
+        }
+    }
+}
+```
+
+`continue` 也可以带标签，跳到外层循环的下一次迭代。不过带标签的 break/continue 在实际开发中较少使用——通常可以通过重构（如提取方法、使用返回值）让代码更清晰。
+
+## 六、嵌套循环与性能
+
+循环可以嵌套，但要注意性能。一个二重嵌套循环，如果外层循环 n 次、内层循环 m 次，总执行次数就是 n × m。当 n、m 都很大时，性能会急剧下降。
+
+经典例子：打印九九乘法表。
+
+```java
+for (int i = 1; i <= 9; i++) {
+    for (int j = 1; j <= i; j++) {
+        System.out.printf("%d×%d=%-4d", j, i, i * j);
+    }
+    System.out.println();
+}
+```
+
+输出：
+```
+1×1=1   
+1×2=2   2×2=4   
+1×3=3   2×3=6   3×3=9   
+...（依此类推）
+```
+
+> 💡 **优化建议**：尽量减少循环嵌套层数；将不依赖内层循环的计算提到外层；避免在循环中做重复的昂贵操作（如方法调用、对象创建）。
+
+## 七、实战：猜数字游戏
+
+让我们综合运用本章知识，写一个经典的"猜数字"游戏：程序随机生成一个 1-100 的数字，玩家反复猜测，程序给出"太大"或"太小"的提示，直到猜中为止。
+
+由于在线运行环境无法读取用户输入，我们让程序"自动猜"——用二分查找策略，模拟玩家的猜测过程：
+
+<CodeRunner code={`public class Main {
+    public static void main(String[] args) {
+        // 1. 生成一个 1-100 的随机目标数字
+        int target = (int) (Math.random() * 100) + 1;
+        System.out.println("🎯 系统生成了一个 1-100 之间的神秘数字：" + target);
+        System.out.println("=== 开始猜数字游戏 ===");
+
+        // 2. 自动猜测：使用二分查找策略
+        int low = 1;
+        int high = 100;
+        int guessCount = 0;
+        boolean guessed = false;
+
+        while (low <= high && !guessed) {
+            int guess = (low + high) / 2;  // 取中间值
+            guessCount++;
+
+            if (guess == target) {
+                System.out.printf("第 %d 次猜测：%d —— 猜对了！🎉%n", guessCount, guess);
+                guessed = true;
+            } else if (guess < target) {
+                System.out.printf("第 %d 次猜测：%d —— 太小了，往大猜 ↑%n", guessCount, guess);
+                low = guess + 1;
+            } else {
+                System.out.printf("第 %d 次猜测：%d —— 太大了，往小猜 ↓%n", guessCount, guess);
+                high = guess - 1;
+            }
+        }
+
+        // 3. 游戏结束总结
+        System.out.println("=== 游戏结束 ===");
+        System.out.printf("目标数字：%d，共猜了 %d 次%n", target, guessCount);
+
+        // 4. 根据 switch 表达式给出评价
+        String rating = switch (guessCount) {
+            case 1, 2, 3 -> "神机妙算！🏆";
+            case 4, 5, 6 -> "相当不错！👍";
+            case 7 -> "及格水平 🙂";
+            default -> "还需要练习 🤔";
+        };
+        System.out.println("评价：" + rating);
+    }
+}`} />
+
+这个程序综合运用了：
+- `Math.random()` 生成随机数
+- `while` 循环控制猜测过程
+- `if-else if-else` 判断猜测结果
+- `switch` 表达式给出评价
+- `boolean` 变量 `guessed` 控制循环退出
+- `printf` 格式化输出
+
+> 💡 二分查找是计算机科学中的经典算法。每次猜测都能排除一半的可能性，因此 1-100 的数字最多只需 7 次就能猜中（因为 2⁷ = 128 > 100）。这就是算法的力量。
+
+## 八、本章要点回顾
+
+| 结构 | 用途 | 关键点 |
+| --- | --- | --- |
+| `if-else if-else` | 条件分支 | 始终用大括号；避免过深嵌套 |
+| `switch` 语句 | 等值多分支 | 注意 fall-through，记得 break |
+| `switch` 表达式（Java 14+） | 等值多分支，可返回值 | 箭头语法 `-＞`，无 fall-through |
+| `while` | 不确定次数的循环 | 先判断后执行 |
+| `do-while` | 至少执行一次的循环 | 先执行后判断 |
+| `for` | 已知次数的循环 | 三要素集中一行 |
+| `for-each` | 遍历数组/集合 | 简洁，但无索引 |
+| `break` | 跳出循环 | 可带标签跳出多层 |
+| `continue` | 跳过本次迭代 | 可带标签 |
+
+## 结语
+
+控制流程赋予了程序"思考"和"重复"的能力。`if-else` 让程序做选择，`switch` 让多路分支更优雅，`while` 和 `for` 让程序不知疲倦地重复。这些是构建任何复杂逻辑的基石——从游戏到操作系统，都离不开它们。
+
+下一章，我们将学习 Java 的**数组**——一种能够存储多个同类型数据的容器。就像咖啡店的货架可以摆放多杯咖啡一样，数组让我们能够批量处理数据。届时我们还会用数组实现经典的冒泡排序和二分查找算法，将本章学到的循环技巧运用到极致。

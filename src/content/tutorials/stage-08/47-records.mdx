@@ -1,0 +1,481 @@
+---
+title: "Records 记录类"
+chapter: 47
+stage: "第八阶段"
+stageName: "现代 Java 特性"
+order: 2
+description: "掌握 Record 记录类的定义、自动生成构造器/getter/equals/hashCode/toString、紧凑构造器校验、Record 与继承的限制、局部 Record、与模式匹配的协作"
+pubDate: 2026-07-03
+tags: ["Java", "Record", "记录类", "JDK 16", "紧凑构造器"]
+---
+
+# Records 记录类
+
+如果说上一章的模块系统是"重型工程"，那这一章的 **Records（记录类）** 就是"轻量甜品"。它是 Java 14 预览、Java 16 转正的特性（JEP 395），用一行代码干掉过去几十行的 POJO 样板代码。
+
+## 一、为什么需要 Record：POJO 的样板地狱
+
+写过 Java 的人都知道——一个简单的"点"类，按规范要写多少代码：
+
+```java
+public final class Point {
+    private final int x;
+    private final int y;
+
+    public Point(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    public int getX() { return x; }
+    public int getY() { return y; }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Point p)) return false;
+        return p.x == x && p.y == y;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(x, y);
+    }
+
+    @Override
+    public String toString() {
+        return "Point[x=" + x + ", y=" + y + "]";
+    }
+}
+```
+
+**30 行代码**，描述的只是"一个点有 x、y 两个坐标"这么简单的事实。IDE 能生成，但生成后要维护——加个字段，构造器、equals、hashCode、toString 全都要改。Lombok 用注解解决了一部分，但 Lombok 是第三方库，靠编译期"侵入"javac，社区一直有争议。
+
+Records 是 Java 在语言层面的回应——把这种"数据载体类"用一行代码搞定。
+
+## 二、Record 的定义：一行胜千言
+
+### 2.1 最简单的 Record
+
+```java
+public record Point(int x, int y) {}
+```
+
+就这一行，等价于上面那 30 行代码。它做了什么：
+
+1. **自动生成 `private final` 字段** `x`、`y`。
+2. **自动生成全参构造器** `Point(int x, int y)`。
+3. **自动生成访问器**——注意是 `x()`、`y()`，**不是** `getX()`、`getY()`！
+4. **自动生成 `equals`、`hashCode`、`toString`**——基于所有字段。
+5. **自动 `final`**——Record 不能被继承（隐式 `final`）。
+
+### 2.2 访问器命名：`x()` 而非 `getX()`
+
+这是 Record 最容易让 Java 老手"踩坑"的地方。Record 的访问器**不带 `get` 前缀**：
+
+```java
+Point p = new Point(3, 4);
+int x = p.x();   // 不是 p.getX()
+int y = p.y();
+System.out.println(p);   // Point[x=3, y=4]
+```
+
+为什么这么设计？社区的理由是：
+
+- **更短更现代**——Kotlin、Scala 的 `data class` 都用属性名直接访问。
+- **避免和 JavaBean 命名冲突**——Record 是"数据载体"不是 JavaBean，刻意区分。
+- **适合 record pattern**——`case Point(int x, int y)` 里的 `x`、`y` 直接对应组件名，没有 `get/set` 的干扰。
+
+如果你和反射框架（Jackson、Hibernate）一起用，要注意它们对新版 Java 的 Record 适配——通常需要适配器把 `x()` 当作 `getX` 用。Jackson 2.12+、Hibernate 6+ 都已支持。
+
+### 2.3 toString 的格式
+
+Record 自动生成的 `toString` 格式是 `类名[字段1=值1, 字段2=值2, ...]`：
+
+```java
+record Point(int x, int y) {}
+record Range(int start, int end) {}
+
+System.out.println(new Point(3, 4));     // Point[x=3, y=4]
+System.out.println(new Range(1, 100));   // Range[start=1, end=100]
+```
+
+### 2.4 equals 的语义
+
+Record 的 `equals` 是**基于所有组件的值比较**——这就是"值对象（Value Object）"的语义。两个 Record 实例只要组件值相同就 `equals` 返回 `true`：
+
+```java
+Point p1 = new Point(1, 2);
+Point p2 = new Point(1, 2);
+System.out.println(p1.equals(p2));   // true
+System.out.println(p1 == p2);        // false (引用不同)
+```
+
+## 三、紧凑构造器：参数校验的优雅写法
+
+自动生成的全参构造器只做 `this.x = x`——没法做参数校验。Record 提供**紧凑构造器（Compact Constructor）**让你插入校验逻辑，**不需要写参数列表**：
+
+```java
+public record Range(int start, int end) {
+    // 紧凑构造器：没有参数列表，没有 this.x = x
+    public Range {
+        if (start > end) {
+            throw new IllegalArgumentException("start 必须 <= end, 但得到 " + start + " > " + end);
+        }
+        // 这里可以修改参数 (会赋给字段)
+        // 例如把负数规范化为 0
+        if (start < 0) start = 0;
+        if (end < 0) end = 0;
+    }
+}
+```
+
+紧凑构造器的特点：
+
+- **没有参数列表**——参数就是 Record 头部声明的 `(int start, int end)`。
+- **不需要写赋值**——`this.start = start` 由编译器在构造器末尾自动加。
+- **可以修改参数**——你修改后的参数值会被赋给字段（典型用法：规范化、防御性拷贝）。
+- **可以抛异常**——校验失败抛异常，对象不会创建成功。
+
+### 3.1 经典用法：规范化与防御性拷贝
+
+```java
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Collections;
+
+public record Team(String name, List<String> members) {
+    public Team {
+        // 防御性拷贝 + 不可变化
+        members = List.copyOf(members);   // 不可变副本
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException("name 不能为空");
+        }
+    }
+}
+```
+
+`List.copyOf` 是 Java 10+ 的方法，返回**不可修改的 List**——配合 Record 的不可变性，团队成员就无法被外部修改。
+
+## 四、Record 与继承：刻意被限制
+
+Record 的设计哲学是"纯粹的值对象"，所以继承被严格限制：
+
+### 4.1 Record 不能继承其他类
+
+```java
+record Point(int x, int y) extends Object {}  // 编译错! Record 不能 extends 任何类
+```
+
+Record 隐式继承 `java.lang.Record`（抽象类），不能再继承别的。这是为了让 `equals`/`hashCode`/`toString` 的"全字段值比较"语义不被破坏。
+
+### 4.2 Record 可以实现接口
+
+```java
+interface Comparable2D {
+    int compareTo2D(int x, int y);
+}
+
+record Point(int x, int y) implements Comparable2D {
+    @Override
+    public int compareTo2D(int otherX, int otherY) {
+        return Integer.compare(x*x + y*y, otherX*otherX + otherY*otherY);
+    }
+}
+```
+
+### 4.3 Record 不能被继承
+
+Record 隐式 `final`，**不能被任何类继承**：
+
+```java
+class SubPoint extends Point { ... }   // 编译错! Record 是 final
+```
+
+这保证了 Record 的"不可变 + 全字段 equals"语义不被子类破坏。
+
+### 4.4 Record 不能是 abstract
+
+```java
+abstract record Shape(int x, int y) {}   // 编译错! Record 不能 abstract
+```
+
+如果想要"可扩展的值类型"——下一章的 **Sealed Classes** + Record 配合就是答案。
+
+## 五、局部 Record
+
+Record 可以声明在方法内部，叫**局部 Record（Local Record）**——和局部类一样：
+
+```java
+public static void main(String[] args) {
+    record Point(int x, int y) {}   // 局部 Record
+
+    List<Point> points = List.of(
+        new Point(1, 2),
+        new Point(3, 4),
+        new Point(5, 6)
+    );
+
+    points.stream()
+        .filter(p -> p.x() > 2)
+        .forEach(System.out::println);
+}
+```
+
+适用场景：方法内临时用一下的"数据元组"——比 `Map＜String, Object＞` 强类型，比专门写个类轻量。Stream 的中间结果尤其适合用局部 Record 表达。
+
+## 六、Record 与模式匹配：天生一对
+
+Record 最强大的用法是和 **Pattern Matching**（下一章详讲）配合——可以直接"解构"Record：
+
+```java
+record Point(int x, int y) {}
+record Rectangle(Point topLeft, Point bottomRight) {}
+
+Rectangle r = new Rectangle(new Point(1, 2), new Point(5, 6));
+
+// instanceof 模式匹配 + Record 解构 (JDK 21)
+if (r instanceof Rectangle(Point(int x1, int y1), Point(int x2, int y2))) {
+    System.out.println("矩形: (" + x1 + "," + y1 + ") 到 (" + x2 + "," + y2 + ")");
+}
+```
+
+`Rectangle(Point(int x1, int y1), Point(int x2, int y2))` 这一行直接把两层嵌套的 Record 全部解构到变量——这是函数式语言的"模式匹配"在 Java 里的实现。我们下一章会详细讲。
+
+## 七、Record 不能做什么
+
+| 限制 | 说明 |
+| --- | --- |
+| 字段不能修改 | 字段隐式 `final`，Record 是不可变的 |
+| 不能继承其他类 | 隐式继承 `java.lang.Record`，不能 extends 别的 |
+| 不能被继承 | Record 隐式 `final` |
+| 不能 `abstract` | 必须能直接实例化 |
+| 字段不能额外声明 | 头部声明的组件就是全部字段，不能在体内再声明实例字段 |
+| 不能定义 native 方法 | Record 体内不能有 `native` 方法 |
+
+但可以：
+
+- 添加**静态字段**、**静态方法**。
+- 添加**实例方法**（除了重写 `equals`/`hashCode`/`toString`/访问器之外的）。
+- 实现**接口**。
+- 添加**紧凑构造器**做校验。
+
+## 八、实战：用 Record 建模真实数据
+
+下面的例子完整演示 Record 的定义、紧凑构造器校验、与 Stream 配合、equals/hashCode 的值语义、toString 格式、局部 Record。
+
+<CodeRunner code={`import java.util.*;
+import java.util.stream.*;
+
+public class Main {
+    // 顶层 Record: 表示一个范围
+    public record Range(int start, int end) {
+        // 紧凑构造器: 校验 + 规范化
+        public Range {
+            if (start > end) {
+                throw new IllegalArgumentException(
+                    "start(%d) 不能大于 end(%d)".formatted(start, end));
+            }
+            if (start < 0) start = 0;
+            if (end < 0) end = 0;
+        }
+        public int length() { return end - start; }
+    }
+
+    // 顶层 Record: 表示一个员工, 实现接口
+    public record Employee(String name, int age, String department) implements Comparable<Employee> {
+        @Override
+        public int compareTo(Employee o) {
+            return this.name.compareTo(o.name);
+        }
+        // 自定义访问器行为: name 永远非空
+        public String name() {
+            return name == null ? "匿名" : name;
+        }
+    }
+
+    // 顶层 Record: 包含 List 字段, 紧凑构造器做防御性拷贝
+    public record Team(String name, List<String> members) {
+        public Team {
+            // 不可变化 + 防御性拷贝
+            members = List.copyOf(members);
+            if (name == null || name.isBlank()) {
+                throw new IllegalArgumentException("团队名不能为空");
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println("=== Record 记录类演示 ===\\n");
+
+        // 1. 基本 Record 用法
+        System.out.println("--- 1. 基本 Record ---");
+        record Point(int x, int y) {}   // 局部 Record
+        Point p1 = new Point(3, 4);
+        Point p2 = new Point(3, 4);
+        Point p3 = new Point(5, 6);
+        System.out.println("p1 = " + p1);                    // Point[x=3, y=4]
+        System.out.println("p1.x() = " + p1.x());            // 3 (注意是 x() 不是 getX())
+        System.out.println("p1.equals(p2) = " + p1.equals(p2));  // true (值相等)
+        System.out.println("p1.equals(p3) = " + p1.equals(p3));  // false
+        System.out.println("p1.hashCode() == p2.hashCode(): "
+            + (p1.hashCode() == p2.hashCode()));             // true
+        System.out.println("p1.getClass() = " + p1.getClass().getSimpleName());
+        System.out.println("是否 Record: " + p1.getClass().isRecord());
+
+        // 2. 紧凑构造器校验
+        System.out.println("\\n--- 2. 紧凑构造器校验 ---");
+        Range r1 = new Range(10, 20);
+        System.out.println("Range(10, 20) = " + r1 + ", length=" + r1.length());
+        Range r2 = new Range(-5, 8);   // 会被规范化为 (0, 8)
+        System.out.println("Range(-5, 8) 规范化为 = " + r2);
+        try {
+            new Range(20, 10);   // start > end, 抛异常
+        } catch (IllegalArgumentException e) {
+            System.out.println("Range(20, 10) 抛异常: " + e.getMessage());
+        }
+
+        // 3. Record 实现接口 + 自定义访问器
+        System.out.println("\\n--- 3. 实现 Comparable + 自定义访问器 ---");
+        Employee e1 = new Employee("Alice", 30, "工程");
+        Employee e2 = new Employee("Bob", 25, "产品");
+        Employee e3 = new Employee("Alice", 30, "工程");
+        System.out.println("e1 = " + e1);
+        System.out.println("e1.equals(e3) = " + e1.equals(e3));  // true
+        System.out.println("e1.compareTo(e2) = " + e1.compareTo(e2));  // 按名字比较
+        Employee eNull = new Employee(null, 28, "运营");
+        System.out.println("name=null 的访问器: " + eNull.name());  // 自定义访问器返回 "匿名"
+
+        // 4. Record 配合 Stream
+        System.out.println("\\n--- 4. Record + Stream ---");
+        List<Employee> emps = List.of(
+            new Employee("Charlie", 35, "工程"),
+            new Employee("Alice", 28, "设计"),
+            new Employee("Bob", 40, "工程"),
+            new Employee("David", 32, "工程")
+        );
+        // 按部门分组, 取每组最年长
+        Map<String, Optional<Employee>> oldestByDept = emps.stream()
+            .collect(Collectors.groupingBy(
+                Employee::department,
+                Collectors.maxBy(Comparator.comparingInt(Employee::age))
+            ));
+        oldestByDept.forEach((dept, emp) ->
+            System.out.println(dept + " 部门最年长: " + emp.orElse(null)));
+
+        // 5. Record 包含 List 字段, 防御性拷贝
+        System.out.println("\\n--- 5. 防御性拷贝 + 不可变 ---");
+        List<String> memberList = new ArrayList<>(List.of("张三", "李四"));
+        Team team = new Team("核心组", memberList);
+        System.out.println("team = " + team);
+        // 试图修改原 list
+        memberList.add("王五");
+        System.out.println("修改原 list 后, team.members = " + team.members());  // 不变
+        // 试图修改 record 内的 list
+        try {
+            team.members().add("赵六");
+        } catch (UnsupportedOperationException ex) {
+            System.out.println("试图修改 team.members() 抛异常: " + ex.getClass().getSimpleName());
+        }
+
+        // 6. 局部 Record 在 Stream 中作为中间数据
+        System.out.println("\\n--- 6. 局部 Record 作为中间数据 ---");
+        record DeptStat(String dept, int count, double avgAge) {
+            @Override
+            public String toString() {
+                return dept + " (人数=" + count + ", 平均年龄=" + String.format("%.1f", avgAge) + ")";
+            }
+        }
+        List<DeptStat> stats = emps.stream()
+            .collect(Collectors.groupingBy(Employee::department))
+            .entrySet().stream()
+            .map(entry -> {
+                List<Employee> group = entry.getValue();
+                double avg = group.stream().mapToInt(Employee::age).average().orElse(0);
+                return new DeptStat(entry.getKey(), group.size(), avg);
+            })
+            .sorted(Comparator.comparing(DeptStat::dept))
+            .collect(Collectors.toList());
+        stats.forEach(System.out::println);
+
+        // 7. Record 的反射 API
+        System.out.println("\\n--- 7. Record 反射 API ---");
+        System.out.println("Employee 是否 Record: " + Employee.class.isRecord());
+        System.out.println("Employee 的 Record 组件:");
+        for (java.lang.reflect.RecordComponent rc : Employee.class.getRecordComponents()) {
+            System.out.println("  - " + rc.getName()
+                + " : " + rc.getType().getSimpleName()
+                + " (访问器: " + rc.getAccessor().getName() + ")");
+        }
+
+        System.out.println("\\n=== 总结 ===");
+        System.out.println("1. Record = 不可变值对象, 自动生成构造器/访问器/equals/hashCode/toString");
+        System.out.println("2. 访问器是 x() 不是 getX()");
+        System.out.println("3. 紧凑构造器做校验和规范化, 不需要写参数列表");
+        System.out.println("4. Record 不能继承也不能被继承, 但可实现接口");
+        System.out.println("5. 局部 Record 适合 Stream 中间结果");
+        System.out.println("6. 与模式匹配配合可解构");
+    }
+}`} />
+
+> **观察重点**：
+> - **`p1.equals(p2)` 返回 `true`**——值对象语义，组件值相同就相等。
+> - **`Range(-5, 8)` 被规范化为 `Range[start=0, end=8]`**——紧凑构造器修改了参数。
+> - **`team.members()` 修改抛 `UnsupportedOperationException`**——`List.copyOf` 返回不可变 List。
+> - **`Employee.class.getRecordComponents()`**——反射能拿到组件列表，框架（Jackson/Hibernate）靠这个适配 Record。
+> - **局部 `DeptStat`**——一行声明，Stream 中间结果强类型，比 `Map＜String, Object＞` 安全得多。
+
+## 九、Record vs Lombok vs 传统 POJO
+
+| 维度 | 传统 POJO | Lombok @Data | Record |
+| --- | --- | --- | --- |
+| 代码量 | 几十行 | 1 行 + 注解 | 1 行 |
+| 可变性 | 通常可变 | 默认可变 | **不可变** |
+| 第三方依赖 | 无 | 需 Lombok | 无（JDK 内置） |
+| 继承 | 可继承 | 可继承 | 不能继承 |
+| equals 语义 | 通常按字段 | 按字段 | **值相等** |
+| 访问器 | getX/setX | getX/setX | **x()** |
+| 适合场景 | JavaBean、ORM 实体 | 简化 POJO | 纯数据载体、DTO、值对象 |
+
+**何时用 Record**：
+
+- DTO（数据传输对象）——API 响应、配置项。
+- 函数返回多个值——比 `Map＜String, Object＞` 强类型。
+- 不可变值对象——`Money`、`Coordinate`、`DateRange`。
+- 模式匹配的载体——配合 Sealed Classes 建模 ADT。
+
+**何时不用 Record**：
+
+- 需要可变状态——JavaBean、JPA 实体（Hibernate 默认要无参构造器和 setter）。
+- 需要继承层次——用 Sealed Classes + Record 或传统类。
+- 框架不兼容——老版本 Jackson、Hibernate 5.x 对 Record 支持差。
+
+## 十、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| Record 定义 | `record Point(int x, int y) {}`，一行搞定 |
+| 自动生成 | 全参构造器、访问器、equals、hashCode、toString |
+| 访问器命名 | `x()`、`y()`，不带 `get` 前缀 |
+| 紧凑构造器 | `public Point { ... }`，做校验/规范化/防御性拷贝 |
+| 不可变性 | 字段 final，Record 隐式 final，不能被继承 |
+| 继承限制 | 不能 extends 任何类，但可 implements 接口 |
+| 局部 Record | 方法内声明，适合 Stream 中间结果 |
+| 反射 API | `Class.isRecord()`、`getRecordComponents()` |
+| 值相等 | equals 基于全部组件值 |
+
+**记忆口诀**：
+
+- **一行胜千言**——`record Point(int x, int y) {}` 替代 30 行 POJO。
+- **访问器不带 get**——`p.x()` 不是 `p.getX()`。
+- **紧凑构造器做校验**——`public Point { if (x ＜ 0) throw ... }`。
+- **不可变 + 值相等**——两个 `Point(1,2)` equals 返回 true。
+- **不能继承不能被继承**——纯粹值对象，刻意限制。
+- **List 字段用 `List.copyOf`**——防御性拷贝 + 不可变。
+- **局部 Record 当元组用**——Stream 中间结果的强类型容器。
+
+## 结语：让 Java 终于有了"值对象"
+
+Records 是 Java 在 DDD（领域驱动设计）语境下"值对象（Value Object）"概念的语言级支持——不可变、值相等、自描述。它和 Lombok 的本质区别在于：Lombok 是"减少样板代码"，Record 是"改变语义"——Record 强制不可变、强制值相等、强制不能继承，这是设计上的承诺，不是语法糖。
+
+下一章我们看 **Sealed Classes 密封类**——它和 Records 是"亲兄弟"，一个解决"封闭的继承层次"，一个解决"不可变的值对象"。两者配合 **Pattern Matching**，让 Java 终于能优雅地建模**代数数据类型（ADT）**——函数式语言的核心特性。我们下一章见。

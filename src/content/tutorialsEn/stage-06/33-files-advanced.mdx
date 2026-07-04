@@ -1,0 +1,430 @@
+---
+title: "Files Utility Class — Advanced"
+chapter: 33
+stage: "Stage 6"
+stageName: "I/O and NIO"
+order: 6
+description: "Master Files for reading/writing small and large files, streaming line-by-line reads, WatchService file watching, temp files, and POSIX permission management to implement real-time directory monitoring"
+pubDate: 2026-07-03
+tags: ["Java", "Files", "WatchService", "临时文件", "POSIX", "Files.lines"]
+---
+
+# Files Utility Class — Advanced
+
+In Chapter 28 we got our first taste of `Files` — with methods like `createFile`, `copy`, and `walk`. But that was only "half the picture." This utility class has another side: **reading and writing an entire file in one line**, **streaming large files**, **watching directory changes**, and **managing file permissions**. These are the killer features of modern Java file operations.
+
+This chapter is the finale of NIO.2 — we'll cover all of `Files`'s advanced capabilities in one go. By the end, you'll find that Java file operations can be ridiculously concise — a lot of code that used to need 20 lines of stream loops can now be done in 1.
+
+## 1. Reading and Writing Small Files: One Line Does It
+
+For "small files" (a few MB or less, fitting entirely in memory), `Files` provides "one-liner" APIs:
+
+### 1.1 Reading
+
+```java
+import java.nio.file.*;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+
+Path p = Path.of("data.txt");
+
+// Read all bytes at once
+byte[] bytes = Files.readAllBytes(p);
+
+// Read all lines at once (returns List<String>, automatically decoded)
+List<String> lines = Files.readAllLines(p, StandardCharsets.UTF_8);
+
+// Read as a String (Java 11+)
+String content = Files.readString(p, StandardCharsets.UTF_8);
+```
+
+These three methods wrap "open stream → read → close stream" into a single step. But note — they **load the entire file into memory**, so large files will cause OOM.
+
+### 1.2 Writing
+
+```java
+// Write a byte array
+Files.write(p, bytes);
+
+// Write text (line by line)
+Files.write(p, List.of("第一行", "第二行"), StandardCharsets.UTF_8);
+
+// Write a String (Java 11+)
+Files.writeString(p, "你好，世界", StandardCharsets.UTF_8);
+
+// Append
+Files.write(p, List.of("追加的一行"), StandardCharsets.UTF_8,
+    StandardOpenOption.APPEND);
+```
+
+`StandardOpenOption` is an enum with common values: `CREATE` (create if it doesn't exist), `APPEND` (append), `TRUNCATE_EXISTING` (clear existing content), `WRITE`, `READ`. `Files.write` defaults to `CREATE + WRITE + TRUNCATE_EXISTING` — overwrite mode.
+
+### 1.3 Applicable Boundaries
+
+`readAllBytes`/`readAllLines`/`readString` are suited for files **within a few MB**. Config files, JSON, small logs — these methods are the most comfortable. But when processing GB-scale logs, they'll send the JVM straight into OOM — for those, use `Files.lines` from the next section.
+
+## 2. Reading Large Files: Files.lines Streaming
+
+`Files.lines` returns a `Stream＜String＞` — **lazy reading**, keeping only one line in memory at a time, discarding it after processing. This lets you handle "files too large to fit in memory."
+
+```java
+import java.util.stream.*;
+
+try (Stream<String> stream = Files.lines(p, StandardCharsets.UTF_8)) {
+    stream.filter(line -> line.contains("ERROR"))
+          .map(String::trim)
+          .forEach(System.out::println);
+}
+```
+
+**Key points**:
+
+- The returned `Stream` holds a file handle and **must be closed with try-with-resources**. Failing to close it leaks file descriptors, eventually causing "Too many open files."
+- It's **lazy** — `filter` doesn't consume anything; `forEach` is what actually triggers reading. So it's "read and process as you go," with constant memory usage.
+- Suited for scenarios like "log analysis, ETL, line counting."
+
+### 2.1 Performance Comparison
+
+| Method | Memory | Best for |
+| --- | --- | --- |
+| `Files.readAllLines` | File size ×2 | Small files (＜10 MB) |
+| `Files.lines` | One line's worth | Large files, stream processing |
+| `BufferedReader.readLine` loop | One line's worth | Equivalent to `Files.lines`, more old-fashioned style |
+
+In new code, **prefer `Files.lines`** — it's internally a wrapper around `BufferedReader`, but plugged into the Stream API for chained processing.
+
+### 2.2 Counting Lines in a Large File
+
+```java
+try (Stream<String> stream = Files.lines(p)) {
+    long count = stream.count();
+    System.out.println("总行数: " + count);
+}
+```
+
+`count()` is a terminal operation on Stream, triggering the actual reading. A single line of code counts the lines of a file of any size — constant memory, no pressure even at several GB.
+
+## 3. Files.newBufferedReader / newBufferedWriter
+
+If you need finer-grained control over reading and writing (say, combining `readLine` with custom logic), use `Files.newBufferedReader`/`newBufferedWriter` — they return `BufferedReader`/`BufferedWriter` directly and support explicit encoding:
+
+```java
+try (BufferedReader br = Files.newBufferedReader(p, StandardCharsets.UTF_8)) {
+    String line;
+    while ((line = br.readLine()) != null) {
+        // process line
+    }
+}
+
+try (BufferedWriter bw = Files.newBufferedWriter(p, StandardCharsets.UTF_8,
+        StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
+    bw.write("追加内容");
+    bw.newLine();
+}
+```
+
+Compared to writing `new BufferedReader(new InputStreamReader(new FileInputStream(...)))` directly, `Files.newBufferedReader` is "syntactic sugar" — shorter, less error-prone, and UTF-8-friendly by default.
+
+## 4. File Watching: WatchService
+
+`WatchService` is NIO.2's "surprise feature" — it can **watch a directory for changes**, firing events when files are created, modified, or deleted. This is the cornerstone for building "hot reload," "file sync," "IDE save prompts," and similar features.
+
+### 4.1 Basic Usage
+
+```java
+import static java.nio.file.StandardWatchEventKinds.*;
+import java.nio.file.*;
+
+WatchService watcher = FileSystems.getDefault().newWatchService();
+Path dir = Path.of("/var/log");
+
+// Register the events you're interested in
+dir.register(watcher, ENTRY_CREATE, ENTRY_DELETE, ENTRY_MODIFY);
+
+while (true) {
+    WatchKey key = watcher.take();   // block until an event occurs
+    for (WatchEvent<?> event : key.pollEvents()) {
+        Path file = (Path) event.context();
+        System.out.println(event.kind() + " -> " + file);
+    }
+    key.reset();   // reset the key to receive the next batch of events
+}
+```
+
+**Key points**:
+
+- `register` accepts varargs of `WatchEvent.Kind＜?＞`, with three common ones: `ENTRY_CREATE`, `ENTRY_MODIFY`, `ENTRY_DELETE`.
+- `take()` blocks until an event occurs; `poll()` returns immediately (non-blocking).
+- `event.context()` is the filename (relative path) that triggered the event — **not a full path** — you need to prepend `dir` to use it.
+- After processing events, you must call `key.reset()`, otherwise this key won't receive new events.
+- **WatchService only watches direct children** — it doesn't recurse. For recursion you must implement it yourself: register every subdirectory.
+
+### 4.2 Limitations
+
+- Notifications may be imprecise — some systems fire `ENTRY_MODIFY` repeatedly or drop events.
+- It doesn't provide "what changed" — it only notifies "which file changed"; to see content changes you have to read the file yourself.
+- On macOS it's based on `kqueue`, on Linux `inotify`, on Windows `ReadDirectoryChangesW` — platform behavior varies slightly.
+
+## 5. Temp Files: createTempFile / createTempDirectory
+
+Temp files are "use and delete" files — common in scenarios like caching intermediate results, extracting uploaded content, generating reports, and so on.
+
+```java
+// Create in the system default temp directory (/tmp or %TEMP%)
+Path tmpFile = Files.createTempFile("prefix-", ".txt");
+// /tmp/prefix-1234567890123456789.txt
+
+Path tmpDir = Files.createTempDirectory("myapp-");
+
+// Specify a parent directory
+Path tmpFile2 = Files.createTempFile(Path.of("."), "data-", ".bin");
+```
+
+The filename is "prefix + random long number + suffix" — guaranteeing uniqueness.
+
+**Pitfall**: temp files **are not automatically deleted** — they remain on disk after the JVM exits. To ensure deletion, there are three approaches:
+
+### 5.1 Manual Deletion
+
+```java
+Path tmp = Files.createTempFile("data-", ".tmp");
+try {
+    // use tmp
+} finally {
+    Files.deleteIfExists(tmp);
+}
+```
+
+### 5.2 deleteOnExit (Delete on JVM Exit)
+
+```java
+Files.createTempFile("data-", ".tmp").toFile().deleteOnExit();
+```
+
+**Note**: `deleteOnExit` only takes effect on normal JVM exit; a forced kill (`kill -9`) won't trigger it. And it keeps file paths in memory, so calling it many times in a long-running process leaks memory. **Not recommended for long-running services.**
+
+### 5.3 try-with-resources (Java 9+ for temp directories?)
+
+The more recommended approach is explicit cleanup with try-finally. Temp directories need recursive deletion (refer to `deleteRecursively` from Chapter 28).
+
+## 6. File Permissions: POSIX Permissions
+
+Linux/macOS use POSIX permissions (`rwxr-xr-x`); Windows uses ACL. NIO.2 provides a clean POSIX permission API via `PosixFilePermissions`:
+
+```java
+import java.nio.file.attribute.*;
+import java.nio.file.*;
+
+// Create a permission set from a string
+Set<PosixFilePermission> perms = PosixFilePermissions.fromString("rwxr-xr-x");
+// rwx for owner, r-x for group, r-x for others
+
+// Specify permissions when creating a file
+Files.createFile(Path.of("script.sh"),
+    PosixFilePermissions.asFileAttribute(perms));
+
+// Modify permissions of an existing file
+Files.setPosixFilePermissions(Path.of("script.sh"), perms);
+```
+
+`PosixFilePermissions.fromString` accepts a 9-character permission string — three groups of `rwx`, corresponding to owner, group, and others. `-` means no permission. `rwxr-xr-x` is equivalent to `chmod 755`.
+
+**Note**: This is a POSIX feature; on Windows, `setPosixFilePermissions` throws `UnsupportedOperationException`. For cross-platform code, use generic attributes like `Files.setAttribute(path, "dos:hidden", true)`.
+
+### 6.1 Setting the Owner
+
+```java
+UserPrincipal owner = FileSystems.getDefault()
+    .getUserPrincipalLookupService()
+    .lookupPrincipalByName("alice");
+Files.setOwner(path, owner);
+// or Files.setOwner(path, Files.getOwner(path));
+```
+
+## 7. In Practice: Real-Time Directory Monitoring
+
+The following example fully demonstrates `WatchService` — starting a watcher, generating file events in another thread, and exiting after a few seconds:
+
+<CodeRunner code={`import java.io.IOException;
+import java.nio.file.*;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static java.nio.file.StandardWatchEventKinds.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // 准备被监视的目录
+        Path watchDir = Files.createTempDirectory("watch-demo-");
+        System.out.println("监视目录: " + watchDir);
+
+        WatchService watcher = FileSystems.getDefault().newWatchService();
+        watchDir.register(watcher, ENTRY_CREATE, ENTRY_DELETE, ENTRY_MODIFY);
+
+        AtomicBoolean running = new AtomicBoolean(true);
+        List<String> events = Collections.synchronizedList(new ArrayList<>());
+
+        // 监视线程
+        Thread watcherThread = new Thread(() -> {
+            try {
+                while (running.get()) {
+                    WatchKey key = watcher.poll(java.time.Duration.ofMillis(200));
+                    if (key == null) continue;
+                    for (WatchEvent<?> event : key.pollEvents()) {
+                        Path file = (Path) event.context();
+                        String msg = event.kind() + " -> " + file;
+                        events.add(msg);
+                        System.out.println("  [事件] " + msg);
+                    }
+                    key.reset();
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        });
+        watcherThread.setDaemon(true);
+        watcherThread.start();
+
+        // 模拟文件变化
+        System.out.println("\\n--- 模拟文件变化 ---");
+        Thread.sleep(300);
+
+        Path a = watchDir.resolve("a.txt");
+        Files.writeString(a, "hello", StandardCharsets.UTF_8);
+        System.out.println("创建 a.txt");
+        Thread.sleep(300);
+
+        Files.writeString(a, "hello world", StandardCharsets.UTF_8);
+        System.out.println("修改 a.txt");
+        Thread.sleep(300);
+
+        Path b = watchDir.resolve("b.txt");
+        Files.writeString(b, "second", StandardCharsets.UTF_8);
+        System.out.println("创建 b.txt");
+        Thread.sleep(300);
+
+        Files.delete(a);
+        System.out.println("删除 a.txt");
+        Thread.sleep(500);
+
+        running.set(false);
+        watcherThread.join(1000);
+        watcher.close();
+
+        System.out.println("\\n--- 演示 Files.lines 流式读取 ---");
+        Path bigFile = watchDir.resolve("numbers.txt");
+        // 生成 1000 行
+        List<String> lines = new ArrayList<>();
+        for (int i = 1; i <= 1000; i++) lines.add("line-" + i);
+        Files.write(bigFile, lines, StandardCharsets.UTF_8);
+
+        // 用 Files.lines 流式统计
+        try (var stream = Files.lines(bigFile, StandardCharsets.UTF_8)) {
+            long count = stream.count();
+            System.out.println("bigFile 行数: " + count);
+        }
+        // 用 Files.lines 找包含 "100" 的行
+        try (var stream = Files.lines(bigFile, StandardCharsets.UTF_8)) {
+            long matches = stream.filter(l -> l.contains("100")).count();
+            System.out.println("包含 '100' 的行数: " + matches);
+        }
+
+        // 演示 Files.readString / writeString
+        System.out.println("\\n--- readString / writeString ---");
+        Path note = watchDir.resolve("note.txt");
+        Files.writeString(note, "一行测试\\n两行测试");
+        String text = Files.readString(note, StandardCharsets.UTF_8);
+        System.out.println("读取: " + text.replace("\\n", " | "));
+
+        // 演示 POSIX 权限（非 Windows）
+        System.out.println("\\n--- 权限演示 ---");
+        try {
+            Set<PosixFilePermission> perms = PosixFilePermissions.fromString("rwxr-x---");
+            Files.setPosixFilePermissions(note, perms);
+            String permStr = PosixFilePermissions.toString(Files.getPosixFilePermissions(note));
+            System.out.println("note.txt 权限: " + permStr);
+        } catch (UnsupportedOperationException e) {
+            System.out.println("当前系统不支持 POSIX 权限（可能是 Windows）");
+        }
+
+        // 清理
+        running.set(false);
+        cleanup(watchDir);
+        System.out.println("\\n共捕获事件 " + events.size() + " 个");
+        System.out.println("清理完毕");
+    }
+
+    static void cleanup(Path root) throws IOException {
+        if (!Files.exists(root)) return;
+        try (var stream = Files.walk(root)) {
+            stream.sorted(Comparator.reverseOrder())
+                  .forEach(p -> {
+                      try { Files.deleteIfExists(p); }
+                      catch (IOException e) { /* ignore */ }
+                  });
+        }
+    }
+}`} />
+
+> **What to watch for**:
+> - **Events may outnumber operations** — on some systems a single write triggers multiple `ENTRY_MODIFY` events; this is platform behavior, not a bug.
+> - **When `ENTRY_MODIFY` fires**: when the file is closed (not on every `write` call). So "write → close" corresponds to one event.
+> - **`Files.lines` streaming**: processing 1,000 lines and 10 million lines uses almost the same memory — it's lazy.
+> - **POSIX permissions**: work normally on Linux/macOS; throw `UnsupportedOperationException` on Windows.
+
+## 8. The "One-Liner" Cheat Sheet for Files
+
+| Task | One-liner |
+| --- | --- |
+| Read all bytes | `byte[] data = Files.readAllBytes(p);` |
+| Read all lines | `List＜String＞ lines = Files.readAllLines(p, UTF_8);` |
+| Read as string | `String s = Files.readString(p, UTF_8);` |
+| Write string | `Files.writeString(p, s, UTF_8);` |
+| Write byte array | `Files.write(p, bytes);` |
+| Write multiple lines | `Files.write(p, List.of("a","b"), UTF_8);` |
+| Stream-read lines | `Files.lines(p, UTF_8).filter(...).forEach(...);` |
+| Create temp file | `Files.createTempFile("pre-", ".tmp");` |
+| Create temp directory | `Files.createTempDirectory("dir-");` |
+| Set permissions | `Files.setPosixFilePermissions(p, perms);` |
+| File exists | `Files.exists(p);` |
+| File size | `Files.size(p);` |
+
+Compare this with the old `File` class — many things that took 10 lines with the old API are done in 1 line with `Files`. This is the true value of NIO.2.
+
+## 9. Chapter Summary
+
+| Topic | Key points |
+| --- | --- |
+| Small file read/write | `readAllBytes`/`readAllLines`/`readString`, entire file in memory |
+| Large file reading | `Files.lines` returns a Stream, lazy reading, constant memory |
+| Buffered read/write | `Files.newBufferedReader`/`newBufferedWriter`, explicit encoding |
+| File watching | `WatchService` + `register(ENTRY_*)`, non-recursive, `key.reset()` |
+| Temp files | `createTempFile`/`createTempDirectory`, must clean up manually |
+| File permissions | `PosixFilePermissions.fromString("rwxr-xr-x")`, POSIX only |
+
+**Mnemonic**:
+
+- **Small files** — read all at once, `readAllLines` / `readString`.
+- **Large files** — stream read, `Files.lines` + try-with-resources.
+- **Modify files** — `write` / `writeString` + `StandardOpenOption`.
+- **Watch files** — `WatchService` + `ENTRY_CREATE/MODIFY/DELETE`.
+- **Temp storage** — `createTempFile` + manual `deleteIfExists`.
+- **Change permissions** — `PosixFilePermissions`, Linux/macOS only.
+
+## Conclusion: NIO.2 Is Java's "Modern Answer" for File Operations
+
+Looking back over the six chapters of Stage 6, the story of Java's I/O and NIO unfolds like this:
+
+- **Chapter 28, `Path` and `Files`** — reshaped "paths" and "file operations" into a clean, modern API, leaving behind the crudeness of the old `File`.
+- **Chapter 29, Byte Streams** — the abstraction of `InputStream`/`OutputStream` and the Decorator pattern gave IO "Lego-style" composability.
+- **Chapter 30, Character Streams** — `Reader`/`Writer` and character encoding freed text processing from the curse of garbled output.
+- **Chapter 31, Serialization** — how objects travel through time and space, its security cost, and modern alternatives.
+- **Chapter 32, NIO** — Buffer + Channel + Selector, the shift from "thread-driven" to "event-driven," opening the door to high concurrency.
+- **Chapter 33, Files Advanced** — one-line read/write, stream processing, file watching, and permission management, making file operations supremely concise.
+
+Together, these capabilities form a complete picture of how Java handles "data in motion": from the lowest-level bytes, to characters, to objects, to buffers, to event-driven network communication. Each abstraction layer solved the pain points of the one below it, while paving the way for the next.
+
+Mastering I/O and NIO lets you handle 90% of the "data in and out" scenarios in Java development — reading configs, writing logs, parsing large files, network communication, object persistence. The remaining 10% — things like extreme zero-copy optimization, memory-mapped files, and AIO (asynchronous IO) — will be covered in more advanced concurrency and performance topics.
+
+With this, Stage 6 is complete. The next stage takes us into concurrent programming — threads, locks, concurrent collections, `CompletableFuture`, `ExecutorService` — Java's core capability for "doing many things at once." I/O gets data flowing; concurrency makes multiple flows run in parallel — together, they are the whole secret of high-performance Java applications.

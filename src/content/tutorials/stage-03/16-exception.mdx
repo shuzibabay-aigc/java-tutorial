@@ -1,0 +1,564 @@
+---
+title: "异常处理"
+chapter: 16
+stage: "第三阶段"
+stageName: "Java 核心类库"
+order: 4
+description: "掌握 Java 异常体系、Checked 与 Unchecked 异常、try/catch/finally、多异常捕获、异常链、try-with-resources 及自定义异常最佳实践"
+pubDate: 2026-07-03
+tags: ["Java", "异常处理", "Exception", "try-with-resources", "自定义异常"]
+---
+
+# 异常处理
+
+程序的世界并不总是风平浪静。用户输入了字母却期望它是个数字，网络突然中断，文件莫名消失，数组越界，空指针潜伏在某个角落……这些"意外"如果处理不当，轻则程序崩溃，重则数据丢失、系统瘫痪。
+
+**异常处理**（Exception Handling）就是 Java 提供的"安全网"——它让你预见到可能出错的地方，提前布好防线，让程序在意外面前依然从容。写得好的异常处理，像一道精心设计的防洪堤；写得差的，则是埋在代码里的定时炸弹。本章，我们系统地走进 Java 的异常世界。
+
+## 一、异常体系：一棵家族树
+
+### 1.1 Throwable 家族
+
+Java 所有错误与异常的"老祖宗"是 `java.lang.Throwable`。它有两个主要分支：
+
+```
+Throwable
+├── Error                    // 严重错误，不该 catch
+│   ├── OutOfMemoryError
+│   ├── StackOverflowError
+│   └── ...
+└── Exception                // 异常，可以处理
+    ├── RuntimeException     // 运行时异常（Unchecked）
+    │   ├── NullPointerException
+    │   ├── IndexOutOfBoundsException
+    │   ├── ClassCastException
+    │   ├── IllegalArgumentException
+    │   └── ...
+    └── 其他 Exception       // 受检异常（Checked）
+        ├── IOException
+        ├── SQLException
+        └── ...
+```
+
+只有 `Throwable` 及其子类才能被 `throw` 抛出、被 `catch` 捕获。
+
+### 1.2 Error：不该碰的"灾难"
+
+`Error` 表示 JVM 级别的严重问题——内存溢出（`OutOfMemoryError`）、栈溢出（`StackOverflowError`）。这类错误通常**不该捕获**，因为程序已经无法恢复正常，捕获了也无济于事。正确做法是让程序崩溃，然后去修代码（比如减少递归深度、排查内存泄漏）。
+
+### 1.3 Exception：可以处理的"意外"
+
+`Exception` 是我们能也该处理的异常。它又分两支：
+
+- **RuntimeException**（运行时异常）：编程逻辑错误，如空指针、越界、类型转换失败。
+- **其他 Exception**（受检异常）：外部环境问题，如 IO 失败、数据库断连。
+
+## 二、Checked vs Unchecked Exception
+
+### 2.1 两者的区别
+
+| 特性 | Checked Exception | Unchecked Exception |
+| --- | --- | --- |
+| 继承自 | `Exception`（非 RuntimeException） | `RuntimeException` |
+| 编译器检查 | **强制**处理（catch 或 throws） | 不强制 |
+| 典型代表 | IOException、SQLException | NullPointerException、IllegalArgumentException |
+| 本质 | 可恢复的外部异常 | 编程错误 |
+
+### 2.2 Checked 的"强制性"
+
+受检异常必须在编译期就处理好——要么 `try/catch`，要么在方法签名上 `throws`，否则编译不通过：
+
+```java
+import java.io.FileReader;
+
+// 方式一：try/catch
+public void readFile() {
+    try {
+        FileReader fr = new FileReader("data.txt");   // 可能抛 IOException
+    } catch (java.io.IOException e) {
+        e.printStackTrace();
+    }
+}
+
+// 方式二：throws 声明
+public void readFile() throws java.io.IOException {
+    FileReader fr = new FileReader("data.txt");   // 往外抛
+}
+```
+
+而 `RuntimeException` 不强制：
+
+```java
+public void divide(int a, int b) {
+    // 不需要声明 throws ArithmeticException
+    // 编译器也不强制你 catch
+    int result = a / b;   // b=0 时抛 ArithmeticException
+}
+```
+
+### 2.3 设计哲学之争
+
+Checked 异常的初衷是好的——强迫开发者处理可预见的异常。但实践中它常被诟病：过多的 `throws` 声明污染方法签名，层层 `try/catch` 让代码臃肿。许多框架（如 Spring）倾向把 Checked 异常包装成 RuntimeException。
+
+一个实用建议：**自定义业务异常通常继承 RuntimeException**（Unchecked），避免调用方被迫处理；只有那些"调用方合理能恢复"的异常才用 Checked。
+
+## 三、try / catch / finally
+
+### 3.1 基本结构
+
+```java
+try {
+    // 可能抛异常的代码
+} catch (SpecificException e) {
+    // 处理特定异常
+} catch (Exception e) {
+    // 处理其他异常
+} finally {
+    // 无论是否异常都会执行（清理资源）
+}
+```
+
+- `try`：包裹可能出错的代码。
+- `catch`：捕获并处理异常，可写多个（从具体到一般）。
+- `finally`：**总会执行**（无论正常、异常、return），常用于资源清理。
+
+### 3.2 catch 的顺序
+
+`catch` 必须从**子类到父类**排列，否则编译报错（父类在前会"屏蔽"子类）：
+
+```java
+try {
+    ...
+} catch (FileNotFoundException e) {   // 子类先
+    ...
+} catch (IOException e) {              // 父类后
+    ...
+}
+```
+
+### 3.3 finally 一定会执行吗
+
+**几乎一定会**——除非：
+
+1. `try` 或 `catch` 中调用了 `System.exit()`，JVM 直接退出。
+2. JVM 崩溃或被 `kill` 杀死。
+3. `try` 或 `catch` 中出现**死循环**。
+
+```java
+try {
+    System.exit(0);     // JVM 退出，finally 不执行
+} finally {
+    System.out.println("我不会被打印");   // 不会执行
+}
+```
+
+### 3.4 finally 与 return 的"暗战"
+
+如果 `try` 和 `finally` 都有 `return`，**finally 的 return 会覆盖 try 的**——这是极糟的写法，应避免：
+
+```java
+public int test() {
+    try {
+        return 1;
+    } finally {
+        return 2;   // 最终返回 2！覆盖了 try 的 return 1
+    }
+}
+```
+
+> ⚠️ **永远不要在 finally 中 return**。它不仅会覆盖 try 的返回值，还会"吞掉"try 中未抛出的异常。
+
+## 四、多异常捕获（Java 7+ multi-catch）
+
+Java 7 引入了 **multi-catch** 语法，用一个 `catch` 同时捕获多种异常：
+
+```java
+try {
+    // 可能抛 IOException 或 SQLException
+} catch (IOException | SQLException e) {
+    // 用 | 分隔多种异常类型
+    log.error("操作失败", e);
+}
+```
+
+规则：
+
+- 多个异常类型用 `|` 分隔。
+- `e` 的类型是这些异常的**最近公共父类**。
+- `e` 隐式 `final`，不能在 catch 块中重新赋值。
+- 不能捕获"父子关系"的异常（如 `IOException | FileNotFoundException`，因为后者是前者子类，无意义）。
+
+这比 Java 6 时每个异常写一个 catch 块、复制粘贴处理逻辑要优雅得多。
+
+## 五、异常链
+
+有时候，低层异常需要"翻译"成高层语义的异常抛出，但又不丢失原始信息——这就是**异常链**（Exception Chaining）。
+
+```java
+public void loadConfig() throws ConfigException {
+    try {
+        readFile("config.properties");
+    } catch (IOException e) {
+        // 把 IOException 包装成业务异常，但保留 cause
+        throw new ConfigException("配置加载失败", e);
+    }
+}
+```
+
+`new ConfigException("配置加载失败", e)` 把原始异常 `e` 作为 **cause**（原因）传入。打印堆栈时会看到 "Caused by: java.io.IOException..."，原始信息一条不丢。
+
+除了用构造器传 cause，也可以用 `initCause`：
+
+```java
+ConfigException ce = new ConfigException("配置加载失败");
+ce.initCause(e);
+throw ce;
+```
+
+但构造器方式更简洁，推荐使用。所有 `Throwable` 都支持 cause——如果你的自定义异常没有"接受 cause 的构造器"，可以自己加一个：
+
+```java
+public class ConfigException extends Exception {
+    public ConfigException(String msg) { super(msg); }
+    public ConfigException(String msg, Throwable cause) { super(msg, cause); }
+}
+```
+
+## 六、throw 与 throws
+
+这两个关键字只差一个字母，却分工不同：
+
+| 关键字 | 作用 | 位置 | 用法 |
+| --- | --- | --- | --- |
+| `throw` | **抛出**一个异常对象 | 方法体内 | `throw new IOException();` |
+| `throws` | **声明**方法可能抛出的异常 | 方法签名 | `void m() throws IOException` |
+
+```java
+// throws 声明：这个方法可能抛 IOException
+public void readFile(String path) throws IOException {
+    if (path == null) {
+        // throw 抛出：实际抛出异常对象
+        throw new IllegalArgumentException("路径不能为 null");
+    }
+    // ...
+}
+```
+
+记忆窍门：`throw` 是"动词"（扔出去），`throws` 是"声明"（告知调用方）。
+
+## 七、自定义异常
+
+### 7.1 设计原则
+
+自定义异常让错误信息更具业务语义。比如 `UserNotFoundException` 比 `RuntimeException("用户不存在")` 更清晰，调用方也能针对性 catch。
+
+设计时遵循两条路：
+
+- **继承 Exception**：成为 Checked 异常，强制调用方处理。适用于"调用方能合理恢复"的场景。
+- **继承 RuntimeException**：成为 Unchecked 异常，不强制处理。适用于"编程错误"或"框架风格偏好 Unchecked"。
+
+### 7.2 一个自定义异常的例子
+
+```java
+// 业务异常基类（Unchecked）
+public class BusinessException extends RuntimeException {
+    private final int code;   // 错误码
+
+    public BusinessException(int code, String message) {
+        super(message);
+        this.code = code;
+    }
+
+    public BusinessException(int code, String message, Throwable cause) {
+        super(message, cause);
+        this.code = code;
+    }
+
+    public int getCode() { return code; }
+}
+
+// 具体业务异常
+public class UserNotFoundException extends BusinessException {
+    public UserNotFoundException(String userId) {
+        super(4041, "用户不存在: " + userId);
+    }
+}
+```
+
+带上**错误码**（code）是个好习惯——前端可以根据错误码做不同的 UI 处理，比纯字符串判断更可靠。
+
+## 八、try-with-resources（Java 7+）
+
+### 8.1 资源管理的痛点
+
+Java 中很多资源（文件流、数据库连接、网络套接字）用完必须关闭，否则资源泄漏。传统写法：
+
+```java
+FileReader fr = null;
+try {
+    fr = new FileReader("data.txt");
+    // 使用 fr
+} catch (IOException e) {
+    e.printStackTrace();
+} finally {
+    if (fr != null) {
+        try {
+            fr.close();   // close 本身也可能抛 IOException！
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+`finally` 里又嵌一层 `try/catch`——丑陋且易错。
+
+### 8.2 try-with-resources 的优雅
+
+Java 7 引入 **try-with-resources**，自动关闭实现了 `AutoCloseable` 接口的资源：
+
+```java
+try (FileReader fr = new FileReader("data.txt")) {
+    // 使用 fr
+} catch (IOException e) {
+    e.printStackTrace();
+}
+// fr 在 try 结束时自动 close，无需 finally！
+```
+
+资源在 `try` 的括号中声明，`try` 块结束后（无论正常或异常）**自动调用 close()**。多个资源用分号分隔，关闭顺序是**声明的逆序**：
+
+```java
+try (FileReader fr = new FileReader("data.txt");
+     BufferedReader br = new BufferedReader(fr)) {
+    // 先关闭 br，再关闭 fr
+    String line = br.readLine();
+}
+```
+
+### 8.3 AutoCloseable 接口
+
+任何类只要实现 `AutoCloseable`（或 `Closeable`）就能用 try-with-resources：
+
+```java
+public class MyResource implements AutoCloseable {
+    public MyResource() { System.out.println("打开资源"); }
+
+    public void use() { System.out.println("使用资源"); }
+
+    @Override
+    public void close() {   // 自动调用
+        System.out.println("关闭资源");
+    }
+}
+
+// 使用
+try (MyResource r = new MyResource()) {
+    r.use();
+}   // 自动调用 r.close()
+```
+
+### 8.4 抑制异常（Suppressed Exception）
+
+如果 `try` 块抛了异常，`close()` 也抛了异常，后者会被**抑制**（suppressed），附加到主异常上，不会丢失：
+
+```java
+try {
+    Exception primary = new Exception("主异常");
+    primary.addSuppressed(new Exception("close 时的异常"));
+    throw primary;
+} catch (Exception e) {
+    System.out.println(e.getMessage());          // 主异常
+    for (Throwable s : e.getSuppressed()) {
+        System.out.println("被抑制: " + s);       // close 时的异常
+    }
+}
+```
+
+这是 try-with-resources 相比手写 finally 的又一大优势——finally 里 close 抛异常会"吞掉"try 的主异常，而 try-with-resources 保留了全部信息。
+
+## 九、异常最佳实践
+
+### 9.1 不要 catch(Exception) 吞异常
+
+```java
+// ❌ 最糟写法：吞掉异常，假装没事
+try {
+    riskyOperation();
+} catch (Exception e) {
+    // 空的！异常被静默吞掉
+}
+```
+
+这会让 bug 永远潜伏——出了问题连日志都没有，排查时两眼一抹黑。至少要记日志：
+
+```java
+// ✅ 至少记录
+try {
+    riskyOperation();
+} catch (Exception e) {
+    log.error("操作失败", e);   // 记录完整堆栈
+    // 如果无法恢复，可以包装后重新抛出
+    throw new RuntimeException("操作失败", e);
+}
+```
+
+### 9.2 不要 catch Throwable
+
+`Throwable` 包含 `Error`，而 `Error`（如 `OutOfMemoryError`）不该被 catch——程序已经无法恢复。catch 它会掩盖真正的严重问题。
+
+### 9.3 catch 具体的异常类型
+
+```java
+// ❌ 太宽泛
+catch (Exception e) { ... }
+
+// ✅ 具体处理
+catch (FileNotFoundException e) { ... }
+catch (IOException e) { ... }
+```
+
+### 9.4 finally 中不要 return
+
+前文已述——finally 的 return 会覆盖 try 的返回值，并吞掉 try 的异常。
+
+### 9.5 异常不是控制流
+
+不要用异常做正常的流程控制（比如用 `NumberFormatException` 判断字符串是否是数字）。异常应该用于"异常"情况，正常路径用 `if` 判断。
+
+## 十、实战：自定义业务异常体系
+
+下面用一个完整的银行转账例子，演示自定义异常体系与异常链的实战。
+
+<CodeRunner code={`// 业务异常基类
+class BizException extends RuntimeException {
+    private final int code;
+    public BizException(int code, String msg) { super(msg); this.code = code; }
+    public BizException(int code, String msg, Throwable cause) { super(msg, cause); this.code = code; }
+    public int getCode() { return code; }
+}
+
+// 余额不足异常
+class InsufficientBalanceException extends BizException {
+    public InsufficientBalanceException(double balance, double amount) {
+        super(4001, "余额不足: 当前 " + balance + ", 需转账 " + amount);
+    }
+}
+
+// 账户不存在异常
+class AccountNotFoundException extends BizException {
+    public AccountNotFoundException(String accountId) {
+        super(4041, "账户不存在: " + accountId);
+    }
+}
+
+// 账户类
+class Account {
+    String id;
+    double balance;
+    Account(String id, double balance) { this.id = id; this.balance = balance; }
+}
+
+// 银行服务
+class BankService {
+    private java.util.Map<String, Account> accounts = new java.util.HashMap<>();
+
+    BankService() {
+        accounts.put("A001", new Account("A001", 1000));
+        accounts.put("A002", new Account("A002", 500));
+    }
+
+    void transfer(String fromId, String toId, double amount) {
+        Account from = findAccount(fromId);
+        Account to = findAccount(toId);
+
+        if (from.balance < amount) {
+            throw new InsufficientBalanceException(from.balance, amount);
+        }
+        from.balance -= amount;
+        to.balance += amount;
+        System.out.println("转账成功: " + fromId + " -> " + toId
+            + " 金额 " + amount);
+    }
+
+    private Account findAccount(String id) {
+        Account acc = accounts.get(id);
+        if (acc == null) throw new AccountNotFoundException(id);
+        return acc;
+    }
+
+    void printBalances() {
+        accounts.forEach((k, v) ->
+            System.out.println("  " + k + ": " + v.balance));
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        BankService bank = new BankService();
+
+        // 模拟多笔转账
+        String[][] cases = {
+            {"A001", "A002", "300"},   // 正常
+            {"A001", "A002", "9999"},  // 余额不足
+            {"A001", "X999", "100"},   // 账户不存在
+            {"A002", "A001", "200"},   // 正常
+        };
+
+        for (String[] c : cases) {
+            System.out.println("\\n--- 转账 " + c[0] + " -> " + c[1]
+                + " 金额 " + c[2] + " ---");
+            try {
+                bank.transfer(c[0], c[1], Double.parseDouble(c[2]));
+                System.out.println("状态: 成功");
+            } catch (BizException e) {
+                System.out.println("状态: 失败 [错误码 " + e.getCode() + "] "
+                    + e.getMessage());
+            }
+        }
+
+        System.out.println("\\n=== 最终余额 ===");
+        bank.printBalances();
+
+        // 演示 try-with-resources
+        System.out.println("\\n=== try-with-resources 演示 ===");
+        try (MyResource r = new MyResource()) {
+            r.use();
+            System.out.println("try 块正常结束");
+        } catch (Exception e) {
+            System.out.println("捕获: " + e.getMessage());
+        }
+        System.out.println("资源已自动关闭");
+    }
+}
+
+// 演示 AutoCloseable
+class MyResource implements AutoCloseable {
+    MyResource() { System.out.println("  [资源] 打开"); }
+    void use() { System.out.println("  [资源] 使用中"); }
+    @Override
+    public void close() { System.out.println("  [资源] 自动关闭"); }
+}`} />
+
+## 十一、本章小结
+
+| 主题 | 要点 |
+| --- | --- |
+| 异常体系 | Throwable → Error / Exception → RuntimeException |
+| Error | JVM 严重错误，不该 catch |
+| Checked | 编译器强制处理，代表可恢复的外部异常 |
+| Unchecked | 不强制处理，代表编程错误 |
+| try/catch/finally | finally 几乎总会执行（除 System.exit/JVM 崩溃） |
+| finally 陷阱 | 不要在 finally 中 return，会覆盖返回值并吞异常 |
+| multi-catch | `catch (A | B e)`，e 隐式 final |
+| 异常链 | `new Exception(msg, cause)` 保留原始异常 |
+| throw vs throws | throw 抛出对象，throws 声明签名 |
+| 自定义异常 | 继承 Exception（Checked）或 RuntimeException（Unchecked） |
+| try-with-resources | 自动关闭 AutoCloseable，逆序关闭，保留抑制异常 |
+| 最佳实践 | 不要吞异常、不要 catch Throwable、catch 具体类型 |
+
+## 结语
+
+异常处理是程序健壮性的基石。好的异常处理不是"把错误藏起来"，而是"让错误以合适的方式暴露和传播"——该记日志的记日志，该包装的包装，该向上抛的向上抛。记住几个关键原则：**用具体类型 catch**、**不要吞异常**、**善用 try-with-resources**、**finally 中不要 return**——你的代码就能在意外面前从容不迫。
+
+下一章是第三阶段的收官之作——**泛型**。这是 Java 中最具"魔法色彩"的特性之一：它让代码类型安全又通用，但背后的"类型擦除"又藏着不少秘密。让我们一起揭开它的面纱。

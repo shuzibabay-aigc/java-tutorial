@@ -1,0 +1,368 @@
+---
+title: "Dynamic Proxy"
+chapter: 57
+stage: "Stage 10"
+stageName: "Reflection and Annotations: Advanced"
+order: 2
+description: "Review static proxy, master JDK dynamic proxy (Proxy.newProxyInstance / InvocationHandler), a CGLIB overview, choosing between JDK dynamic proxy and CGLIB, and use AOP thinking to add logging and timing around method execution"
+pubDate: 2026-07-03
+tags: ["Java", "动态代理", "Dynamic Proxy", "AOP", "InvocationHandler"]
+---
+
+# Dynamic Proxy
+
+In the previous chapter we learned reflection — the ability to "see through" a class's structure. This chapter takes reflection somewhere even more "magical": **Dynamic Proxy** — at runtime, conjuring up a proxy class that implements a given interface, letting you hook method calls without touching the original code.
+
+Why "dynamic"? Because the proxy class isn't written by you — it's **generated** by the JVM at runtime. You just tell it "I want to proxy this interface," and it "manufactures" a proxy class for you. This is the underlying mechanism of AOP (Aspect-Oriented Programming) — Spring AOP, MyBatis Mappers, RPC framework remote-call stubs all rely on it.
+
+## 1. First, a Review: Static Proxy
+
+The Proxy Pattern is no stranger — wrap the target object in a layer of "middleman" to control access to it.
+
+```java
+interface UserService {
+    void save(String name);
+}
+
+class UserServiceImpl implements UserService {
+    public void save(String name) {
+        System.out.println("保存用户: " + name);
+    }
+}
+
+// Static proxy: hand-write a proxy class
+class UserServiceProxy implements UserService {
+    private UserService target;   // the real object being proxied
+    public UserServiceProxy(UserService target) { this.target = target; }
+    public void save(String name) {
+        System.out.println("[Before] 准备保存");
+        target.save(name);          // call the real method
+        System.out.println("[After] 保存完成");
+    }
+}
+
+// usage
+UserService proxy = new UserServiceProxy(new UserServiceImpl());
+proxy.save("张三");
+```
+
+The problem with static proxies is obvious — **every interface needs a hand-written proxy class**. If you have 20 Services with 10 methods each, you'll cramp your hands writing proxy classes. Hence "dynamic proxy" — let the JVM generate the proxy class for you at runtime.
+
+## 2. JDK Dynamic Proxy
+
+JDK's built-in dynamic proxy API lives in the `java.lang.reflect` package. There are two core roles:
+
+- **`Proxy`** — the factory class used to generate proxy objects.
+- **`InvocationHandler`** — the invocation handler that defines "what to do when a proxy method is called."
+
+### 2.1 Basic Usage
+
+```java
+import java.lang.reflect.*;
+
+interface UserService {
+    void save(String name);
+    String get(int id);
+}
+
+class UserServiceImpl implements UserService {
+    public void save(String name) { System.out.println("保存: " + name); }
+    public String get(int id) { return "用户" + id; }
+}
+
+// Invocation handler: all method calls land here
+class LogHandler implements InvocationHandler {
+    private Object target;   // the proxied object
+    public LogHandler(Object target) { this.target = target; }
+
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        System.out.println("[Before] " + method.getName() + "(" + Arrays.toString(args) + ")");
+        Object result = method.invoke(target, args);   // reflectively call the original method
+        System.out.println("[After]  " + method.getName() + " -> " + result);
+        return result;
+    }
+}
+
+// generate the proxy
+UserService target = new UserServiceImpl();
+UserService proxy = (UserService) Proxy.newProxyInstance(
+    target.getClass().getClassLoader(),   // class loader
+    target.getClass().getInterfaces(),    // which interfaces to proxy
+    new LogHandler(target)                // invocation handler
+);
+proxy.save("张三");   // goes into LogHandler.invoke
+```
+
+`Proxy.newProxyInstance` takes three arguments:
+
+1. **`ClassLoader`** — used to load the dynamically generated proxy class.
+2. **`Class＜?＞[]`** — the array of interfaces the proxy class should implement (**JDK dynamic proxy can only proxy interfaces**).
+3. **`InvocationHandler`** — the handler for method calls.
+
+Whenever any method is called on the proxy object, it flows into `InvocationHandler.invoke` — `proxy` is the proxy object itself, `method` is the invoked method, and `args` are the arguments. Inside `invoke` you can do anything: preprocessing, calling the original method, post-processing, altering the return value.
+
+### 2.2 The "True Body" of the Proxy Class
+
+At runtime the JVM **generates** a class (named something like `com.sun.proxy.$Proxy0`) that implements your specified interfaces, with each method body being "call handler.invoke." You can add the JVM argument `-Dsun.misc.ProxyGenerator.saveGeneratedFiles=true` to save the generated `.class` and decompile it for a look.
+
+A simplified version of the proxy class looks like this:
+
+```java
+final class $Proxy0 implements UserService {
+    private InvocationHandler h;
+    public $Proxy0(InvocationHandler h) { this.h = h; }
+    public void save(String name) {
+        // m_save is the Method object pointing to UserService.save
+        h.invoke(this, m_save, new Object[]{name});
+    }
+    public String get(int id) {
+        return (String) h.invoke(this, m_get, new Object[]{id});
+    }
+}
+```
+
+Every method is "wrapped" into an `h.invoke` call — that's why all method calls flow into `InvocationHandler`.
+
+## 3. CGLIB: Proxying Classes
+
+JDK dynamic proxy has a hard limitation — **it can only proxy interfaces**. If your class doesn't implement an interface (say it's just a plain class), JDK dynamic proxy is powerless. That's where **CGLIB** (Code Generation Library) steps in.
+
+CGLIB's principle is different — it **generates a subclass** of the target class via **bytecode generation**, overriding non-final methods. Because it uses inheritance, no interface is needed.
+
+```java
+// CGLIB usage (requires the cglib dependency, shown here for illustration)
+import net.sf.cglib.proxy.*;
+
+class UserServiceImpl {   // note: implements no interface
+    public void save(String name) { System.out.println("保存: " + name); }
+}
+
+MethodInterceptor interceptor = (obj, method, args, proxy) -> {
+    System.out.println("[Before] " + method.getName());
+    Object result = proxy.invokeSuper(obj, args);   // call the parent (original) method
+    System.out.println("[After]  " + method.getName());
+    return result;
+};
+
+Enhancer enhancer = new Enhancer();
+enhancer.setSuperclass(UserServiceImpl.class);
+enhancer.setCallback(int interceptor);
+UserServiceImpl proxy = (UserServiceImpl) enhancer.create();
+proxy.save("张三");
+```
+
+The proxy class CGLIB generates is a **subclass** of the target class, hence "subclass proxy." Its core interface is `MethodInterceptor` — similar to `InvocationHandler`, but it uses `proxy.invokeSuper` to call the original method.
+
+> Since CGLIB requires a third-party dependency, it can't run directly in the Piston online environment. Below we use JDK dynamic proxy for the hands-on demo; for CGLIB, understanding the principle is enough. Spring also defaults to JDK dynamic proxy — using interface proxy when there's an interface, and CGLIB only when there isn't.
+
+## 4. JDK Dynamic Proxy vs CGLIB
+
+| Aspect | JDK Dynamic Proxy | CGLIB |
+| --- | --- | --- |
+| Proxy target | Must implement an interface | Proxy a class (generates a subclass) |
+| Principle | Reflection + interface implementation | Bytecode generation + inheritance |
+| Performance (creation) | Faster | Slower (must generate bytecode) |
+| Performance (invocation) | Slightly slower (reflective invoke) | Faster (FastClass mechanism) |
+| Dependency | Bundled with JDK | Requires the cglib dependency |
+| final methods | No impact (interface methods) | Cannot proxy (final can't be overridden) |
+| Spring default | Used when interface present | Used when no interface |
+
+**Selection advice**:
+
+- Target class implements an interface → JDK dynamic proxy (no extra dependency, simple).
+- Target class has no interface → CGLIB (the only choice).
+- Spring Boot 2.0+ defaults to CGLIB (uniform behavior, avoiding proxy-type inconsistency issues).
+
+## 5. Hands-On: A First Look at AOP
+
+The core idea of AOP (Aspect-Oriented Programming) — pull "cross-cutting concerns" (logging, transactions, permissions, monitoring) out of business code and handle them uniformly via proxies.
+
+We'll use JDK dynamic proxy to implement a simple AOP — adding "pre-log + post-timing" to methods, without touching business code.
+
+```java
+// A similar annotation in real projects (Spring uses @Aspect)
+@interface Loggable {}
+```
+
+<CodeRunner code={`import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+
+// 标记需要日志的方法
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface Loggable {
+    String value() default "";
+}
+
+// 业务接口
+interface OrderService {
+    @Loggable("下单")
+    String createOrder(String user, double amount);
+    @Loggable("查询")
+    String queryOrder(int id);
+    void cancelOrder(int id);   // 没标注解, 不打日志
+}
+
+// 真实实现
+class OrderServiceImpl implements OrderService {
+    @Override
+    public String createOrder(String user, double amount) {
+        // 模拟业务耗时
+        try { Thread.sleep(50); } catch (Exception e) {}
+        return "ORD-" + user + "-" + amount;
+    }
+    @Override
+    public String queryOrder(int id) {
+        try { Thread.sleep(20); } catch (Exception e) {}
+        return "Order# " + id;
+    }
+    @Override
+    public void cancelOrder(int id) {
+        System.out.println("  [业务] 取消订单 " + id);
+    }
+}
+
+// AOP 处理器: 检查 @Loggable 注解, 决定是否记录日志和计时
+class AopHandler implements InvocationHandler {
+    private final Object target;
+    public AopHandler(Object target) { this.target = target; }
+
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        Method realMethod = target.getClass().getMethod(method.getName(), method.getParameterTypes());
+        Loggable loggable = realMethod.getAnnotation(Loggable.class);
+
+        // 没标注解 -> 直接调用, 不加任何处理
+        if (loggable == null) {
+            return method.invoke(target, args);
+        }
+
+        // 有标注解 -> 前置日志 + 计时 + 后置日志
+        String tag = loggable.value().isEmpty() ? method.getName() : loggable.value();
+        System.out.println("[AOP-前置] " + tag + " 开始, 参数: " + Arrays.toString(args));
+        long start = System.nanoTime();
+        try {
+            Object result = method.invoke(target, args);
+            long cost = (System.nanoTime() - start) / 1_000_000;
+            System.out.println("[AOP-后置] " + tag + " 完成, 耗时 " + cost + " ms, 返回: " + result);
+            return result;
+        } catch (InvocationTargetException e) {
+            // 反射调用业务异常会被包成 InvocationTargetException, 要解包
+            long cost = (System.nanoTime() - start) / 1_000_000;
+            System.out.println("[AOP-异常] " + tag + " 抛异常, 耗时 " + cost + " ms: " + e.getCause());
+            throw e.getCause();
+        }
+    }
+}
+
+// 通用代理工厂
+class ProxyFactory {
+    @SuppressWarnings("unchecked")
+    public static <T> T create(T target) {
+        return (T) Proxy.newProxyInstance(
+            target.getClass().getClassLoader(),
+            target.getClass().getInterfaces(),
+            new AopHandler(target)
+        );
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== AOP 思想初探: 动态代理实现 ===\\n");
+
+        // 1. 不用代理: 直接调用
+        System.out.println("--- 1. 直接调用 (无 AOP) ---");
+        OrderService raw = new OrderServiceImpl();
+        raw.createOrder("张三", 99.5);
+        raw.queryOrder(100);
+        raw.cancelOrder(100);
+
+        // 2. 用动态代理: 自动加日志和计时
+        System.out.println("\\n--- 2. 代理调用 (有 AOP) ---");
+        OrderService proxy = ProxyFactory.create(new OrderServiceImpl());
+        proxy.createOrder("张三", 99.5);
+        System.out.println();
+        proxy.queryOrder(100);
+        System.out.println();
+        proxy.cancelOrder(100);   // 没标注解, 不加日志
+
+        // 3. 代理对象的类型
+        System.out.println("\\n--- 3. 代理对象是什么类型 ---");
+        System.out.println("代理类名: " + proxy.getClass().getName());
+        System.out.println("是 OrderService? " + (proxy instanceof OrderService));
+        System.out.println("是 OrderServiceImpl? " + (proxy instanceof OrderServiceImpl));
+        System.out.println("(代理类实现了 OrderService 接口, 但不是 OrderServiceImpl)");
+
+        // 4. 多个 Service 共用一套 AOP
+        System.out.println("\\n--- 4. 多个 Service 共用 AOP ---");
+        // 同一个 InvocationHandler 思路, 可代理任意接口
+        HelloService helloProxy = (HelloService) Proxy.newProxyInstance(
+            HelloService.class.getClassLoader(),
+            new Class[]{HelloService.class},
+            (p, m, a) -> {
+                System.out.println("[Before] " + m.getName());
+                Object r = m.invoke(new HelloServiceImpl(), a);
+                System.out.println("[After]  返回 " + r);
+                return r;
+            }
+        );
+        helloProxy.hello("World");
+        System.out.println("(同一套代理思路, 可套在任意接口上)");
+    }
+
+    interface HelloService { String hello(String name); }
+    static class HelloServiceImpl implements HelloService {
+        public String hello(String name) { return "Hi, " + name; }
+    }
+}`} />
+
+> **Key observations**:
+> - **`createOrder` and `queryOrder` automatically get pre/post logging and timing** — because they're annotated with `@Loggable`, while `cancelOrder` isn't annotated and is called as-is.
+> - **Business code is completely untouched** — the essence of AOP: cross-cutting logic and business logic are fully decoupled.
+> - **The proxy object is `OrderService` but not `OrderServiceImpl`** — the proxy class is the JVM-generated `$Proxy0`, which implements the interface but is a different class than the original implementation.
+> - **Exceptions get wrapped in `InvocationTargetException`** — when reflection calls a business method that throws, it gets wrapped one layer; use `e.getCause()` to get the real exception.
+
+## 6. Application Scenarios of Dynamic Proxy
+
+Dynamic proxies are virtually everywhere in frameworks:
+
+| Framework | Usage | Proxy Style |
+| --- | --- | --- |
+| **Spring AOP** | `@Transactional`/`@Async`/`@Cacheable` | JDK or CGLIB |
+| **MyBatis** | Mapper interfaces have no impl class — all proxied | JDK dynamic proxy |
+| **Feign/RPC** | Local-call stubs for remote interfaces | JDK dynamic proxy |
+| **Hibernate** | Lazy-loading proxies | CGLIB/ByteBuddy |
+| **Spring Data** | Repository interfaces auto-implemented | JDK dynamic proxy |
+
+Take MyBatis — you only write the `UserMapper` interface, with no implementation class, yet you can directly call `mapper.findById(1)`. Behind the scenes, JDK dynamic proxy generates a proxy object that turns the method call into SQL execution.
+
+## 7. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| Static proxy | Hand-write proxy classes, one per interface, tedious |
+| JDK dynamic proxy | `Proxy.newProxyInstance` generates a proxy class at runtime |
+| `InvocationHandler` | Method calls enter `invoke(proxy, method, args)` |
+| JDK proxy limitation | Can only proxy interfaces, not classes |
+| CGLIB | Generates a subclass via inheritance, can proxy classes (not final) |
+| Performance | Creation: JDK faster; invocation: CGLIB faster |
+| Exception handling | Reflective business-method exceptions get wrapped as `InvocationTargetException` |
+| AOP | Dynamic proxy is the underlying implementation of AOP |
+
+**Mnemonic**:
+
+- **JDK proxy only accepts interfaces** — a class with no interface stumps JDK; you need CGLIB.
+- **`Proxy.newProxyInstance` takes three args** — ClassLoader, interface array, Handler.
+- **All methods flow into `invoke`** — `method.invoke(target, args)` calls the original method.
+- **Business exceptions get wrapped** — `InvocationTargetException`; remember `getCause`.
+- **CGLIB uses inheritance** — so final classes/methods can't be proxied.
+- **AOP = dynamic proxy + annotations** — annotations mark "pointcuts," proxies implement "advice."
+
+## Closing: From Proxy to AOP
+
+This chapter implemented a mini AOP with dynamic proxy. Looking back — the essence of AOP is "proxy + annotation + reflection": annotations mark pointcuts, reflection reads annotations, and the proxy inserts logic before/after methods. Spring AOP makes this mechanism more complete (pointcut expressions, 5 advice types, aspect ordering), but the soul underneath is exactly what this chapter covered.
+
+The next chapter continues the annotation topic — **Annotation Advanced**: meta-annotations, custom annotations, runtime reflective annotation reading, and finally a `@Autowired`-style dependency injection implementation.

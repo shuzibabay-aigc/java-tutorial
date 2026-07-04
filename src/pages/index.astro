@@ -1,0 +1,50 @@
+---
+import TutorialLayout from '../layouts/TutorialLayout.astro';
+import { getCollection } from 'astro:content';
+import { type Lang, tutorialPath, getUiStrings } from '../i18n/ui';
+
+const lang: Lang = 'zh';
+const ui = getUiStrings(lang);
+
+const tutorials = await getCollection('tutorials');
+const sortedTutorials = tutorials.sort((a, b) => a.data.chapter - b.data.chapter);
+
+// 按阶段分组
+const stagesMap = new Map();
+for (const t of sortedTutorials) {
+  if (!stagesMap.has(t.data.stage)) {
+    stagesMap.set(t.data.stage, {
+      stage: t.data.stage,
+      stageName: t.data.stageName,
+      chapters: [],
+    });
+  }
+  stagesMap.get(t.data.stage).chapters.push(t);
+}
+const stages = Array.from(stagesMap.values());
+---
+
+<TutorialLayout lang={lang}>
+  <section class="home-hero">
+    <span class="coffee-icon">☕</span>
+    <h1>{ui.homeHeroTitle}</h1>
+    <p class="tagline" set:html={ui.homeHeroTagline} />
+    <div class="badges">
+      <span class="badge highlight">{ui.badgeJava21}</span>
+      <span class="badge">{ui.badgeChapters}</span>
+      <span class="badge">{ui.badgeOnline}</span>
+      <span class="badge">{ui.badgeOpenSource}</span>
+    </div>
+  </section>
+
+  <section class="stages-grid">
+    {stages.map((s) => (
+      <a href={tutorialPath(s.chapters[0].slug, lang)} class="stage-card">
+        <div class="stage-num">{s.stage}</div>
+        <h3>{s.stageName}</h3>
+        <p>{ui.stageCardPrefix} {s.chapters[0].data.title}{ui.stageCardSuffix} {s.stageName}。</p>
+        <div class="chapter-count">{s.chapters.length} {ui.stageCardCount}</div>
+      </a>
+    ))}
+  </section>
+</TutorialLayout>

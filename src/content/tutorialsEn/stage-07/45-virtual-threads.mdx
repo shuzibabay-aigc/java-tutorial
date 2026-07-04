@@ -1,0 +1,518 @@
+---
+title: "Virtual Threads and Structured Concurrency"
+chapter: 45
+stage: "Stage 7"
+stageName: "Concurrent Programming"
+order: 12
+description: "Master virtual threads vs platform threads, fit scenarios and pitfalls, Thread.startVirtualThread, structured concurrency with StructuredTaskScope, Scoped Values, and hands-on high-concurrency HTTP requests"
+pubDate: 2026-07-03
+tags: ["Java", "Virtual Thread", "Structured Concurrency", "Scoped Values", "JDK 21"]
+---
+
+# Virtual Threads and Structured Concurrency
+
+This chapter is the finale of Stage 7 — covering **Virtual Threads** and **Structured Concurrency**. This is the biggest change brought by Java 21 (officially released in September 2023), and the most important advance in Java concurrency in 20 years.
+
+All the concurrency tools we learned in the previous 11 chapters — `Thread`, `synchronized`, `ExecutorService`, `CompletableFuture` — are built on the assumption that "threads are expensive." A Java thread maps one-to-one to an OS thread, several MB of memory, so we use thread pools to reuse, use `CompletableFuture` async to avoid blocking, and use Reactive Streams to avoid thread pile-up.
+
+Virtual threads overturn that assumption — **threads are no longer expensive**. A JVM can run millions of virtual threads, each a few KB of memory, with scheduling controlled by the JVM itself. This means we can re-embrace the simplest and most intuitive "one request, one thread" model — writing synchronous-style code with asynchronous performance. It is revolutionary.
+
+## 1. Platform Threads vs Virtual Threads
+
+### 1.1 Platform Threads
+
+Before JDK 21, all Java threads were **platform threads** — mapped one-to-one to OS threads.
+
+```
+Java thread 1 ─→ OS thread 1
+Java thread 2 ─→ OS thread 2
+Java thread 3 ─→ OS thread 3
+```
+
+Characteristics:
+
+- Each thread occupies **several MB of stack space** (default 1MB, adjustable).
+- Creation/destruction involves a kernel transition, costly.
+- The number of OS threads is limited — usually a few thousand is the bottleneck (limited by memory, scheduling, context switching).
+- Blocking calls (IO, `sleep`, `wait`) **occupy the entire OS thread** — the thread suspends, the OS schedules another thread, but the OS thread is still there "waiting," unable to do anything else.
+
+The "expensiveness" of platform threads necessitates thread pools — reuse threads, control concurrency, avoid creation overhead. The "async callback" pattern of `CompletableFuture` also exists to "handle many tasks with few threads."
+
+### 1.2 Virtual Threads
+
+Virtual threads are lightweight threads scheduled by the JVM — multiple virtual threads reuse a small number of platform threads (**carrier threads**).
+
+```
+Virtual thread 1 ┐
+Virtual thread 2 ├─→ carrier thread 1 (OS thread)
+Virtual thread 3 ┘
+Virtual thread 4 ┐
+Virtual thread 5 ├─→ carrier thread 2 (OS thread)
+Virtual thread 6 ┘
+...
+Virtual thread 1,000,000 ─→ (sharing dozens of carrier threads)
+```
+
+Characteristics:
+
+- Each virtual thread has **a few KB of stack space** (small initially, grows on demand).
+- Creation/destruction is scheduled internally by the JVM, low cost.
+- **Blocking calls do not waste carrier threads** — when a virtual thread blocks, the JVM "unmounts" it from the carrier thread, and the carrier thread runs another virtual thread.
+- The count can reach the **millions** — the bottleneck is heap memory, not thread scheduling.
+
+### 1.3 Key Insight: Blocking Becomes Free
+
+This is the essence of virtual threads — **blocking calls no longer waste OS threads**. When a virtual thread calls `socket.read()`, `Thread.sleep()`, or `future.get()` and blocks, the JVM automatically unmounts it, and the carrier thread runs another virtual thread. When the block clears (data arrives / sleep expires), the JVM mounts it back onto some carrier thread to continue.
+
+This means — **you can write "synchronous blocking" code but get "asynchronous non-blocking" performance**.
+
+```java
+// Traditional platform-thread model: 10,000 connections need 10,000 threads, memory explodes
+// With CompletableFuture: 10,000 connections use 4 threads, but the code is async, nested, hard to write
+
+// Virtual threads: 10,000 connections use 10,000 virtual threads, synchronous code style
+for (int i = 0; i < 10000; i++) {
+    Thread.startVirtualThread(() -> handleRequest(socket));
+}
+```
+
+Inside `handleRequest` you can write blocking calls freely — `socket.read()`, `db.query()`, `Thread.sleep()` will not waste threads.
+
+## 2. Fit Scenarios for Virtual Threads
+
+### 2.1 Fits: IO-Intensive
+
+The "killer app" of virtual threads is IO-intensive scenarios:
+
+- **Web servers** — one request, one virtual thread; blocking IO does not waste threads.
+- **Database connection pool queries** — query multiple tables in parallel, one virtual thread per query.
+- **Microservice gateways** — call multiple downstreams in parallel; waiting for responses does not occupy threads.
+- **Batch processing** — batch jobs with lots of IO waiting.
+
+### 2.2 Does Not Fit: CPU-Intensive
+
+CPU-intensive tasks (pure computation, encryption, compression) — virtual threads offer no advantage:
+
+- The CPU is always running; there is no opportunity for "blocking unmount."
+- Virtual threads are not faster than platform threads — they only save thread count; the CPU still has to compute.
+- `parallelStream` or a fixed-size platform thread pool is more appropriate.
+
+### 2.3 Does Not Fit: Extremely Short Tasks
+
+Tasks that are extremely short (nanosecond level) — the creation/scheduling overhead of a virtual thread may exceed the task itself. Use `ForkJoinPool` or just execute synchronously.
+
+## 3. Creating Virtual Threads
+
+### 3.1 Thread.startVirtualThread
+
+The simplest way — `Thread.startVirtualThread(Runnable)`:
+
+```java
+Thread.startVirtualThread(() -> {
+    System.out.println("virtual thread running on " + Thread.currentThread());
+});
+```
+
+### 3.2 Thread.ofVirtual
+
+A more flexible way — `Thread.ofVirtual()`:
+
+```java
+Thread vt = Thread.ofVirtual().name("my-vt").start(() -> {
+    // task
+});
+
+// factory pattern
+Thread.Builder builder = Thread.ofVirtual().name("worker-", 0);
+Thread t1 = builder.start(task1);   // worker-0
+Thread t2 = builder.start(task2);   // worker-1
+```
+
+### 3.3 Executors.newVirtualThreadPerTaskExecutor
+
+`ExecutorService` style — one virtual thread per task:
+
+```java
+try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+    for (int i = 0; i < 10000; i++) {
+        pool.submit(() -> handleRequest(i));
+    }
+}   // try-with-resources automatically waits for all tasks to finish
+```
+
+**This is the recommended "thread pool" usage for virtual threads** — there is actually no "pool" (a new virtual thread is created for each task), but the API is compatible with `ExecutorService`. You can migrate old code smoothly.
+
+### 3.4 Should You Pool Virtual Threads?
+
+**Do not pool virtual threads** — just create and destroy them directly. The purpose of a platform thread pool is "to reuse expensive threads"; virtual threads are not expensive, so pooling is an anti-pattern. Use the "one thread per task" pattern like `newVirtualThreadPerTaskExecutor`.
+
+## 4. Pitfalls of Virtual Threads
+
+Virtual threads are not a panacea — there are several pitfalls you must know.
+
+### 4.1 synchronized Blocking
+
+When a virtual thread blocks inside a `synchronized` block it **pins** the carrier thread — the carrier thread cannot run other virtual threads, effectively degrading to a platform thread.
+
+In JDK 21, virtual threads cannot unmount while blocking inside a `synchronized` block — this is a limitation of the initial implementation (fully resolved only in JDK 24). Heavy `synchronized` + blocking inside virtual threads erodes their advantage.
+
+**Fix**: replace `synchronized` with `ReentrantLock`:
+
+```java
+// bad (inside a virtual thread)
+public synchronized void method() {
+    socket.read();   // blocks → pins the carrier thread
+}
+
+// good
+private final ReentrantLock lock = new ReentrantLock();
+public void method() {
+    lock.lock();
+    try {
+        socket.read();   // blocks → unmounts the virtual thread, carrier can run others
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+### 4.2 ThreadLocal Overhead
+
+Virtual thread counts can reach the millions — every virtual thread's `ThreadLocal` occupies memory. If `ThreadLocal` stores a "large object" like `SimpleDateFormat`, a million virtual threads × one `SimpleDateFormat` each = memory explosion.
+
+**Fix**: use **Scoped Values** (covered below) to replace large-object `ThreadLocal`, or evaluate whether you really need ThreadLocal.
+
+### 4.3 Blocking Native Calls / JNI
+
+Virtual threads cannot unmount a thread blocked in a JNI/native call — it pins the carrier thread. For example, blocking IO in some JNI libraries.
+
+### 4.4 No Benefit for CPU-Intensive Work
+
+CPU-intensive tasks gain nothing from virtual threads — the concurrency of virtual threads is limited by `availableProcessors()` (the number of carrier threads).
+
+## 5. Structured Concurrency
+
+**Structured Concurrency** is a programming paradigm — the lifecycle of concurrent tasks is organized into a "hierarchy," the parent task waits for all child tasks, and child task exceptions propagate to the parent. JEP 453 introduced it in JDK 21 (preview), and JEP 480/JEP 505 and others have continued to refine it.
+
+### 5.1 Why Structured Concurrency Is Needed
+
+The pain points of traditional concurrency:
+
+```java
+// two parallel subtasks
+Future<String> user = pool.submit(() -> findUser());
+Future<Order> order = pool.submit(() -> findOrder());
+// if findUser throws, findOrder is still running — wasting resources
+// if findOrder hangs, the whole flow hangs
+// exception handling is complex — try/catch cannot get the subtask's exception
+String u = user.get();   // throws here
+order.get();             // never executes, but the order task is still running in the background
+```
+
+Problems:
+
+- The subtask lifecycle "escapes" — the parent may be done while the child is still running.
+- Exception handling is inelegant — one fails, the other keeps running and wastes resources.
+- There is no unified cancellation mechanism.
+
+### 5.2 StructuredTaskScope
+
+`StructuredTaskScope` is the core API of structured concurrency:
+
+```java
+try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+    Subtask<String> user = scope.fork(() -> findUser());
+    Subtask<Order> order = scope.fork(() -> findOrder());
+
+    scope.join();              // wait for all subtasks
+    scope.throwIfFailed();     // throw on any failure
+
+    // both succeeded
+    process(user.get(), order.get());
+}
+```
+
+Characteristics:
+
+- **`fork` starts a subtask** (on a virtual thread).
+- **`join` waits for all** — the parent blocks and waits.
+- **`throwIfFailed`** — if any subtask fails, throws `ExecutionException` containing all exceptions.
+- **`ShutdownOnFailure`**: cancels other subtasks on any failure — avoids waste.
+- **`ShutdownOnSuccess`**: cancels others on any success — good for "any one returning is enough."
+- **try-with-resources cancels all unfinished subtasks on close** — subtasks do not escape.
+
+### 5.3 Custom ShutdownPolicy
+
+You can implement `StructuredTaskScope` to customize the shutdown policy — for example "wait until 90% complete," "timeout shutdown," and so on.
+
+## 6. Scoped Values
+
+**Scoped Values** are the modern replacement for `ThreadLocal` — designed for virtual threads. JEP 446 introduced them in JDK 21 (preview).
+
+### 6.1 Problems with ThreadLocal
+
+- **Mutable** — any code can `set`, hard to trace.
+- **Long-lived** — only cleaned up when the thread ends; in a thread pool it easily leaks.
+- **Inheritance overhead** — `InheritableThreadLocal` copies all values when creating a child thread; with millions of virtual threads the overhead is large.
+- **Unbounded scope** — any code on the call chain can read it, possibly modifying it unexpectedly.
+
+### 6.2 Advantages of ScopedValue
+
+```java
+static final ScopedValue<String> USER_ID = ScopedValue.newInstance();
+
+// bind a value within a scope
+ScopedValue.where(USER_ID, "user-42").run(() -> {
+    // within this scope USER_ID.get() == "user-42"
+    processRequest();
+});
+// outside the scope USER_ID is unbound
+
+// can also return a value
+String result = ScopedValue.where(USER_ID, "user-42").call(() -> compute());
+```
+
+Characteristics:
+
+- **Immutable** — set at binding time, only readable within the scope, cannot be changed.
+- **Scope-bounded** — only valid inside the `run`/`call` block, automatically invalid outside.
+- **Zero-overhead inheritance** — virtual threads inherit the parent's scoped value without copying.
+- **Type-safe** — `ScopedValue＜String＞` can only hold a String.
+
+### 6.3 When to Use ScopedValue
+
+- **Request context** (traceId, tenant ID, user identity) — immutable, scope-bounded.
+- **Configuration parameters** — pass read-only config to deep calls.
+- **Replace `InheritableThreadLocal`** — critical with millions of virtual threads.
+
+## 7. Hands-On: High Concurrency with Virtual Threads
+
+The example below demonstrates virtual thread creation, comparison with platform threads, the `synchronized` pinning problem, `StructuredTaskScope` structured concurrency, and `ScopedValue` (if available).
+
+> **Note**: `StructuredTaskScope` and `ScopedValue` are preview features in JDK 21 and require `--enable-preview` to start. The online sandbox may not support them — the code below mainly demonstrates the **already-stable virtual thread APIs** (`Thread.startVirtualThread`, `Executors.newVirtualThreadPerTaskExecutor`); the structured concurrency parts are marked with comments.
+
+<CodeRunner code={`import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== Virtual thread demo ===");
+        System.out.println("JVM version: " + System.getProperty("java.version"));
+        System.out.println("CPU cores: " + Runtime.getRuntime().availableProcessors());
+        System.out.println("Virtual thread support: " + Thread.ofVirtual().getClass());
+
+        // === 1. Virtual threads vs platform threads: memory and count ===
+        System.out.println("\\n=== Create a large number of virtual threads ===");
+        int count = 100_000;
+        CountDownLatch latch = new CountDownLatch(count);
+        long start = System.currentTimeMillis();
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int i = 0; i < count; i++) {
+                pool.submit(() -> {
+                    try { Thread.sleep(10); } catch (InterruptedException e) {}
+                    latch.countDown();
+                });
+            }
+        }
+        System.out.println("100k virtual threads sleep 10ms, total time: "
+            + (System.currentTimeMillis() - start) + " ms");
+        System.out.println("(100k platform threads would OOM)");
+
+        // === 2. Virtual threads doing blocking IO (simulated) ===
+        System.out.println("\\n=== Virtual threads concurrently simulating HTTP requests ===");
+        int requests = 1000;
+        AtomicInteger success = new AtomicInteger();
+        long t1 = System.currentTimeMillis();
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<Boolean>> futures = new ArrayList<>();
+            for (int i = 0; i < requests; i++) {
+                futures.add(pool.submit(() -> simulateHttp(i)));
+            }
+            for (Future<Boolean> f : futures) {
+                if (f.get()) success.incrementAndGet();
+            }
+        }
+        System.out.println("1000 requests (50ms IO each), success " + success.get()
+            + ", took " + (System.currentTimeMillis() - t1) + " ms");
+        System.out.println("(Theoretical ≈ 50ms × 1000 / carrier count, but virtual threads don't occupy threads while blocking, so it's fast)");
+
+        // === 3. Platform threads doing the same, for comparison ===
+        System.out.println("\\n=== Platform thread comparison (fixed 200 threads) ===");
+        success.set(0);
+        long t2 = System.currentTimeMillis();
+        try (ExecutorService pool = Executors.newFixedThreadPool(200)) {
+            List<Future<Boolean>> futures = new ArrayList<>();
+            for (int i = 0; i < requests; i++) {
+                futures.add(pool.submit(() -> simulateHttp(i)));
+            }
+            for (Future<Boolean> f : futures) {
+                if (f.get()) success.incrementAndGet();
+            }
+        }
+        System.out.println("1000 requests, fixed 200 platform threads, success " + success.get()
+            + ", took " + (System.currentTimeMillis() - t2) + " ms");
+        System.out.println("(limited by thread count, concurrency is only 200)");
+
+        // === 4. The synchronized pin problem of virtual threads ===
+        System.out.println("\\n=== synchronized pinning demo ===");
+        System.out.println("(in a virtual thread, synchronized + blocking pins the carrier thread)");
+        ReentrantLock lock = new ReentrantLock();
+        AtomicInteger counter = new AtomicInteger();
+
+        // use ReentrantLock (recommended)
+        long t3 = System.currentTimeMillis();
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < 1000; i++) {
+                futures.add(pool.submit(() -> {
+                    lock.lock();
+                    try { counter.incrementAndGet(); }
+                    finally { lock.unlock(); }
+                }));
+            }
+            for (Future<?> f : futures) f.get();
+        }
+        System.out.println("With ReentrantLock, 1000 increments = " + counter.get()
+            + ", took " + (System.currentTimeMillis() - t3) + " ms");
+
+        // === 5. Thread.startVirtualThread direct use ===
+        System.out.println("\\n=== Thread.startVirtualThread ===");
+        Thread vt = Thread.startVirtualThread(() -> {
+            System.out.println("virtual thread name: " + Thread.currentThread());
+            System.out.println("is virtual: " + Thread.currentThread().isVirtual());
+            try { Thread.sleep(50); } catch (InterruptedException e) {}
+            System.out.println("virtual thread done");
+        });
+        vt.join();
+        System.out.println("virtual thread state: " + vt.getState() + " (TERMINATED)");
+
+        // === 6. Structured concurrency (comments: needs --enable-preview) ===
+        System.out.println("\\n=== Structured concurrency (idea demo) ===");
+        System.out.println("/* JDK 21 preview feature, needs --enable-preview:");
+        System.out.println("try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {");
+        System.out.println("    Subtask<String> user = scope.fork(() -> findUser());");
+        System.out.println("    Subtask<String> order = scope.fork(() -> findOrder());");
+        System.out.println("    scope.join();          // wait for all subtasks");
+        System.out.println("    scope.throwIfFailed(); // throw on any failure");
+        System.out.println("    return user.get() + \", \" + order.get();");
+        System.out.println("}");
+        System.out.println("*/");
+
+        // === 7. Simulating structured concurrency with CompletableFuture ===
+        System.out.println("\\n=== Simulating structured concurrency with existing APIs ===");
+        long t4 = System.currentTimeMillis();
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+            CompletableFuture<String> userF = CompletableFuture.supplyAsync(() -> {
+                sleep(100); return "User-Alice";
+            }, pool);
+            CompletableFuture<String> orderF = CompletableFuture.supplyAsync(() -> {
+                sleep(150); return "Order-99";
+            }, pool);
+
+            CompletableFuture<Void> all = CompletableFuture.allOf(userF, orderF);
+            try {
+                all.get(500, TimeUnit.MILLISECONDS);
+                System.out.println("Aggregated: " + userF.get() + " / " + orderF.get());
+            } catch (Exception e) {
+                System.out.println("Failed: " + e.getMessage());
+            }
+        }
+        System.out.println("Took " + (System.currentTimeMillis() - t4) + " ms (parallel max(100,150)=150ms)");
+    }
+
+    static boolean simulateHttp(int i) {
+        try {
+            Thread.sleep(50);   // simulate network IO
+            return true;
+        } catch (InterruptedException e) {
+            return false;
+        }
+    }
+
+    static void sleep(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException e) {}
+    }
+}`} />
+
+> **What to watch for**:
+> - **100k virtual threads**: created easily, each virtual thread a few KB — the same number of platform threads would OOM.
+> - **1000 HTTP requests (virtual threads)**: because blocking IO does not occupy threads, concurrency is high and time is short.
+> - **1000 HTTP requests (200 platform threads)**: limited by thread count, must queue, time is long.
+> - **`ReentrantLock` replacing `synchronized`**: recommended inside virtual threads to avoid pinning.
+> - **`Thread.currentThread().isVirtual()`**: tells whether the current thread is virtual.
+> - **Structured concurrency**: JDK 21 preview, needs `--enable-preview`. Before it stabilizes, you can simulate it with `CompletableFuture` + `newVirtualThreadPerTaskExecutor`.
+> - **try-with-resources closing `ExecutorService`**: automatically `awaitTermination` — graceful shutdown.
+
+## 8. Migration Advice: From Platform Threads to Virtual Threads
+
+### 8.1 When to Migrate
+
+- **IO-intensive servers** — benefit immediately.
+- **Batch processing with lots of blocking calls** — benefit immediately.
+- **CPU-intensive** — keep `parallelStream`/`ForkJoinPool`.
+- **Extremely short tasks (nanoseconds)** — keep a platform thread pool.
+
+### 8.2 Migration Steps
+
+1. **Check `synchronized` blocking** — replace with `ReentrantLock`.
+2. **Check large `ThreadLocal` objects** — evaluate whether `ScopedValue` or method parameters can replace them.
+3. **Check native/JNI blocking calls** — may pin.
+4. **Replace thread pools** — `Executors.newFixedThreadPool` → `Executors.newVirtualThreadPerTaskExecutor`.
+5. **Simplify async code** — `CompletableFuture` chains can be replaced by synchronous code + virtual threads.
+
+### 8.3 What Not to Do
+
+- **Do not pool virtual threads** — use `newVirtualThreadPerTaskExecutor` directly.
+- **Do not run CPU-intensive tasks on virtual threads** — no benefit.
+- **Do not assume virtual threads execute immediately** — still limited by the carrier count (CPU).
+- **Do not heavily `synchronized`+block inside virtual threads** — it pins.
+
+## 9. Chapter Summary
+
+| Concept | Key point |
+| --- | --- |
+| Platform threads | One-to-one with OS threads, several MB stack, count-limited |
+| Virtual threads | JVM-scheduled, a few KB stack, millions possible, blocking does not waste carriers |
+| `Thread.startVirtualThread` | Create and start a virtual thread |
+| `Thread.ofVirtual()` | Factory pattern for creating virtual threads |
+| `Executors.newVirtualThreadPerTaskExecutor` | An ExecutorService with one virtual thread per task |
+| Fit scenarios | IO-intensive (Web, DB, gateway, batch) |
+| Not fit | CPU-intensive, extremely short tasks |
+| `synchronized` pin | Virtual threads blocking in a sync block pin the carrier — use `ReentrantLock` |
+| ThreadLocal overhead | A million virtual threads × ThreadLocal = memory explosion — use ScopedValue |
+| Structured concurrency | `StructuredTaskScope` — parent waits for all children, child exceptions propagate, unified cancel (JDK 21 preview) |
+| Scoped Values | Immutable, scope-bounded, zero inheritance overhead — replaces ThreadLocal (JDK 21 preview) |
+| Don't pool virtual threads | Pooling is an anti-pattern, just create per task |
+
+**Mnemonics**:
+
+- **Platform threads are expensive, virtual threads are light** — millions are within reach.
+- **Virtual threads fit IO, not CPU** — pure computation gains nothing.
+- **Don't pool virtual threads** — use `newVirtualThreadPerTaskExecutor` directly.
+- **`synchronized` blocking pins** — switch to `ReentrantLock`.
+- **`ThreadLocal` memory explosion** — use `ScopedValue` or method parameters.
+- **Structured concurrency cures "subtask escape"** — parent waits for children, exceptions propagate, unified cancel.
+
+## Closing: Stage 7 Finale — From Raw Threads to Virtual Threads
+
+Stage 7 ends here. Looking back over these 12 chapters, the story of Java concurrency unfolded like this:
+
+- **Chapter 34 Concurrency Basics** — processes and threads, concurrency and parallelism, shared vs separated state, Java concurrency history.
+- **Chapter 35 Thread Basics** — three creation methods, six states, `start`/`sleep`/`join`/`interrupt`.
+- **Chapter 36 Thread Safety** — race conditions, critical sections, atomicity/visibility/ordering, immutable objects.
+- **Chapter 37 JMM** — main memory and working memory, the eight Happens-Before rules, instruction reordering, memory barriers.
+- **Chapter 38 Synchronization Mechanisms** — `synchronized`/monitor/lock upgrades, `volatile`, `ThreadLocal`, `wait`/`notify`, MESI.
+- **Chapter 39 Typical Concurrency Problems** — the four deadlock conditions, starvation and fairness, livelock, nested monitor lockout, false sharing.
+- **Chapter 40 Locks and Synchronizers** — `ReentrantLock`/`ReadWriteLock`/`StampedLock`/`Condition`/`Semaphore`/`CountDownLatch`/`CyclicBarrier`/`Phaser`/`Exchanger`.
+- **Chapter 41 Atomic Classes and CAS** — `AtomicInteger`/`LongAdder`/`AtomicStampedReference`, CAS principles, ABA, non-blocking algorithms.
+- **Chapter 42 Concurrent Collections** — `ConcurrentHashMap`/`CopyOnWriteArrayList`/`ConcurrentLinkedQueue`/`BlockingQueue`/`ConcurrentSkipListMap`.
+- **Chapter 43 Thread Pools** — `ThreadPoolExecutor`'s seven parameters, four rejection policies, `Executors` traps, `ForkJoinPool`.
+- **Chapter 44 CompletableFuture** — async callbacks, chained orchestration, exception handling, multi-task composition.
+- **Chapter 45 Virtual Threads and Structured Concurrency** — the Java 21 revolution, ScopedValue, structured concurrency.
+
+This set of capabilities, from the lowest-level memory model, through the middle layers of locks/CAS/collections, up to the upper layers of thread pools/async/virtual threads, forms the complete picture of Java handling "doing many things at once." Each layer solves the pain points of the one below and paves the way for the one above.
+
+Mastering concurrency is not just for interviews — it is the core ability to write high-performance, highly available Java applications. From web servers to big data processing, from databases to game servers, concurrency is everywhere. I hope these 12 chapters give you, when facing "doing many things at once," the theoretical confidence, the tool fluency, and the trap-avoiding clarity — that is the true rank of a concurrency engineer.
+
+Concurrency programming is over, but the Java journey continues. The next stage enters **Network Programming and NIO** — extending "threads" and "data" onto the network, opening the door to distributed and high-concurrency services. Virtual threads make concurrency simple; network programming makes concurrency "far away yet close at hand." See you in the next stage.

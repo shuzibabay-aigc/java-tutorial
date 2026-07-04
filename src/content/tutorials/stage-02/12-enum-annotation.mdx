@@ -1,0 +1,544 @@
+---
+title: "枚举与注解初识"
+chapter: 12
+stage: "第二阶段"
+stageName: "面向对象编程"
+order: 7
+description: "掌握枚举的定义与本质、枚举方法与接口实现、EnumSet/EnumMap，以及注解与元注解的使用"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "枚举", "enum", "注解", "Annotation"]
+---
+
+# 枚举与注解初识
+
+这是面向对象阶段的最后一章。在此之前，我们学了类、对象、封装、继承、多态、接口、内部类——这些都是"主菜"。而本章要讲的**枚举**（Enum）与**注解**（Annotation），是两道精致的"甜点"：体量不大，却能让代码的优雅度与安全性大幅提升。
+
+想象一家咖啡馆的菜单。杯型只有"小杯、中杯、大杯"三种——你不能点"超大超大杯"。如果用 `int` 表示杯型，`1` 是小杯、`2` 是中杯，那 `99` 是什么？编译器不阻止你传 `99`，但运行时它会崩。**枚举**就是为了解决"有限个取值"这种场景而生的——它让"杯型"成为一个真正的类型，编译器就能帮你挡住所有非法取值。
+
+而**注解**，则像是给代码贴的"便利贴"。`@Override` 告诉编译器"这是重写方法"，`@Deprecated` 提醒开发者"这个方法别用了"。注解本身不改变程序逻辑，但它为编译器、框架、工具提供了"元数据"——Spring、JUnit 等框架的魔法，几乎都建立在注解之上。
+
+## 一、枚举（enum）的定义与使用
+
+### 1.1 为什么需要枚举
+
+先看一个"前枚举时代"的痛点。表示咖啡杯型，传统做法：
+
+```java
+public class Coffee {
+    public static final int SMALL = 1;
+    public static final int MEDIUM = 2;
+    public static final int LARGE = 3;
+
+    public void setSize(int size) { ... }
+}
+
+// 调用：
+coffee.setSize(99);   // 编译通过！但 99 不是合法杯型
+```
+
+`int` 常量有几个致命问题：
+
+1. **无类型安全**：任何 `int` 都能传入，编译器不阻止 `99`。
+2. **无命名空间**：要避免命名冲突，必须加前缀 `SIZE_SMALL`。
+3. **无描述性**：打印出来是 `1`、`2`，看不出含义。
+4. **不可遍历**：无法"列出所有杯型"。
+
+枚举一揽子解决了这些问题。
+
+### 1.2 定义枚举
+
+用 `enum` 关键字定义：
+
+```java
+public enum CoffeeSize {
+    SMALL, MEDIUM, LARGE
+}
+```
+
+枚举常量全大写，逗号分隔。使用：
+
+```java
+CoffeeSize size = CoffeeSize.MEDIUM;
+System.out.println(size);          // MEDIUM（自带 toString）
+
+// 枚举是类型安全的
+// CoffeeSize s = 99;              // 编译错误！类型不匹配
+```
+
+### 1.3 枚举的常用方法
+
+每个枚举都隐式继承 `java.lang.Enum`，自带一批实用方法：
+
+| 方法 | 作用 |
+| --- | --- |
+| `name()` | 返回常量名（字符串） |
+| `ordinal()` | 返回声明顺序（从 0 开始） |
+| `values()` | 返回所有常量数组 |
+| `valueOf(String)` | 根据名字返回常量 |
+| `compareTo(E)` | 比较声明顺序 |
+
+```java
+CoffeeSize[] all = CoffeeSize.values();
+for (CoffeeSize s : all) {
+    System.out.println(s.name() + " 序号 " + s.ordinal());
+}
+
+CoffeeSize m = CoffeeSize.valueOf("MEDIUM");   // MEDIUM
+```
+
+> ⚠️ **慎用 ordinal()**：`ordinal()` 返回声明顺序，但顺序会因增删常量而变化。不要把它存到数据库或依赖它做业务判断。需要数值标识时，自定义字段（见下文）。
+
+### 1.4 switch 中使用枚举
+
+枚举与 `switch` 是天作之合：
+
+```java
+CoffeeSize size = CoffeeSize.LARGE;
+switch (size) {
+    case SMALL:
+        System.out.println("小杯 240ml");
+        break;
+    case MEDIUM:
+        System.out.println("中杯 350ml");
+        break;
+    case LARGE:
+        System.out.println("大杯 470ml");
+        break;
+}
+```
+
+`case` 直接写常量名，无需 `CoffeeSize.SMALL`——编译器会自动推断类型。
+
+## 二、枚举的本质：继承自 java.lang.Enum
+
+### 2.1 枚举是特殊的类
+
+枚举的本质是一个**final 类**，隐式继承 `java.lang.Enum`。所有枚举常量都是这个类的**静态实例**。上面的 `CoffeeSize` 等价于（伪代码）：
+
+```java
+public final class CoffeeSize extends Enum<CoffeeSize> {
+    public static final CoffeeSize SMALL = new CoffeeSize("SMALL", 0);
+    public static final CoffeeSize MEDIUM = new CoffeeSize("MEDIUM", 1);
+    public static final CoffeeSize LARGE = new CoffeeSize("LARGE", 2);
+
+    private CoffeeSize(String name, int ordinal) { super(name, ordinal); }
+    // ...
+}
+```
+
+这意味着：
+
+- 枚举**不能被继承**（final）。
+- 枚举**不能显式继承**其他类（已经继承 Enum 了），但**可以实现接口**。
+- 枚举有构造方法，但只能是 `private`（默认就是 private，写 `public` 会报错）。
+- 每个常量都是单例——`CoffeeSize.SMALL == CoffeeSize.SMALL` 永远为 `true`。
+
+### 2.2 枚举的"单例"特性
+
+因为每个枚举常量在 JVM 中只有一个实例，所以**枚举是实现单例模式的最佳方式**（Effective Java 第 3 条）：
+
+```java
+public enum Singleton {
+    INSTANCE;
+
+    public void doSomething() { ... }
+}
+
+// 使用：
+Singleton.INSTANCE.doSomething();
+```
+
+这种写法天然线程安全、防序列化攻击、防反射攻击，比手写的饿汉式/懒汉式更安全。
+
+## 三、枚举的构造方法、字段与方法
+
+### 3.1 给枚举添加字段
+
+枚举常量可以携带数据。比如给每个杯型加上毫升数和价格：
+
+```java
+public enum CoffeeSize {
+    SMALL(240, 18),
+    MEDIUM(350, 25),
+    LARGE(470, 32);
+
+    private final int ml;        // 毫升数
+    private final double price;  // 价格
+
+    // 构造方法（默认 private，不能写 public）
+    CoffeeSize(int ml, double price) {
+        this.ml = ml;
+        this.price = price;
+    }
+
+    public int getMl() { return ml; }
+    public double getPrice() { return price; }
+}
+```
+
+使用：
+
+```java
+CoffeeSize size = CoffeeSize.LARGE;
+System.out.println(size + ": " + size.getMl() + "ml, ￥" + size.getPrice());
+// LARGE: 470ml, ￥32.0
+```
+
+注意语法：常量列表 `SMALL(240, 18)` 后用括号传构造参数；常量列表末尾用分号 `;`，之后才是字段和方法。
+
+### 3.2 给枚举添加方法
+
+枚举可以有普通方法和抽象方法。**抽象方法**很有趣——每个常量要分别实现：
+
+```java
+public enum Operation {
+    PLUS("+") {
+        @Override public double apply(double a, double b) { return a + b; }
+    },
+    MINUS("-") {
+        @Override public double apply(double a, double b) { return a - b; }
+    },
+    TIMES("*") {
+        @Override public double apply(double a, double b) { return a * b; }
+    },
+    DIVIDE("/") {
+        @Override public double apply(double a, double b) { return a / b; }
+    };
+
+    private final String symbol;
+
+    Operation(String symbol) { this.symbol = symbol; }
+
+    public abstract double apply(double a, double b);
+
+    @Override
+    public String toString() { return symbol; }
+}
+```
+
+这里 `Operation` 有抽象方法 `apply`，每个常量是一个**匿名子类**，提供自己的实现。这是一种"常量特定方法"（constant-specific method）的写法。
+
+## 四、枚举实现接口
+
+枚举虽然不能继承类，但可以实现接口。这让枚举具备多态能力：
+
+```java
+public interface Describable {
+    String describe();
+}
+
+public enum CoffeeSize implements Describable {
+    SMALL, MEDIUM, LARGE;
+
+    @Override
+    public String describe() {
+        return "杯型：" + name();
+    }
+}
+
+Describable d = CoffeeSize.MEDIUM;
+System.out.println(d.describe());   // 杯型：MEDIUM
+```
+
+## 五、EnumSet 与 EnumMap
+
+因为枚举常量个数固定且有序，Java 提供了两个专门的高性能集合：`EnumSet` 和 `EnumMap`。
+
+### 5.1 EnumSet
+
+`EnumSet` 是专为枚举设计的 `Set`，内部用位向量（bit vector）实现，极其高效：
+
+```java
+import java.util.EnumSet;
+
+EnumSet<CoffeeSize> set = EnumSet.of(CoffeeSize.SMALL, CoffeeSize.LARGE);
+System.out.println(set.contains(CoffeeSize.MEDIUM));  // false
+
+EnumSet<CoffeeSize> all = EnumSet.allOf(CoffeeSize.class);     // 全部
+EnumSet<CoffeeSize> none = EnumSet.noneOf(CoffeeSize.class);   // 空
+EnumSet<CoffeeSize> range = EnumSet.range(CoffeeSize.SMALL, CoffeeSize.MEDIUM);  // 范围
+```
+
+### 5.2 EnumMap
+
+`EnumMap` 是以枚举为键的 `Map`，内部用数组实现，访问 O(1)：
+
+```java
+import java.util.EnumMap;
+
+EnumMap<CoffeeSize, Integer> stock = new EnumMap<>(CoffeeSize.class);
+stock.put(CoffeeSize.SMALL, 50);
+stock.put(CoffeeSize.MEDIUM, 30);
+stock.put(CoffeeSize.LARGE, 20);
+
+System.out.println(stock.get(CoffeeSize.MEDIUM));   // 30
+```
+
+`EnumSet` 和 `EnumMap` 比 `HashSet`/`HashMap` 更快、更省内存。当键是枚举时，应优先使用它们。
+
+## 六、注解（Annotation）初识
+
+### 6.1 什么是注解
+
+**注解**（Annotation）是给程序元素（类、方法、字段、参数等）贴的"标签"，提供元数据。注解**不影响程序逻辑本身**，但可以被编译器、工具、框架读取并利用。
+
+```java
+@Override           // 注解：告诉编译器这是重写方法
+public String toString() {
+    return "...";
+}
+```
+
+`@Override` 不会改变 `toString` 的行为，但它让编译器帮你检查"是否真的重写了父类方法"——如果方法名拼错，编译器报错。
+
+### 6.2 Java 内置注解
+
+Java 语言内置了三个常用注解：
+
+| 注解 | 作用 |
+| --- | --- |
+| `@Override` | 标记重写父类方法，编译器校验 |
+| `@Deprecated` | 标记已过时，使用会触发警告 |
+| `@SuppressWarnings` | 抑制编译器警告 |
+
+**`@Deprecated`**：
+
+```java
+@Deprecated
+public void oldMethod() { ... }   // 标记为过时
+
+// 调用时编译器会画删除线 + 警告
+```
+
+**`@SuppressWarnings`**：
+
+```java
+@SuppressWarnings("unchecked")
+List list = new ArrayList();   // 抑制"未检查转换"警告
+
+@SuppressWarnings("unused")
+int x = 10;   // 抑制"未使用变量"警告
+
+@SuppressWarnings({"unused", "rawtypes"})
+public void messy() { ... }   // 抑制多种警告
+```
+
+常见警告类型：`"unchecked"`（泛型未检查）、`"deprecation"`（使用了过时方法）、`"unused"`（未使用）、`"rawtypes"`（使用了原始类型）、`"all"`（所有）。
+
+### 6.3 注解的定义
+
+用 `@interface` 关键字定义注解：
+
+```java
+public @interface MyAnnotation {
+    String value();                    // 无默认值的属性
+    int priority() default 0;          // 有默认值
+    String[] tags() default {};        // 数组属性
+}
+```
+
+使用：
+
+```java
+@MyAnnotation(value = "test", priority = 5, tags = {"a", "b"})
+public void method() { ... }
+
+// 当只有 value 属性时，可省略名字
+@MyAnnotation("hello")
+public void another() { ... }
+```
+
+> 💡 注解的"属性"看起来像方法调用，但其实是声明。属性类型只能是：基本类型、String、枚举、Class、注解、以及它们的数组。
+
+## 七、元注解简介
+
+**元注解**（Meta-Annotation）是注解的注解——用来定义"注解本身怎么用"。`java.lang.annotation` 包提供了几个关键的元注解。
+
+### 7.1 @Target：注解能用在哪里
+
+`@Target` 指定注解可以标注的目标元素类型：
+
+```java
+@Target(ElementType.METHOD)        // 只能用于方法
+public @interface MyMethod { ... }
+
+@Target({ElementType.TYPE, ElementType.METHOD})   // 可用于类或方法
+public @interface MyAnno { ... }
+```
+
+`ElementType` 常用值：
+
+| 值 | 可标注位置 |
+| --- | --- |
+| `TYPE` | 类、接口、枚举、注解 |
+| `FIELD` | 字段（含枚举常量） |
+| `METHOD` | 方法 |
+| `PARAMETER` | 方法参数 |
+| `CONSTRUCTOR` | 构造方法 |
+| `LOCAL_VARIABLE` | 局部变量 |
+| `ANNOTATION_TYPE` | 注解类型（元注解） |
+| `PACKAGE` | 包 |
+
+### 7.2 @Retention：注解保留多久
+
+`@Retention` 决定注解在什么阶段存在：
+
+```java
+@Retention(RetentionPolicy.RUNTIME)   // 运行时保留（可被反射读取）
+public @interface MyAnno { ... }
+```
+
+`RetentionPolicy` 有三种：
+
+| 策略 | 保留阶段 | 典型用途 |
+| --- | --- | --- |
+| `SOURCE` | 仅源码，编译后丢弃 | `@Override`、`@SuppressWarnings` |
+| `CLASS` | 保留到 class 文件，运行时不可见（默认） | 字节码工具处理 |
+| `RUNTIME` | 保留到运行时，可反射读取 | Spring/JUnit 框架 |
+
+> ⚠️ 默认是 `CLASS`，但绝大多数框架注解都需要 `RUNTIME`。自定义注解时，如果想让框架在运行时读到它，**必须显式写 `@Retention(RetentionPolicy.RUNTIME)`**。
+
+### 7.3 一个自定义注解的例子
+
+<CodeRunner code={`import java.lang.annotation.*;
+
+// 自定义注解：标记需要测试的方法
+@Target(ElementType.METHOD)
+@Retention(RetentionPolicy.RUNTIME)
+@interface Test {
+    String description() default "";
+}
+
+// 一个简单的"测试运行器"
+class MyTestRunner {
+    public static void run(Class<?> testClass) throws Exception {
+        Object instance = testClass.getDeclaredConstructor().newInstance();
+        int passed = 0, failed = 0;
+
+        for (var method : testClass.getDeclaredMethods()) {
+            if (method.isAnnotationPresent(Test.class)) {   // 检查是否有 @Test
+                Test t = method.getAnnotation(Test.class);
+                System.out.println("\\n运行测试: " + method.getName()
+                    + " (" + t.description() + ")");
+                try {
+                    method.invoke(instance);
+                    passed++;
+                    System.out.println("  ✓ 通过");
+                } catch (Exception e) {
+                    failed++;
+                    System.out.println("  ✗ 失败: " + e.getCause());
+                }
+            }
+        }
+        System.out.println("\\n=== 测试结果 ===");
+        System.out.println("通过: " + passed + ", 失败: " + failed);
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        MyTestRunner.run(SampleTest.class);
+
+        System.out.println("\\n--- 枚举示例 ---");
+        demoEnum();
+    }
+
+    static void demoEnum() {
+        // 枚举遍历
+        for (CoffeeSize s : CoffeeSize.values()) {
+            System.out.println(s + ": " + s.getMl() + "ml, ￥" + s.getPrice());
+        }
+
+        // EnumMap
+        var stock = new java.util.EnumMap<CoffeeSize, Integer>(CoffeeSize.class);
+        stock.put(CoffeeSize.SMALL, 50);
+        stock.put(CoffeeSize.LARGE, 20);
+        System.out.println("\\n库存:");
+        stock.forEach((k, v) -> System.out.println("  " + k + " = " + v));
+    }
+}
+
+// 测试用例类
+class SampleTest {
+    @Test(description = "加法测试")
+    public void testAdd() {
+        if (1 + 1 != 2) throw new AssertionError("加法错了！");
+    }
+
+    @Test(description = "字符串测试")
+    public void testString() {
+        if ("hello".length() != 5) throw new AssertionError("长度不对");
+    }
+
+    @Test(description = "故意失败的测试")
+    public void testFail() {
+        throw new AssertionError("这个测试故意失败");
+    }
+
+    public void notATest() {
+        System.out.println("我没有 @Test，不会被运行");
+    }
+}
+
+// 带字段的枚举
+enum CoffeeSize {
+    SMALL(240, 18),
+    MEDIUM(350, 25),
+    LARGE(470, 32);
+
+    private final int ml;
+    private final double price;
+
+    CoffeeSize(int ml, double price) {
+        this.ml = ml;
+        this.price = price;
+    }
+
+    public int getMl() { return ml; }
+    public double getPrice() { return price; }
+}`} />
+
+这个例子展示了注解的真正威力——我们用 `@Test` 标记测试方法，然后通过**反射**（Reflection）在运行时扫描类的方法，找到带 `@Test` 的方法并运行。这正是 JUnit 测试框架的核心原理（当然 JUnit 实现要复杂得多）。
+
+## 八、本章小结
+
+### 枚举要点
+
+| 概念 | 要点 |
+| --- | --- |
+| `enum` 关键字 | 定义有限取值的类型 |
+| 继承 `Enum` | 枚举隐式 final，不能被继承 |
+| 单例特性 | 每个常量是唯一实例，可做单例模式 |
+| 字段与方法 | 可添加字段、构造方法（private）、普通/抽象方法 |
+| 实现接口 | 可实现接口，具备多态能力 |
+| `EnumSet`/`EnumMap` | 高性能枚举专用集合 |
+
+### 注解要点
+
+| 概念 | 要点 |
+| --- | --- |
+| 注解本质 | 程序的元数据，不改变逻辑 |
+| `@Override` | 标记重写，编译器校验 |
+| `@Deprecated` | 标记过时 |
+| `@SuppressWarnings` | 抑制警告 |
+| `@interface` | 定义注解 |
+| `@Target` | 元注解：限定标注位置 |
+| `@Retention` | 元注解：保留策略（SOURCE/CLASS/RUNTIME） |
+
+## 结语：面向对象阶段的尾声
+
+至此，第二阶段"面向对象编程"的七篇文章全部完成。我们走过了一段精彩旅程：
+
+- **类与对象**——学会了用"蓝图"创造"房子"。
+- **封装**——为对象建起了保护壳，让数据安全可控。
+- **继承**——让代码复用有了血脉传承。
+- **多态**——同一指令，万般响应，写出了灵活可扩展的支付系统。
+- **抽象类与接口**——掌握了"是什么"与"能做什么"的抽象工具。
+- **内部类**——窥见了类的细腻嵌套，理解了 Builder 模式与闭包。
+- **枚举与注解**——为常量赋予了类型安全，为代码贴上了智能标签。
+
+面向对象不只是一种编程范式，更是一种**思维方式**——它让我们用"对象协作"的视角理解软件，用"抽象分层"的手法管理复杂度。这种思维，将贯穿你后续所有的 Java 学习。
+
+接下来的第三阶段，我们将进入更广阔的世界——**集合框架**、**异常处理**、**泛型**、**Lambda 与 Stream**。如果说面向对象是 Java 的"骨架"，那么这些就是 Java 的"血肉"，让程序能够优雅地处理数据、应对错误、拥抱函数式编程。
+
+咖啡的故事还在继续，下一杯更香醇。

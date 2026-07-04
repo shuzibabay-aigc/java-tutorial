@@ -1,0 +1,452 @@
+---
+title: "Set"
+chapter: 20
+stage: "第四阶段"
+stageName: "集合框架"
+order: 3
+description: "解析 HashSet 基于 HashMap 的实现、TreeSet 红黑树排序、LinkedHashSet 保序机制，并实战数组去重与集合运算"
+pubDate: 2026-07-03
+tags: ["Java", "Set", "HashSet", "TreeSet", "LinkedHashSet", "红黑树", "集合运算"]
+---
+
+# Set
+
+如果说 `List` 是"来者不拒的队列"，那 `Set` 就是"会员制的俱乐部"——每位成员必须唯一，重复的请求一律拒绝。这正是 `Set` 接口的契约：**不允许重复元素**。这个看似简单的约束，背后却藏着精妙的实现：哈希表、红黑树、链表，三种数据结构撑起了 `Set` 的三大实现。
+
+这一章，我们打开 `HashSet`、`LinkedHashSet`、`TreeSet` 的"会员管理系统"，看看它们如何高效地判断"这个人来过吗"。
+
+## 一、Set 接口
+
+`Set<E>` 继承自 `Collection<E>`，没有增加新方法，只是**重新定义了契约**：
+
+```java
+public interface Set<E> extends Collection<E> {
+    // 与 Collection 完全相同的接口
+    // 但 add 拒绝重复元素，equals/hashCode 按 Set 语义定义
+}
+```
+
+`Set` 的关键约定：
+
+- **不允许重复**：`add(e)` 如果元素已存在，返回 `false` 且不修改集合。
+- **最多一个 null**（如果实现允许）：`HashSet`、`LinkedHashSet` 允许一个 `null`，`TreeSet` 不允许。
+- **equals 语义**：两个 Set 相等当且仅当包含相同元素，与顺序无关。
+
+## 二、HashSet：基于 HashMap 的"借壳上市"
+
+### 2.1 HashSet 的秘密
+
+打开 `HashSet` 源码，你会大吃一惊——它内部根本没自己实现什么，全靠 `HashMap` 撑着：
+
+```java
+public class HashSet<E> extends AbstractSet<E>
+        implements Set<E>, Cloneable, java.io.Serializable {
+    private transient HashMap<E,Object> map;
+    private static final Object PRESENT = new Object();
+
+    public HashSet() {
+        map = new HashMap<>();
+    }
+
+    public boolean add(E e) {
+        return map.put(e, PRESENT) == null;
+    }
+
+    public boolean contains(Object o) {
+        return map.containsKey(o);
+    }
+
+    public boolean remove(Object o) {
+        return map.remove(o) == PRESENT;
+    }
+}
+```
+
+看明白了吗？`HashSet` 把元素当作 `HashMap` 的 **key** 存储，而 value 是一个固定的 `Object` 占位符（`PRESENT`）——它从来不会被用到，只是为了让 `HashMap` 有个 value。
+
+这是设计上的"借壳上市"：`HashMap` 已经解决了哈希、扩容、链表/红黑树转换等复杂问题，`HashSet` 直接复用，何乐不为？这就是**组合优于重复实现**的范例。
+
+### 2.2 add 的去重原理
+
+```java
+public boolean add(E e) {
+    return map.put(e, PRESENT) == null;
+}
+```
+
+`HashMap.put` 的语义：如果 key 不存在，加入并返回 `null`；如果 key 已存在，**更新 value 并返回旧 value**。所以：
+
+- 返回 `null` → 原来没这个 key → `add` 返回 `true`（添加成功）。
+- 返回非 `null`（即 `PRESENT`）→ key 已存在 → `add` 返回 `false`（拒绝重复）。
+
+去重判断的核心是 `HashMap.containsKey`，它依赖 `hashCode` 和 `equals`——所以**自定义对象想正确放入 HashSet，必须正确重写这两个方法**。
+
+### 2.3 关键：hashCode 与 equals 的契约
+
+```java
+public class Person {
+    private String name;
+    private int age;
+    // 假设没重写 hashCode/equals
+}
+
+Set<Person> set = new HashSet<>();
+set.add(new Person("Alice", 20));
+set.add(new Person("Alice", 20));   // 居然加进去了！
+System.out.println(set.size());     // 2，不是 1
+```
+
+两个"内容相同"的 `Person` 都被加进去了——因为默认的 `hashCode`/`equals` 基于对象身份（内存地址），两个 `new` 出来的对象地址不同，被 `HashSet` 当成两个不同的人。
+
+正确做法是重写：
+
+```java
+public class Person {
+    private String name;
+    private int age;
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Person p)) return false;
+        return age == p.age && Objects.equals(name, p.name);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(name, age);
+    }
+}
+```
+
+**`hashCode` 与 `equals` 的契约**：
+
+1. **一致性**：多次调用 `hashCode` 必须返回相同值（只要对象未变）。
+2. **相等必须哈希相等**：`a.equals(b)` 为 `true`，则 `a.hashCode() == b.hashCode()` 必须成立。
+3. **哈希相等不一定相等**：`a.hashCode() == b.hashCode()`，`a.equals(b)` 不一定 `true`（哈希冲突）。
+
+违反第 2 条会导致"逻辑相等的对象"在 `HashSet` 中被当成不同对象——这就是最常见的 bug 来源。
+
+> 💡 **IDEA 自动生成**：IntelliJ IDEA 用 `Alt+Insert` → `equals() and hashCode()` 可以自动生成高质量实现，遵循 Effective Java 的最佳实践。
+
+### 2.4 性能特征
+
+`HashSet` 的核心操作都是 O(1) 平均（最坏 O(n)，哈希冲突严重时）：
+
+| 操作 | 平均 | 最坏 |
+| --- | --- | --- |
+| `add` | O(1) | O(log n)（Java 8+ 红黑树化后） |
+| `contains` | O(1) | O(log n) |
+| `remove` | O(1) | O(log n) |
+
+`HashSet` 是无序的——遍历顺序与插入顺序无关，也不保证任何顺序。不要依赖它的遍历顺序（即便偶尔看起来有规律，那也是巧合）。
+
+## 三、LinkedHashSet：保持插入顺序
+
+`LinkedHashSet` 是 `HashSet` 的"保序版"——它在内部用一条双向链表把所有元素串起来，记录插入顺序：
+
+```
+插入顺序：C → A → B
+HashSet       遍历：A, C, B（无序）
+LinkedHashSet 遍历：C, A, B（插入顺序）
+```
+
+它的实现也很巧妙——`LinkedHashSet` 内部用 `LinkedHashMap`（带链表的 HashMap）：
+
+```java
+public class LinkedHashSet<E> extends HashSet<E>
+        implements Set<E>, Cloneable, java.io.Serializable {
+    public LinkedHashSet() {
+        super(16, .75f, true);   // 调用 HashSet 的特殊构造器
+    }
+}
+
+// HashSet 的特殊构造器，让内部 map 用 LinkedHashMap
+HashSet(int initialCapacity, float loadFactor, boolean dummy) {
+    map = new LinkedHashMap<>(initialCapacity, loadFactor);
+}
+```
+
+`LinkedHashSet` 几乎不增加额外成本——多了一条链表的指针开销，但所有操作仍 O(1)。
+
+**什么时候用它？** 当你需要"去重"，但又想保留元素第一次出现的顺序时。比如爬虫去重 URL 但按发现顺序处理、按用户输入顺序去重等。
+
+## 四、TreeSet：基于红黑树的排序集合
+
+### 4.1 自动排序的集合
+
+`TreeSet` 把元素存进一棵**红黑树**（Red-Black Tree），所以遍历时元素是**有序的**（升序）。它内部基于 `TreeMap`（同样的"借壳"思路）：
+
+```java
+public class TreeSet<E> extends AbstractSet<E>
+        implements NavigableSet<E>, Cloneable, java.io.Serializable {
+    private transient NavigableMap<E,Object> m;
+    private static final Object PRESENT = new Object();
+
+    TreeSet(NavigableMap<E,Object> m) {
+        this.m = m;
+    }
+
+    public TreeSet() {
+        this(new TreeMap<>());
+    }
+}
+```
+
+红黑树是一种**自平衡二叉搜索树**——任何节点的左右子树高度差不超过 2 倍。这保证了查找、插入、删除都是 O(log n)。
+
+### 4.2 元素怎么排序
+
+`TreeSet` 需要知道元素"怎么比较大小"，有两条路：
+
+**方式一：自然排序**——元素实现 `Comparable＜T＞`：
+
+```java
+public class Student implements Comparable<Student> {
+    String name;
+    int score;
+
+    @Override
+    public int compareTo(Student o) {
+        return Integer.compare(this.score, o.score);   // 按分数升序
+    }
+}
+
+TreeSet<Student> set = new TreeSet<>();   // 自动用 compareTo
+```
+
+**方式二：定制排序**——构造时传 `Comparator`：
+
+```java
+TreeSet<Student> set = new TreeSet<>(
+    Comparator.comparingInt(Student::getScore).reversed()   // 降序
+);
+```
+
+如果元素既不实现 `Comparable`，也不传 `Comparator`，`add` 时会抛 `ClassCastException`。
+
+### 4.3 NavigableSet 的导航方法
+
+`TreeSet` 实现了 `NavigableSet`，提供了一系列"导航"方法：
+
+```java
+TreeSet<Integer> set = new TreeSet<>(List.of(1, 3, 5, 7, 9));
+
+set.ceiling(4);    // 5   （>=4 的最小元素）
+set.floor(4);      // 3   （<=4 的最大元素）
+set.higher(5);     // 7   （>5 的最小元素）
+set.lower(5);      // 3   （<5 的最大元素）
+set.first();       // 1   （最小元素）
+set.last();        // 9   （最大元素）
+set.pollFirst();   // 1，并删除（弹出最小）
+set.pollLast();    // 9，并删除（弹出最大）
+set.subSet(3, 7);  // [3, 5]（3 <= x < 7，左闭右开）
+set.headSet(5);    // [1, 3]（<5）
+set.tailSet(5);    // [5, 7, 9]（>=5）
+set.descendingSet();// [9, 7, 5, 3, 1]（逆序视图）
+```
+
+这些方法在做"找最接近的""范围查询""Top K"时极其方便——比如排行榜、价格区间查询。
+
+### 4.4 性能与限制
+
+| 操作 | TreeSet |
+| --- | --- |
+| `add` / `contains` / `remove` | O(log n) |
+| `first` / `last` / `ceiling` / `floor` | O(log n) |
+| 范围查询 `subSet` | O(log n + k)（k 是结果数） |
+| 遍历 | 升序 O(n) |
+
+`TreeSet` 比 HashSet 慢（O(log n) vs O(1)），但提供了排序和导航能力。**只有需要排序时才用**，否则用 HashSet。
+
+注意：`TreeSet` 不允许 `null`（因为没法比较 null），添加 null 会抛 `NullPointerException`。
+
+## 五、实战：数组去重
+
+最常见的 `Set` 用途就是去重：
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. 最简单的去重
+        List<Integer> nums = List.of(1, 2, 2, 3, 3, 3, 4, 5, 5);
+        Set<Integer> unique = new HashSet<>(nums);
+        System.out.println("去重（无序）: " + unique);
+
+        // 2. 保序去重
+        Set<Integer> linked = new LinkedHashSet<>(nums);
+        System.out.println("去重（保序）: " + linked);
+
+        // 3. 排序去重
+        Set<Integer> tree = new TreeSet<>(nums);
+        System.out.println("去重（排序）: " + tree);
+
+        // 4. 字符串去重，统计每个字符出现次数
+        String text = "hello world";
+        Map<Character, Integer> freq = new LinkedHashMap<>();
+        for (char c : text.toCharArray()) {
+            freq.merge(c, 1, Integer::sum);
+        }
+        System.out.println("\\n字符频率: " + freq);
+
+        // 5. 用 Set 检查重复元素
+        System.out.println("\\n--- 检查重复 ---");
+        List<String> words = List.of("apple", "banana", "apple", "cherry", "banana");
+        Set<String> seen = new HashSet<>();
+        Set<String> dupes = new HashSet<>();
+        for (String w : words) {
+            if (!seen.add(w)) {     // add 返回 false 说明重复
+                dupes.add(w);
+            }
+        }
+        System.out.println("重复的词: " + dupes);
+
+        // 6. 自定义对象去重
+        System.out.println("\\n--- 自定义对象去重 ---");
+        Set<Person> people = new HashSet<>();
+        people.add(new Person("Alice", 20));
+        people.add(new Person("Bob", 22));
+        people.add(new Person("Alice", 20));   // 重复，会被拒绝
+        System.out.println("人数: " + people.size());   // 2
+        for (Person p : people) {
+            System.out.println("  " + p);
+        }
+    }
+}
+
+class Person {
+    private String name;
+    private int age;
+
+    Person(String name, int age) {
+        this.name = name;
+        this.age = age;
+    }
+
+    String getName() { return name; }
+    int getAge() { return age; }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Person p)) return false;
+        return age == p.age && Objects.equals(name, p.name);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(name, age);
+    }
+
+    @Override
+    public String toString() {
+        return name + "(" + age + ")";
+    }
+}`} />
+
+注意自定义对象 `Person` 必须正确重写 `equals` 和 `hashCode`——这是 `HashSet` 正确工作的前提。
+
+## 六、实战：集合运算
+
+`Set` 天然支持集合运算——并集、交集、差集。Java 提供了几种方式：
+
+<CodeRunner code={`import java.util.*;
+import java.util.stream.*;
+
+public class Main {
+    public static void main(String[] args) {
+        Set<Integer> a = new HashSet<>(Set.of(1, 2, 3, 4, 5));
+        Set<Integer> b = new HashSet<>(Set.of(4, 5, 6, 7, 8));
+
+        // 1. 并集（a ∪ b）
+        Set<Integer> union = new HashSet<>(a);
+        union.addAll(b);
+        System.out.println("并集: " + union);
+
+        // 2. 交集（a ∩ b）
+        Set<Integer> intersection = new HashSet<>(a);
+        intersection.retainAll(b);
+        System.out.println("交集: " + intersection);
+
+        // 3. 差集（a - b）
+        Set<Integer> difference = new HashSet<>(a);
+        difference.removeAll(b);
+        System.out.println("差集 (a-b): " + difference);
+
+        // 4. 对称差（a △ b = (a ∪ b) - (a ∩ b)）
+        Set<Integer> symDiff = new HashSet<>(union);
+        symDiff.removeAll(intersection);
+        System.out.println("对称差: " + symDiff);
+
+        // 5. 用 Stream 做更灵活的运算
+        System.out.println("\\n--- Stream 版本 ---");
+        Set<Integer> streamUnion = Stream.concat(a.stream(), b.stream())
+            .collect(Collectors.toSet());
+        System.out.println("Stream 并集: " + streamUnion);
+
+        // 6. 子集判断
+        Set<Integer> c = new HashSet<>(Set.of(2, 3));
+        System.out.println("\\n{2,3} 是 {1..5} 的子集? " + a.containsAll(c));
+        System.out.println("{2,3} 是 {4..8} 的子集? " + b.containsAll(c));
+
+        // 7. 不可变集合运算（不修改原集合）
+        System.out.println("\\n--- 实用：找两份名单的公共好友 ---");
+        Set<String> aliceFriends = Set.of("Bob", "Charlie", "David", "Eve");
+        Set<String> bobFriends = Set.of("Alice", "Charlie", "David", "Frank");
+        Set<String> common = new HashSet<>(aliceFriends);
+        common.retainAll(bobFriends);
+        System.out.println("Alice 和 Bob 的共同好友: " + common);
+    }
+}`} />
+
+**关键 API**：
+
+- `addAll(c)`：并集。
+- `retainAll(c)`：交集。
+- `removeAll(c)`：差集。
+- `containsAll(c)`：子集判断。
+
+注意这些方法会**修改原集合**——所以通常先 `new HashSet＜＞(原集合)` 复制一份再操作，避免污染原数据。
+
+## 七、三大 Set 对比
+
+| 特性 | HashSet | LinkedHashSet | TreeSet |
+| --- | --- | --- | --- |
+| 底层 | HashMap | LinkedHashMap | TreeMap（红黑树） |
+| 顺序 | 无序 | 插入顺序 | 升序（自然或定制） |
+| null | 允许 1 个 | 允许 1 个 | 不允许 |
+| add/contains/remove | O(1) | O(1) | O(log n) |
+| 范围查询 | 不支持 | 不支持 | 支持（subSet/headSet/tailSet） |
+| 导航方法 | 无 | 无 | ceiling/floor/higher/lower |
+| 内存开销 | 小 | 中（多链表指针） | 大（树节点） |
+
+**选型建议**：
+
+- 默认用 `HashSet`——最快。
+- 需要保持插入顺序 → `LinkedHashSet`。
+- 需要排序或范围查询 → `TreeSet`。
+
+## 八、本章小结
+
+| 主题 | 要点 |
+| --- | --- |
+| Set 契约 | 不允许重复元素 |
+| HashSet | 基于 HashMap，value 是固定 PRESENT |
+| 去重原理 | `HashMap.put` 返回 null 表示 key 不存在 |
+| 自定义对象 | 必须重写 `equals` 和 `hashCode` |
+| equals 契约 | 相等必须哈希相等，反之不必 |
+| LinkedHashSet | HashSet + 链表，保持插入顺序 |
+| TreeSet | 基于红黑树，元素有序 |
+| TreeSet 排序 | 实现 Comparable 或传 Comparator |
+| NavigableSet | ceiling/floor/higher/lower/subSet |
+| 集合运算 | addAll/retainAll/removeAll/containsAll |
+| 选型 | 默认 HashSet，保序 LinkedHashSet，排序 TreeSet |
+
+## 结语：去重的艺术
+
+`Set` 看似简单——"不能重复"四个字而已——但它背后的实现展现了 Java 集合框架的设计智慧：`HashSet` 借 `HashMap` 之壳，用 O(1) 哈希搞定去重；`LinkedHashSet` 加条链表保序；`TreeSet` 用红黑树提供排序与导航。
+
+记住核心一点：**自定义对象要放进 HashSet/LinkedHashSet，必须重写 equals 和 hashCode**——这是无数 bug 的根源，也是面试的高频考点。理解了它，你才算真正"会用"Set。
+
+下一章，我们深入 `Map`——`HashSet` 的"母体"，集合框架中最有故事的一支。

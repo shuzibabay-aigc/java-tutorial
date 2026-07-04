@@ -1,0 +1,452 @@
+---
+title: "Reflection"
+chapter: 56
+stage: "Stage 10"
+stageName: "Reflection and Annotations: Advanced"
+order: 1
+description: "Master the three ways to obtain the Class object, reflectively operate on fields/methods/constructors, use setAccessible to bypass access control, reflection and generics, the Array class for array operations, the performance cost of reflection, and build a simple ORM framework"
+pubDate: 2026-07-03
+tags: ["Java", "反射", "Reflection", "Class", "ORM"]
+---
+
+# Reflection
+
+Welcome to Stage 10 — **Reflection and Annotations: Advanced**. In the previous nine stages, every line of code we wrote was "visible": which method to call, which field to access — all settled at compile time. But Java has another power, an "X-ray" ability — **Reflection**: at runtime, dynamically "see through" a class's structure, and even invoke its private members.
+
+Reflection is like handing you a pair of X-ray glasses. Put them on, and a class's fields, methods, constructors, and annotations have nowhere to hide. Spring's IoC, MyBatis Mappers, JUnit's test discovery, Lombok's bytecode enhancement — every one of these household-name frameworks leans on reflection for half its weight. This chapter takes reflection from principle to practice in one sweep.
+
+## 1. Why Reflection
+
+Let's answer the "why" first. Suppose you're writing a framework: users annotate their classes, and your framework automatically creates instances and invokes methods — but when you write the framework, you have no idea what classes users will write. This "type known only at runtime" scenario can't be handled by compile-time-hardcoded code; you need the ability to "probe" at runtime.
+
+Typical scenarios:
+
+- **Framework IoC containers** — Spring scans classes annotated with `@Component` and reflectively instantiates Beans for injection.
+- **Serialization / deserialization** — Jackson turns JSON strings into objects via reflection.
+- **ORM** — MyBatis turns database rows into entities via reflection.
+- **Test frameworks** — JUnit scans methods annotated with `@Test` and reflectively invokes them.
+- **Dynamic proxies** — AOP is built on reflection + dynamic proxies.
+
+In one sentence: **compile-time-hardcoded code is an "application"; runtime-dynamic code is a "framework."** Reflection is the soul of frameworks.
+
+## 2. The Class Object: Where All Reflection Begins
+
+After each class is loaded into the JVM, there is a single unique `Class` object — the class's "ID card," recording all its metadata. Every reflection operation starts by obtaining the `Class` object.
+
+### 2.1 Three Ways to Obtain It
+
+```java
+// Method 1: ClassName.class (type known at compile time)
+Class<String> c1 = String.class;
+
+// Method 2: instance.getClass() (obtained from an instance at runtime)
+String s = "hello";
+Class<?> c2 = s.getClass();
+
+// Method 3: Class.forName(fully qualified name) (obtained from a string at runtime, most flexible)
+Class<?> c3 = Class.forName("java.lang.String");
+
+System.out.println(c1 == c2);   // true
+System.out.println(c2 == c3);   // true  — the Class object of a class is globally unique
+```
+
+The `Class` object obtained by all three methods is **the same one** (the JVM guarantees each class has a globally unique Class). The difference lies in "when the type is known":
+
+- `.class` — known at compile time, highest performance (compiler optimized).
+- `getClass()` — obtained from an instance at runtime, common in generic utility methods.
+- `Class.forName()` — obtained from a string at runtime, most flexible but requires exception handling (the class may not exist).
+
+`Class.forName()` is the framework favorite — class names live in config files and are loaded dynamically at runtime. JDBC loading its driver is exactly this line: `Class.forName("com.mysql.cj.jdbc.Driver")`.
+
+### 2.2 Common Methods of Class
+
+```java
+Class<?> c = String.class;
+c.getName();              // java.lang.String  fully qualified name
+c.getSimpleName();        // String            simple name
+c.getSuperclass();        // class java.lang.Object  superclass
+c.getInterfaces();        // array of interfaces
+c.getFields();            // all public fields (including inherited)
+c.getDeclaredFields();    // all fields declared in this class (including private)
+c.getMethods();           // all public methods (including inherited)
+c.getDeclaredMethods();   // all methods declared in this class
+c.getConstructors();      // all public constructors
+c.getDeclaredConstructors(); // all constructors declared in this class
+c.getModifiers();         // modifiers (bitmask of public/static/final)
+c.isInterface();          // is it an interface
+c.isArray();              // is it an array
+c.isRecord();             // Java 14+ is it a record
+```
+
+Note the difference between `getXxx` and `getDeclaredXxx` — one of the easiest reflection pitfalls:
+
+- `getXxx()` — returns only **public** members, **including inherited ones**.
+- `getDeclaredXxx()` — returns **all members declared in this class** (including private), **excluding inherited ones**.
+
+## 3. Reflectively Operating on Fields
+
+Once you have the `Class`, you can reflectively read and write an object's fields.
+
+```java
+public class User {
+    private String name = "默认";
+    public int age;
+}
+
+Class<?> c = User.class;
+User u = new User();
+
+// 1. Obtain a field (getDeclaredField can reach private)
+Field nameField = c.getDeclaredField("name");
+Field ageField = c.getField("age");   // public, getField works directly
+
+// 2. Break through private access control
+nameField.setAccessible(true);
+
+// 3. Read the field
+Object nameVal = nameField.get(u);   // equivalent to u.name
+System.out.println(nameVal);         // 默认
+
+// 4. Write the field
+nameField.set(u, "张三");             // equivalent to u.name = "张三"
+ageField.set(u, 18);
+System.out.println(u.name + " " + u.age);   // 张三 18
+```
+
+`setAccessible(true)` is reflection's "wall-breaker" — it bypasses Java's access checks. That's why reflection can invoke `private` members. Java 9+'s module system restricts this somewhat, but `--add-opens` still opens it up.
+
+## 4. Reflectively Operating on Methods
+
+```java
+public class Calculator {
+    public int add(int a, int b) { return a + b; }
+    private String secret() { return "私密"; }
+}
+
+Calculator calc = new Calculator();
+Class<?> c = calc.getClass();
+
+// 1. Obtain a method (method name + parameter types)
+Method add = c.getMethod("add", int.class, int.class);
+Method secret = c.getDeclaredMethod("secret");
+
+// 2. Invoke
+Object result = add.invoke(calc, 3, 5);   // equivalent to calc.add(3, 5)
+System.out.println(result);                // 8
+
+// 3. Invoke a private method
+secret.setAccessible(true);
+Object s = secret.invoke(calc);
+System.out.println(s);                      // 私密
+```
+
+`invoke(Object obj, Object... args)` — the first argument is the receiver (the instance); pass `null` for static methods; the rest are arguments. `getMethod` requires **method name + parameter types** — because Java has overloading, a name alone isn't enough.
+
+## 5. Reflectively Operating on Constructors
+
+```java
+public class Person {
+    private String name;
+    private int age;
+    public Person() { this.name = "无参"; }
+    public Person(String name, int age) { this.name = name; this.age = age; }
+}
+
+Class<?> c = Person.class;
+
+// 1. Obtain a constructor (by parameter types)
+Constructor<?> noArg = c.getDeclaredConstructor();
+Constructor<?> twoArg = c.getDeclaredConstructor(String.class, int.class);
+
+// 2. Create an object reflectively
+Object p1 = noArg.newInstance();                 // no-arg constructor
+Object p2 = twoArg.newInstance("李四", 20);       // parameterized constructor
+
+System.out.println(((Person) p1).name);          // 无参
+System.out.println(((Person) p2).name);          // 李四
+```
+
+Java 9+ recommends `Constructor.newInstance()` over the deprecated `Class.newInstance()` — the latter throws the constructor's exceptions directly, breaking the convention that "constructor exceptions should be wrapped."
+
+## 6. setAccessible: Breaking Through Access Control
+
+`setAccessible(true)` is one of reflection's most powerful capabilities. It bypasses `private`/`protected`/package-private access restrictions, letting you directly read and write private fields, invoke private methods, and call private constructors.
+
+```java
+public class SecretBox {
+    private String secret = "我的小秘密";
+    private SecretBox() {}   // private constructor, can't be instantiated from outside
+}
+
+Class<?> c = SecretBox.class;
+Constructor<?> ctor = c.getDeclaredConstructor();
+ctor.setAccessible(true);                   // break through private constructor
+SecretBox box = (SecretBox) ctor.newInstance();
+
+Field f = c.getDeclaredField("secret");
+f.setAccessible(true);                       // break through private field
+System.out.println(f.get(box));              // 我的小秘密
+f.set(box, "已经被偷看");
+System.out.println(f.get(box));              // 已经被偷看
+```
+
+This is why reflection can both "create" (instantiate objects via private constructors) and "spy" (read private fields). Framework ORM and serialization rely on it.
+
+**Note**: Java 9+'s module system restricts `setAccessible` — calling `setAccessible(true)` on `private` members of JDK internal modules (such as `java.base`) throws `InaccessibleObjectException`. To open it up, add `--add-opens java.base/java.lang=ALL-UNNAMED` to the startup arguments.
+
+## 7. Reflection and Generics
+
+Generics are **erased** at runtime, but reflection can read generic info back from the `Signature` attribute (covered in the previous bytecode chapter).
+
+```java
+public class Box<T> {
+    private T value;
+    public void set(T value) { this.value = value; }
+    public T get() { return value; }
+    public List<String> names() { return new ArrayList<>(); }
+}
+
+Class<?> c = Box.class;
+
+// Generic type of a field (ParameterizedType)
+Field valueField = c.getDeclaredField("value");
+System.out.println(valueField.getGenericType());   // T  (TypeVariable)
+
+// Generic parameter type of a method
+Method setMethod = c.getMethod("set", Object.class);   // erased to Object
+System.out.println(setMethod.getGenericParameterTypes()[0]);  // T
+
+// Generic return type of a method
+Method namesMethod = c.getMethod("names");
+System.out.println(namesMethod.getGenericReturnType());  // java.util.List<String>
+System.out.println(namesMethod.getReturnType());         // interface java.util.List (erased)
+```
+
+`getGenericType()` returns `java.lang.reflect.Type` — it may be a `Class` (plain type), `ParameterizedType` (`List＜String＞`), `TypeVariable＜T＞` (`T`), `GenericArrayType` (`T[]`), and so on. This is the key that lets Jackson and Gson deserialize generic collections.
+
+## 8. The Array Class: Reflective Array Operations
+
+`java.lang.reflect.Array` provides reflective array operations — creating arrays, reading/writing elements, getting length. It's often used in generic methods that don't know the array type.
+
+```java
+// 1. Create an array reflectively
+Object intArr = Array.newInstance(int.class, 5);   // new int[5]
+Array.set(intArr, 0, 42);
+Array.set(intArr, 1, 99);
+System.out.println(Array.get(intArr, 0));   // 42
+System.out.println(Array.getLength(intArr)); // 5
+
+// 2. Handle the generic "might be an array, might not" scenario
+Object maybeArr = new String[]{"a", "b", "c"};
+if (maybeArr.getClass().isArray()) {
+    int len = Array.getLength(maybeArr);
+    for (int i = 0; i < len; i++) {
+        System.out.println(Array.get(maybeArr, i));
+    }
+}
+```
+
+Why do we need it? When writing a generic `toString(Object obj)`, `obj` might be `int[]`, `String[]`, `Object[]` — you can't just cast to `Object[]` (primitive arrays won't work); only `Array` can handle them uniformly.
+
+## 9. The Performance Cost of Reflection
+
+Reflection is no free lunch. Its overhead is far greater than a direct call:
+
+- **Method lookup** — `getMethod` walks the method table, matching by name + signature.
+- **Argument boxing** — `invoke` takes `Object...` arguments, so primitives get boxed.
+- **Access checks** — every `invoke` performs an access check (skippable after `setAccessible(true)`).
+- **Hard for JIT to optimize** — reflective calls are opaque to the JIT, hard to inline.
+
+In practice, reflective calls are **10–100x slower** than direct calls (depending on the scenario and JIT state). The code below demonstrates this gap.
+
+**Optimization strategies**:
+
+1. **Cache `Method`/`Field` objects** — look up once, reuse forever.
+2. **`setAccessible(true)`** — skips access checks, saves 20%–50%.
+3. **`MethodHandle`** (Java 7+) — faster than reflection, close to direct calls.
+4. **`VarHandle`** (Java 9+) — a lightweight option for field access.
+5. **Code generation** — ASM/ByteBuddy generate bytecode, the most thorough fix (Spring 5+'s reflection optimization).
+
+## 10. Hands-On: A Simple ORM Framework
+
+Theory is enough — let's get practical. We'll use annotations + reflection to build a simple ORM that maps objects to `Map`s, similar to MyBatis's result mapping.
+
+<CodeRunner code={`import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+
+// 自定义注解: 标记表名和列名
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@interface Table {
+    String value();
+}
+
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+@interface Column {
+    String value();
+}
+
+@Table("t_user")
+class User {
+    @Column("user_id")
+    private int id;
+    @Column("user_name")
+    private String name;
+    @Column("user_age")
+    private int age;
+    // 未标注解的字段不会被映射
+    private String ignoreMe = "我不映射";
+
+    public User() {}
+    public User(int id, String name, int age) {
+        this.id = id; this.name = name; this.age = age;
+    }
+    @Override
+    public String toString() {
+        return "User{id=" + id + ", name='" + name + "', age=" + age + "}";
+    }
+}
+
+// 简易 ORM 核心
+class MiniOrm {
+    // 对象 -> Map (模拟把对象存到数据库行)
+    public static Map<String, Object> toRow(Object obj) throws Exception {
+        Map<String, Object> row = new LinkedHashMap<>();
+        Class<?> c = obj.getClass();
+        for (Field f : c.getDeclaredFields()) {
+            Column col = f.getAnnotation(Column.class);
+            if (col == null) continue;   // 没标注解, 跳过
+            f.setAccessible(true);
+            row.put(col.value(), f.get(obj));
+        }
+        return row;
+    }
+
+    // Map -> 对象 (模拟从数据库行读出对象)
+    public static <T> T fromRow(Map<String, Object> row, Class<T> clazz) throws Exception {
+        Constructor<T> ctor = clazz.getDeclaredConstructor();
+        ctor.setAccessible(true);
+        T obj = ctor.newInstance();
+        for (Field f : clazz.getDeclaredFields()) {
+            Column col = f.getAnnotation(Column.class);
+            if (col == null) continue;
+            Object val = row.get(col.value());
+            if (val != null) {
+                f.setAccessible(true);
+                f.set(obj, val);
+            }
+        }
+        return obj;
+    }
+
+    // 读表名
+    public static String tableName(Class<?> clazz) {
+        Table t = clazz.getAnnotation(Table.class);
+        return t != null ? t.value() : clazz.getSimpleName().toLowerCase();
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 简易 ORM 框架演示 ===\\n");
+
+        User u = new User(1, "张三", 20);
+        System.out.println("原始对象: " + u);
+
+        // 1. 对象 -> Map (模拟存库)
+        Map<String, Object> row = MiniOrm.toRow(u);
+        System.out.println("表名: " + MiniOrm.tableName(User.class));
+        System.out.println("映射成行 (Map): " + row);
+
+        // 2. Map -> 对象 (模拟读库)
+        User u2 = MiniOrm.fromRow(row, User.class);
+        System.out.println("从行还原对象: " + u2);
+
+        // 3. 性能对比: 反射 vs 直接调用
+        System.out.println("\\n=== 性能对比: 反射 vs 直接调用 ===");
+        int times = 10_000_000;
+        Calculator calc = new Calculator();
+
+        // 直接调用
+        long t1 = System.nanoTime();
+        long sum1 = 0;
+        for (int i = 0; i < times; i++) sum1 += calc.add(i, i);
+        long directNs = System.nanoTime() - t1;
+
+        // 反射调用 (缓存 Method)
+        Method add = Calculator.class.getMethod("add", int.class, int.class);
+        add.setAccessible(true);
+        long t2 = System.nanoTime();
+        long sum2 = 0;
+        for (int i = 0; i < times; i++) {
+            sum2 += (int) add.invoke(calc, i, i);
+        }
+        long reflectNs = System.nanoTime() - t2;
+
+        System.out.printf("直接调用: %d 次, 耗时 %d ms, sum=%d%n",
+            times, directNs / 1_000_000, sum1);
+        System.out.printf("反射调用: %d 次, 耗时 %d ms, sum=%d%n",
+            times, reflectNs / 1_000_000, sum2);
+        System.out.printf("反射慢约 %.1f 倍%n", reflectNs / (double) directNs);
+
+        // 4. 反射读泛型信息
+        System.out.println("\\n=== 反射读泛型信息 ===");
+        Method namesMethod = Box.class.getMethod("names");
+        System.out.println("Box.names() 擦除返回类型: " + namesMethod.getReturnType());
+        System.out.println("Box.names() 泛型返回类型: " + namesMethod.getGenericReturnType());
+
+        // 5. Array 反射操作
+        System.out.println("\\n=== Array 反射操作 ===");
+        Object arr = Array.newInstance(String.class, 3);
+        Array.set(arr, 0, "a");
+        Array.set(arr, 1, "b");
+        Array.set(arr, 2, "c");
+        System.out.println("数组类型: " + arr.getClass().getSimpleName()
+            + ", 长度: " + Array.getLength(arr));
+        for (int i = 0; i < Array.getLength(arr); i++) {
+            System.out.println("  [" + i + "] = " + Array.get(arr, i));
+        }
+    }
+
+    static class Calculator { public int add(int a, int b) { return a + b; } }
+    static class Box<T> {
+        private T value;
+        public List<String> names() { return new ArrayList<>(); }
+    }
+}`} />
+
+> **Key observations**:
+> - **The object is mapped to `Map{user_id=1, user_name=张三, user_age=20}`** — fields annotated with `@Column` are read reflectively, while the unannotated `ignoreMe` is skipped.
+> - **A `User` object is restored from the `Map`** — reflection calls the no-arg constructor and reflectively writes fields; this is the core logic of an ORM.
+> - **Reflection is tens of times slower than direct calls** — the gap is obvious across ten million iterations, which is why frameworks always cache `Method` objects.
+> - **`getGenericReturnType()` reads back `List＜String＞`** — even after erasure, reflection still recovers generics from the `Signature` attribute.
+
+## 11. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| `Class` object | One globally unique per class, the starting point of reflection |
+| Three ways to obtain | `.class` / `getClass()` / `Class.forName()` |
+| `getField` vs `getDeclaredField` | Former: public + inherited; latter: this class only, including private |
+| `setAccessible(true)` | Bypasses access checks, can invoke private |
+| `Method.invoke` | Reflective method call; pass `null` for static methods |
+| `Constructor.newInstance` | Reflective object creation, recommended in Java 9+ |
+| `getGenericType` | Reads generic signature (Signature attribute) |
+| `Array.newInstance` | Reflectively create/operate on arrays |
+| Performance cost | 10–100x slower than direct calls; cache Method |
+
+**Mnemonic**:
+
+- **Three ways to get a Class** — `.class`, `getClass()`, `forName()`; three usages, three timings.
+- **Declared looks at this class** — `getDeclaredXxx` only looks at this class but reaches private; `getXxx` looks at public including inherited.
+- **`setAccessible(true)` breaks the wall** — access control instantly disabled.
+- **Reflection is slow in lookup and boxing** — caching `Method` and `setAccessible(true)` are the two optimization axes.
+- **Generics erased but Signature kept** — `getGenericType` reads back `List＜String＞`.
+
+## Closing: Reflection Is the Soul of Frameworks
+
+This chapter walked reflection from principle to practice. Reflection is Java's "introspection" — a program examining its own structure at runtime. It's slow, it's unsafe, it breaks encapsulation — but it's **flexible**, flexible enough to hold up the entire Spring ecosystem.
+
+The next chapter builds on reflection to look at another piece of Java "magic" — **dynamic proxies**: at runtime, conjuring up a proxy class that implements a given interface, letting you hook method calls without touching the original code. AOP is built on exactly this.

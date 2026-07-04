@@ -1,0 +1,439 @@
+---
+title: "Polymorphism"
+chapter: 9
+stage: "Stage 2"
+stageName: "Object-Oriented Programming"
+order: 4
+description: "Understand the essence of polymorphism, upcasting/downcasting, instanceof pattern matching, dynamic binding, and apply the Strategy pattern and a payment system in practice"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "多态", "instanceof", "策略模式"]
+---
+
+# Polymorphism
+
+Imagine a coffee shop manager telling the staff "serve a cup!". If it's a barista, they will make a latte; if it's a bartender, they will mix a cocktail; if it's a tea master, they will brew a pot of Longjing tea. The same instruction, different people, different ways of executing it — this is **polymorphism** (Polymorphism) in real life.
+
+In Java, polymorphism is the deepest and most powerful of the three pillars of OOP. It makes code flexible and extensible — to add a new kind of "staff", you don't need to change the manager's instruction; just add a new subclass. In this chapter we will dive deep into the principles and applications of polymorphism, and finish with a payment system as a hands-on exercise.
+
+## 1. The Definition and Significance of Polymorphism
+
+### 1.1 What Is Polymorphism
+
+**Polymorphism** means that the same interface or method call exhibits different behavior depending on the object's type. It has three forms:
+
+1. **Compile-time polymorphism**: method overloading (Overload). The compiler decides which method to call based on the parameter types.
+2. **Runtime polymorphism**: method overriding (Override) + upcasting. At runtime, the **actual type** of the object decides which version is executed.
+3. **Generic polymorphism**: parameterized types (covered in later chapters).
+
+This chapter focuses on **runtime polymorphism**, the most common and most valuable form.
+
+### 1.2 The Three Prerequisites of Polymorphism
+
+For polymorphism to occur, all three must hold:
+
+1. **Inheritance**: a subclass inherits from a parent class (or implements an interface).
+2. **Overriding**: the subclass overrides a method of the parent.
+3. **A parent reference pointing to a child object**: `Parent variable = new Subclass();` (upcasting).
+
+```java
+Animal a = new Dog();   // 父类引用指向子类对象
+a.speak();              // 调用的是 Dog 的 speak，不是 Animal 的
+```
+
+### 1.3 The Significance of Polymorphism
+
+The greatest value of polymorphism is **decoupling** and **extensibility**. Consider a comparison:
+
+**Without polymorphism**:
+
+```java
+void feed(Dog d) { d.eat(); }
+void feed(Cat c) { c.eat(); }
+void feed(Pig p) { p.eat(); }
+// 每新增一种动物，就要加一个方法
+```
+
+**With polymorphism**:
+
+```java
+void feed(Animal a) {     // 接收所有 Animal 子类
+    a.eat();              // 自动调用对应子类的 eat
+}
+// 新增 Tiger？无需改 feed 方法，只要 Tiger extends Animal
+```
+
+Polymorphism lets us **program to an abstraction** — the caller doesn't care about the concrete type, only "what it can do". This is exactly the Open-Closed Principle (open for extension, closed for modification).
+
+## 2. Upcasting: Subclass Becomes Parent
+
+### 2.1 Automatic Conversion
+
+Assigning a subclass object to a parent reference is called **upcasting**, and it happens **automatically**:
+
+```java
+Animal a = new Dog();       // 向上转型，自动
+Coffee c = new Latte();     // 拿铁是咖啡，自动转型
+Object o = "hello";         // 任何对象都是 Object，自动转型
+```
+
+> The "is-a" relationship is the logical basis for upcasting — a latte "is a" coffee, a dog "is an" animal, so the cast is safe.
+
+### 2.2 What Can Be Called After Upcasting
+
+**Important rule**: After upcasting, you can only call methods **declared** in the parent class; you cannot call methods **unique** to the subclass.
+
+```java
+class Animal {
+    public void eat() { System.out.println("吃"); }
+}
+
+class Dog extends Animal {
+    @Override
+    public void eat() { System.out.println("狗吃骨头"); }
+    public void bark() { System.out.println("汪汪"); }   // Dog 独有
+}
+
+Animal a = new Dog();
+a.eat();     // ✅ 输出"狗吃骨头"（多态，调用子类版本）
+// a.bark(); // ❌ 编译错误！父类引用看不到子类独有方法
+```
+
+Why? Because the compiler only looks at the **reference type** (Animal), not the **actual object type** (Dog). The compiler checks "does Animal have a bark method?" — no, so it errors. Which `eat` actually runs at runtime is a matter of dynamic binding.
+
+### 2.3 The Field Trap in Polymorphism
+
+**Fields do not participate in polymorphism** — field access follows the **reference type**, not the object type:
+
+```java
+class Parent { int x = 1; }
+class Child extends Parent { int x = 2; }
+
+Parent p = new Child();
+System.out.println(p.x);   // 1（看引用类型 Parent，不是 2）
+```
+
+This is because fields are **statically bound** — determined at compile time. Only methods are dynamically bound. This is also why it's not recommended for parent and child classes to share field names.
+
+## 3. Downcasting: Parent Becomes Subclass
+
+### 3.1 Forced Conversion
+
+Casting a parent reference back to a subclass type is called **downcasting**, and requires an **explicit cast**:
+
+```java
+Animal a = new Dog();
+Dog d = (Dog) a;        // 向下转型，强制
+d.bark();               // 现在可以调用 Dog 独有方法
+```
+
+### 3.2 The Trap of Failed Casts
+
+Downcasting is risky — if the actual object is not the target type, a `ClassCastException` is thrown:
+
+```java
+Animal a = new Cat();
+Dog d = (Dog) a;        // 运行时异常！Cat 不能转成 Dog
+```
+
+This is like shoving a cat into a dog cage — it simply isn't a dog. To avoid this exception, check with `instanceof` before casting.
+
+## 4. instanceof: Guardian of Safe Casting
+
+### 4.1 Basic Usage
+
+The `instanceof` operator tests whether an object is of a certain type (or its subtype):
+
+```java
+Animal a = new Dog();
+if (a instanceof Dog) {
+    Dog d = (Dog) a;
+    d.bark();
+}
+```
+
+Only cast when `a instanceof Dog` returns `true` — safe and sound.
+
+### 4.2 Java 16+ Pattern Matching
+
+As of Java 16, `instanceof` supports **pattern matching**, doing the test and the cast in one step:
+
+```java
+// 传统写法：判断 + 强转
+if (a instanceof Dog) {
+    Dog d = (Dog) a;
+    d.bark();
+}
+
+// Java 16+ 模式匹配：判断的同时绑定变量
+if (a instanceof Dog d) {
+    d.bark();    // d 已自动声明并转型
+}
+```
+
+The variable `d` is scoped to the body of the `if`. This style is more concise and avoids repeating the type name.
+
+> ⚠️ Note: Pattern matching for `instanceof` was a preview feature in Java 14-15 and became official in Java 16. This tutorial targets JDK 21, so you can use it directly. On older JDKs, use the traditional form.
+
+### 4.3 instanceof Caveats
+
+- `null instanceof AnyType` is always `false`, so there's no need to null-check first.
+- `instanceof` considers inheritance: `new Dog() instanceof Animal` is `true`.
+- Don't abuse `instanceof` + casts — if your code is littered with `if (obj instanceof X) {...}`, that usually signals a design problem and polymorphism should be used instead.
+
+## 5. The Principle of Dynamic Binding: The Underlying Magic of Polymorphism
+
+### 5.1 Static Binding vs Dynamic Binding
+
+- **Static binding**: which method to call is determined at compile time. `private`, `static`, `final` methods and field accesses are all statically bound.
+- **Dynamic binding**: which method to call is determined at runtime based on the object's actual type. **Overridden instance methods** go through dynamic binding.
+
+```java
+Animal a = new Dog();
+a.eat();   // 编译时：检查 Animal 有 eat()。运行时：调用 Dog.eat()
+```
+
+### 5.2 The Virtual Method Table (vtable)
+
+The JVM maintains a **virtual method table** (vtable) for each class, recording the actual entry points of all methods that can be overridden. When a method is called, the JVM looks up the vtable of the object's actual type to determine which method to invoke.
+
+```
+Animal's vtable:
+  eat → Animal.eat
+
+Dog's vtable (inherits from Animal, overrides eat):
+  eat → Dog.eat    ← after override, points to its own implementation
+
+Cat's vtable:
+  eat → Cat.eat
+
+When a.eat() is called:
+  1. Look at a's actual object type (Dog)
+  2. Look up Dog's vtable
+  3. Find eat → Dog.eat
+  4. Call Dog.eat()
+```
+
+This is why "the subclass's version is actually executed at call time" — the vtable is filled in based on the actual type when the object is created.
+
+### 5.3 Why static/private/final Don't Participate in Polymorphism
+
+- **static methods**: belong to the class, do not depend on objects, so there's nothing "dynamic" about them.
+- **private methods**: invisible to subclasses, cannot be overridden (writing a same-named method is not an override).
+- **final methods**: explicitly forbid overriding, so the compiler can inline-optimize them.
+
+All three are **statically bound** — the call target is fixed at compile time.
+
+## 6. A First Look at the Strategy Pattern
+
+The **Strategy Pattern** is a classic application of polymorphism: encapsulate a set of algorithms as independent strategy objects, and let the caller switch strategies as needed.
+
+### 6.1 Scenario
+
+Suppose a coffee shop has three discount strategies: no discount, 10% off, and "20 off every 100". With `if-else`:
+
+```java
+double calc(double price, String type) {
+    if ("none".equals(type)) return price;
+    else if ("nine".equals(type)) return price * 0.9;
+    else if ("minus".equals(type)) return price >= 100 ? price - 20 : price;
+    // 新增策略就要改这里，违反开闭原则
+}
+```
+
+With the Strategy pattern:
+
+```java
+interface DiscountStrategy {
+    double apply(double price);
+}
+
+class NoDiscount implements DiscountStrategy {
+    public double apply(double price) { return price; }
+}
+
+class NineDiscount implements DiscountStrategy {
+    public double apply(double price) { return price * 0.9; }
+}
+
+class MinusDiscount implements DiscountStrategy {
+    public double apply(double price) {
+        return price >= 100 ? price - 20 : price;
+    }
+}
+```
+
+The caller:
+
+```java
+double calc(double price, DiscountStrategy strategy) {
+    return strategy.apply(price);   // 多态：不同策略不同行为
+}
+```
+
+Adding a new strategy? Just write a new class implementing `DiscountStrategy` — **the caller doesn't change a line**. This is the power of the Strategy pattern.
+
+## 7. Hands-On: Designing a Payment System with Polymorphism
+
+Let's bring all our polymorphism knowledge together and design a system that supports multiple payment methods.
+
+### 7.1 Design
+
+- **Parent/interface**: `PaymentMethod`, defining `pay(double amount)`.
+- **Subclasses**: `WeChatPay`, `AliPay`, `CreditCardPay`, each implementing its own payment logic.
+- **Caller**: `PaymentProcessor`, accepting any payment method without caring about the concrete implementation.
+
+### 7.2 Complete Implementation
+
+<CodeRunner code={`public class Main {
+    // 支付方式接口
+    interface PaymentMethod {
+        boolean pay(double amount);
+        String getName();
+    }
+
+    // 微信支付
+    static class WeChatPay implements PaymentMethod {
+        private double balance;
+
+        public WeChatPay(double balance) {
+            this.balance = balance;
+        }
+
+        @Override
+        public boolean pay(double amount) {
+            if (balance >= amount) {
+                balance -= amount;
+                System.out.println("✅ 微信支付成功：扣款 " + amount + " 元，余额 " + balance);
+                return true;
+            }
+            System.out.println("❌ 微信支付失败：余额不足");
+            return false;
+        }
+
+        @Override
+        public String getName() { return "微信支付"; }
+    }
+
+    // 支付宝
+    static class AliPay implements PaymentMethod {
+        private double balance;
+
+        public AliPay(double balance) {
+            this.balance = balance;
+        }
+
+        @Override
+        public boolean pay(double amount) {
+            // 支付宝：满 100 减 5
+            double actual = amount >= 100 ? amount - 5 : amount;
+            if (balance >= actual) {
+                balance -= actual;
+                System.out.println("✅ 支付宝支付成功：原价 " + amount + "，优惠后扣款 " + actual + " 元");
+                return true;
+            }
+            System.out.println("❌ 支付宝支付失败：余额不足");
+            return false;
+        }
+
+        @Override
+        public String getName() { return "支付宝"; }
+    }
+
+    // 信用卡
+    static class CreditCardPay implements PaymentMethod {
+        private double creditLimit;
+
+        public CreditCardPay(double creditLimit) {
+            this.creditLimit = creditLimit;
+        }
+
+        @Override
+        public boolean pay(double amount) {
+            if (creditLimit >= amount) {
+                creditLimit -= amount;
+                System.out.println("✅ 信用卡支付成功：扣款 " + amount + " 元，可用额度 " + creditLimit);
+                return true;
+            }
+            System.out.println("❌ 信用卡支付失败：额度不足");
+            return false;
+        }
+
+        @Override
+        public String getName() { return "信用卡"; }
+    }
+
+    // 支付处理器：面向接口编程，不关心具体支付方式
+    static class PaymentProcessor {
+        public void processPayment(double amount, PaymentMethod method) {
+            System.out.println("\\n--- 使用 " + method.getName() + " 支付 " + amount + " 元 ---");
+            boolean success = method.pay(amount);   // 多态调用
+            if (success) {
+                System.out.println("支付流程完成");
+            } else {
+                System.out.println("支付流程终止");
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        PaymentProcessor processor = new PaymentProcessor();
+
+        PaymentMethod wechat = new WeChatPay(500);
+        PaymentMethod alipay = new AliPay(200);
+        PaymentMethod card = new CreditCardPay(1000);
+
+        // 同一个方法，不同支付方式表现不同——多态
+        processor.processPayment(80, wechat);
+        processor.processPayment(120, alipay);
+        processor.processPayment(1500, card);    // 额度不足
+
+        // 向上转型 + instanceof 模式匹配演示
+        System.out.println("\\n=== 转型演示 ===");
+        Object obj = alipay;
+        if (obj instanceof PaymentMethod pm) {     // Java 16+ 模式匹配
+            System.out.println("obj 是支付方式：" + pm.getName());
+        }
+    }
+}`} />
+
+### 7.3 How Polymorphism Shows Up Here
+
+- The `processPayment` method takes the `PaymentMethod` interface and **doesn't care** whether it's WeChat, Alipay, or a credit card — anything that implements this interface can be passed in.
+- When `method.pay(amount)` is called, **at runtime** the corresponding `pay` implementation is invoked based on the actual object type — this is dynamic binding.
+- Want to add "Apple Pay"? Just write `class ApplePay implements PaymentMethod`; `PaymentProcessor` doesn't need to change at all. **The system is open for extension and closed for modification**.
+
+### 7.4 The Design Value of Polymorphism
+
+What would this payment system look like without polymorphism?
+
+```java
+void processPayment(double amount, String type) {
+    if ("wechat".equals(type)) { ... }
+    else if ("alipay".equals(type)) { ... }
+    else if ("card".equals(type)) { ... }
+    else if ("apple".equals(type)) { ... }   // 新增要改这里
+    // 每次新增支付方式都要修改这个方法，违反开闭原则
+}
+```
+
+Polymorphism lets us separate "what changes" (concrete payment methods) from "what stays the same" (the payment flow) — this is exactly the **Dependency Inversion Principle**: high-level modules (PaymentProcessor) do not depend on low-level modules (concrete payment classes); both depend on an abstraction (the PaymentMethod interface).
+
+## 8. Chapter Summary
+
+| Concept | Key Point |
+| --- | --- |
+| Polymorphism | Same interface, different implementations; compile time looks at reference type, runtime looks at object type |
+| Upcasting | Subclass → parent, automatic; can only call methods declared in the parent |
+| Downcasting | Parent → subclass, explicit cast; may throw ClassCastException |
+| `instanceof` | Check before a safe cast; Java 16+ supports pattern matching `obj instanceof X x` |
+| Dynamic binding | Overridden methods are dispatched by actual type at runtime |
+| Virtual method table | A table of method entry points maintained by the JVM, enabling dynamic binding |
+| Strategy pattern | Encapsulate algorithms as objects and switch strategies through polymorphism |
+
+## Conclusion
+
+Polymorphism is the "soul" of object-oriented programming. It gives code resilience — adding a new type requires no changes to the caller, and adding new behavior requires no rewriting of existing logic. Polymorphism moves a program from "hardcoded branches" to "collaboration between objects", and from "procedural thinking" to "abstract thinking".
+
+But to truly unleash the power of polymorphism, we need stronger abstraction tools — **interfaces** and **abstract classes**. They are the "stage" of polymorphism: defining the contract of "what can be done" while leaving "how to do it" to the implementation classes. The next chapter dives into the world of abstract classes and interfaces, covering `default` methods, `@FunctionalInterface`, and other modern Java essentials, and teaches you to choose the right abstraction tool through the "is-a vs can-do" dialectic.
+
+The world of abstraction awaits your exploration.

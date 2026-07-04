@@ -1,0 +1,508 @@
+---
+title: "Inheritance"
+chapter: 8
+stage: "Stage 2"
+stageName: "Object-Oriented Programming"
+order: 3
+description: "Master extends, super, method overriding, the final keyword, the Object class, and the difference between == and equals"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "继承", "final", "Object", "equals"]
+---
+
+# Inheritance
+
+A coffee shop serves latte, cappuccino, mocha, macchiato... their recipes differ, but they all share a common foundation — **espresso**. If you wrote a recipe from scratch for every coffee, the duplicated content would drive you crazy: every one needs grinding, every one needs extraction, every one needs...
+
+**Inheritance** is OOP's weapon for solving the "reuse" problem. It lets us define a "parent class" that describes what is shared, and then let "child classes" inherit the parent and extend what is unique. A subclass automatically has the parent's fields and methods, and can build on top of them.
+
+In this chapter we will learn about `extends`, `super`, method overriding, the `final` keyword, and the "ancestor" of all Java classes — the `Object` class. Finally, we will clarify a classic interview question: what exactly is the difference between `==` and `equals`?
+
+## 1. The extends Keyword: A Lineage Continued
+
+### 1.1 Basic Syntax
+
+Declare a subclass with the `extends` keyword:
+
+```java
+class Subclass extends Superclass { ... }
+```
+
+A subclass is also called a derived class; a superclass is also called a base class.
+
+Let's use coffee as an example: define a `Coffee` parent class containing fields and methods common to all coffees; then let `Latte` inherit from it.
+
+```java
+// 父类：咖啡
+public class Coffee {
+    String name;
+    int size;
+
+    public Coffee(String name, int size) {
+        this.name = name;
+        this.size = size;
+    }
+
+    public void brew() {
+        System.out.println("冲泡一杯 " + size + "ml 的" + name);
+    }
+}
+
+// 子类：拿铁（继承 Coffee）
+public class Latte extends Coffee {
+    int milkML;   // 拿铁特有的字段：牛奶量
+
+    public Latte(int size, int milkML) {
+        super("拿铁", size);   // 调用父类构造方法
+        this.milkML = milkML;
+    }
+
+    public void showRecipe() {
+        System.out.println(name + "：浓缩咖啡 " + (size - milkML) + "ml + 牛奶 " + milkML + "ml");
+    }
+}
+```
+
+`Latte` automatically gains `Coffee`'s `name` and `size` fields and `brew()` method, and adds its own `milkML` field and `showRecipe()` method. This is the power of inheritance — **a subclass does not need to re-write the parent's code**.
+
+### 1.2 Rules of Inheritance
+
+- Java supports **single inheritance**: a class can `extends` only one direct parent (unlike C++, which supports multiple inheritance).
+- The ultimate parent of all classes is `java.lang.Object`. If you don't write `extends`, the class implicitly inherits from `Object`.
+- A subclass cannot inherit the parent's `private` members (they exist, but cannot be accessed directly).
+- A subclass cannot inherit the parent's **constructors** (constructor names are bound to the class name, so they cannot be inherited).
+- A class marked `final` cannot be inherited (such as `String` and `Integer`).
+
+## 2. The Subclass Construction Process: Parent First, Then Child
+
+### 2.1 super() Must Be the First Statement
+
+The first thing a subclass constructor must do is call the parent's constructor. This is done via `super(...)`:
+
+```java
+public Latte(int size, int milkML) {
+    super("拿铁", size);   // 必须是第一条语句！
+    this.milkML = milkML;
+}
+```
+
+> ⚠️ If a subclass constructor does not explicitly call `super(...)`, the compiler **automatically inserts** a no-arg `super()`. If the parent has no no-arg constructor at that point, compilation fails.
+
+### 2.2 Why super() Must Be Called First
+
+The reasoning is plain: **a subclass extends the parent, so the parent's part must be initialized first**. Just like building a house — you must lay the foundation (the parent) before building the upper floors (the subclass). If the parent's fields haven't been initialized, subclass methods reading them would see garbage default values.
+
+The order of constructor calls:
+
+```
+new Latte(350, 100)
+  ↓
+Calls Latte constructor
+  ↓
+First line super("拿铁", 350) → calls Coffee constructor
+  ↓
+Coffee constructor runs (initializes name, size)
+  ↓
+Returns to Latte constructor to continue (initializes milkML)
+```
+
+If the parent itself has a parent, the chain is traced all the way up to `Object`'s constructor, and then executed top-down.
+
+## 3. The super Keyword: Bridge to the Parent
+
+`super` has three uses:
+
+### 3.1 Calling the Parent's Constructor
+
+`super(args)` — already demonstrated above; must be the first statement of a subclass constructor.
+
+### 3.2 Calling the Parent's Methods
+
+`super.methodName(...)` — used when the subclass has overridden a parent method but still wants to call the parent's version:
+
+```java
+public class Latte extends Coffee {
+    @Override
+    public void brew() {
+        super.brew();          // 先调用父类的 brew
+        System.out.println("加入 " + milkML + "ml 牛奶，完成拿铁");
+    }
+}
+```
+
+### 3.3 Accessing the Parent's Fields
+
+`super.fieldName` — used when the subclass hides a same-named field in the parent (uncommon and not recommended as a design).
+
+```java
+class Parent { int x = 1; }
+class Child extends Parent {
+    int x = 2;   // 隐藏了父类的 x
+    void show() {
+        System.out.println(x);        // 2（子类的 x）
+        System.out.println(super.x);  // 1（父类的 x）
+    }
+}
+```
+
+## 4. Method Overriding: The Student Surpasses the Master
+
+### 4.1 What Is Overriding
+
+When a subclass is "unsatisfied" with one of the parent's methods and wants to provide its own implementation, it can **override** (Override) that method. After overriding, calling that method on a subclass object executes the subclass's version.
+
+```java
+class Animal {
+    public void speak() {
+        System.out.println("动物发出声音");
+    }
+}
+
+class Dog extends Animal {
+    @Override   // 重写注解
+    public void speak() {
+        System.out.println("汪汪！");
+    }
+}
+
+class Cat extends Animal {
+    @Override
+    public void speak() {
+        System.out.println("喵喵！");
+    }
+}
+```
+
+When calling:
+
+```java
+Animal a = new Dog();
+a.speak();   // 输出"汪汪！"——这就是多态的雏形
+```
+
+### 4.2 The Rules of Overriding ("Two Same, Two Smaller, One Larger")
+
+- **Same method name**: identical to the parent's method name.
+- **Same parameter list**: number, type, and order of parameters all match.
+- **Same or smaller return type**: the subclass's return type can be a subtype of the parent's return type (covariant return).
+- **Same or wider access**: the subclass cannot be more restrictive than the parent (parent `public`, child cannot be `protected`).
+- **Same or smaller exceptions**: the checked exceptions thrown by the subclass cannot be more numerous or broader than the parent's.
+
+> ⚠️ **Overriding vs Overloading**:
+> - Overriding (Override): between parent and child classes, method signature is **exactly the same**, runtime polymorphism.
+> - Overloading (Overload): within the same class, same method name but **different parameter list**, compile-time polymorphism.
+> - Mnemonic: Override is "overwriting the old version", Overload is "loading multiple versions".
+
+### 4.3 The @Override Annotation
+
+`@Override` is an **annotation** that tells the compiler "this method overrides one from the parent". If you misspell the method name or mismatch the parameters, the compiler immediately errors. **It is strongly recommended to always add `@Override` when overriding**, to avoid silly mistakes.
+
+For example, if you mistype `speak` as `speark`, without `@Override` the compiler assumes it's a new method and the bug is hard to spot; with `@Override` it errors immediately.
+
+### 4.4 Cases That Cannot Be Overridden
+
+- `private` methods: the subclass cannot see them, so there's no overriding to speak of (writing a same-named method is a new method, not an override).
+- `static` methods: class methods, do not participate in dynamic binding. A subclass writing a same-named static method is called **hiding**, not overriding.
+- `final` methods: marked `final`, overriding is forbidden.
+
+## 5. The final Keyword: A Promise of Immutability
+
+`final` is a "sealing" modifier with three meanings depending on what it modifies.
+
+### 5.1 final Class: Cannot Be Inherited
+
+```java
+public final class String { ... }   // String 是 final 类
+```
+
+`String` is marked `final`, meaning **no class can inherit from it**. This is for security and performance reasons — if someone could extend `String` and alter its behavior, it might break string immutability and lead to security holes (such as SQL injection or classloader issues).
+
+Other common final classes: `Integer`, `Math`, `Void`, and all wrapper classes.
+
+### 5.2 final Method: Cannot Be Overridden
+
+```java
+public class Account {
+    public final void audit() {   // 子类不能重写 audit
+        // 关键业务逻辑，不允许子类篡改
+    }
+}
+```
+
+A `final` method ensures that critical logic cannot be rewritten by subclasses, and is often used for security-sensitive or core algorithm methods.
+
+### 5.3 final Variable: Cannot Be Reassigned
+
+```java
+final int MAX_SIZE = 100;   // 常量，只能赋值一次
+MAX_SIZE = 200;             // 编译错误！
+```
+
+Note three cases:
+
+- **Primitive types**: the value is immutable.
+- **Reference types**: the reference is immutable (cannot point to a new object), but **the object's contents can change**:
+
+```java
+final StringBuilder sb = new StringBuilder("a");
+sb.append("b");              // ✅ 可以修改对象内容
+sb = new StringBuilder("c"); // ❌ 不能重新指向新对象
+```
+
+- **Local variables**: method parameters can also be marked `final`, which is common in lambda expressions and anonymous inner classes (they can only capture effectively final variables).
+
+> 💡 **static final constants**: `public static final double PI = 3.14159;` is the standard way to declare a constant. Constant names are all uppercase, with words separated by underscores.
+
+## 6. The Object Class: Ancestor of All Classes
+
+### 6.1 The Root of All Classes
+
+In Java, **every class directly or indirectly inherits from `java.lang.Object`**. Even if you don't write `extends`, the compiler automatically adds "extends Object". This means every class has the methods that `Object` provides.
+
+`Object` provides several key methods that every Java programmer should know:
+
+| Method | Purpose |
+| --- | --- |
+| `toString()` | Returns a string representation of the object |
+| `equals(Object obj)` | Determines whether two objects are "equal" |
+| `hashCode()` | Returns a hash code (used in conjunction with equals) |
+| `getClass()` | Returns runtime class information |
+| `clone()` | Shallow copy (requires implementing Cloneable) |
+| `wait()` / `notify()` / `notifyAll()` | Thread synchronization (multithreading chapter) |
+
+### 6.2 toString()
+
+The default implementation returns `ClassName@hashCodeInHex`, such as `Dog@1b6d3586`. This output is nearly useless, so **it is strongly recommended that every class override `toString()`**:
+
+```java
+@Override
+public String toString() {
+    return "Dog{name='" + name + "', age=" + age + "}";
+}
+```
+
+After overriding, `System.out.println(dog)` automatically calls `dog.toString()` and prints friendly information. IDEs can also auto-generate `toString()`.
+
+> 💡 `System.out.println(obj)` internally calls `String.valueOf(obj)`, and `String.valueOf` calls `obj.toString()` when `obj` is non-null. So println-ing an object essentially calls its toString.
+
+### 6.3 equals() and hashCode()
+
+`Object`'s default `equals` is just `==` — comparing whether two references point to the same object. But often we want "content equality" to count as equal — for example, two `Dog`s with the same name and age should be considered "equal" dogs. In that case you need to override `equals`:
+
+```java
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;             // 同一对象
+    if (o == null || getClass() != o.getClass()) return false;  // null 或类型不同
+    Dog dog = (Dog) o;                       // 向下转型
+    return age == dog.age && Objects.equals(name, dog.name);
+}
+
+@Override
+public int hashCode() {
+    return Objects.hash(name, age);
+}
+```
+
+> ⚠️ **The equals and hashCode contract**: if two objects' `equals` returns `true`, their `hashCode` must be the same; the reverse is not required. When you override `equals`, you **must also override `hashCode`**, otherwise hash-based containers like `HashMap` and `HashSet` will have bugs. IDEs can generate both methods with one click.
+
+## 7. == vs equals: A Classic Interview Question
+
+This is a "must-ask" Java interview question, and one of the most common pitfalls for newcomers.
+
+### 7.1 The Essence of ==
+
+`==` compares **values on the stack**:
+
+- **Primitive types**: compares the values themselves. `int a = 10; int b = 10; a == b` is `true`.
+- **Reference types**: compares references (addresses). Two objects, even with identical contents, return `false` from `==` as long as they are not the same object.
+
+### 7.2 The Essence of equals
+
+`equals` is a method of `Object`, and its **default behavior is the same as `==`** (comparing addresses). But many classes (such as `String` and `Integer`) override it to make it a "content comparison".
+
+```java
+String s1 = new String("hello");
+String s2 = new String("hello");
+
+System.out.println(s1 == s2);        // false（两个不同的对象）
+System.out.println(s1.equals(s2));   // true（内容相同）
+```
+
+### 7.3 The Classic Trap: The String Constant Pool
+
+```java
+String a = "hello";
+String b = "hello";
+String c = new String("hello");
+
+System.out.println(a == b);          // true（常量池复用，同一引用）
+System.out.println(a == c);          // false（new 创建了新对象）
+System.out.println(a.equals(c));     // true（内容相同）
+```
+
+The literal `"hello"` goes into the **string constant pool**, and identical literals reuse the same object. But `new String("hello")` always creates a new object on the heap. So **always use `equals` to compare string contents**, never `==`.
+
+### 7.4 A Picture Is Worth a Thousand Words
+
+| Comparison | `==` | `equals` (default) | `equals` (overridden, e.g. String) |
+| --- | --- | --- | --- |
+| Primitive types | Compares values | — | — |
+| Reference types | Compares addresses | Compares addresses | Compares contents |
+
+### 7.5 Complete Example
+
+<CodeRunner code={`public class Main {
+    static class Dog {
+        String name;
+        int age;
+
+        public Dog(String name, int age) {
+            this.name = name;
+            this.age = age;
+        }
+
+        @Override
+        public String toString() {
+            return "Dog{name='" + name + "', age=" + age + "}";
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            Dog dog = (Dog) o;
+            return age == dog.age && (name == null ? dog.name == null : name.equals(dog.name));
+        }
+
+        @Override
+        public int hashCode() {
+            int result = name == null ? 0 : name.hashCode();
+            result = 31 * result + age;
+            return result;
+        }
+    }
+
+    public static void main(String[] args) {
+        Dog d1 = new Dog("旺财", 3);
+        Dog d2 = new Dog("旺财", 3);
+        Dog d3 = d1;
+
+        System.out.println("=== == 比较 ===");
+        System.out.println("d1 == d2: " + (d1 == d2));   // false（不同对象）
+        System.out.println("d1 == d3: " + (d1 == d3));   // true（同一对象）
+
+        System.out.println("\\n=== equals 比较 ===");
+        System.out.println("d1.equals(d2): " + d1.equals(d2));  // true（内容相同）
+
+        System.out.println("\\n=== toString ===");
+        System.out.println(d1);   // 自动调用 toString
+
+        System.out.println("\\n=== 字符串陷阱 ===");
+        String s1 = "hello";
+        String s2 = "hello";
+        String s3 = new String("hello");
+        System.out.println("s1 == s2: " + (s1 == s2));        // true（常量池）
+        System.out.println("s1 == s3: " + (s1 == s3));        // false（new）
+        System.out.println("s1.equals(s3): " + s1.equals(s3));// true（内容）
+    }
+}`} />
+
+## 8. A Full Inheritance Walkthrough
+
+Tying this chapter together, let's look at a complete coffee inheritance hierarchy:
+
+<CodeRunner code={`public class Main {
+    // 父类
+    static class Coffee {
+        protected String name;
+        protected int size;
+
+        public Coffee(String name, int size) {
+            this.name = name;
+            this.size = size;
+            System.out.println("  [Coffee 构造] name=" + name + ", size=" + size);
+        }
+
+        public void brew() {
+            System.out.println("冲泡 " + size + "ml 的" + name);
+        }
+
+        @Override
+        public String toString() {
+            return name + "(" + size + "ml)";
+        }
+    }
+
+    // 子类：拿铁
+    static class Latte extends Coffee {
+        private int milkML;
+
+        public Latte(int size, int milkML) {
+            super("拿铁", size);     // 调用父类构造
+            this.milkML = milkML;
+            System.out.println("  [Latte 构造] milkML=" + milkML);
+        }
+
+        @Override   // 重写 brew
+        public void brew() {
+            super.brew();            // 先调用父类版本
+            System.out.println("加入 " + milkML + "ml 牛奶");
+        }
+    }
+
+    // 子类：美式（不可再被继承，因为 final）
+    static final class Americano extends Coffee {
+        private int waterML;
+
+        public Americano(int size, int waterML) {
+            super("美式", size);
+            this.waterML = waterML;
+            System.out.println("  [Americano 构造] waterML=" + waterML);
+        }
+
+        @Override
+        public void brew() {
+            super.brew();
+            System.out.println("加入 " + waterML + "ml 热水");
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println("--- 创建拿铁 ---");
+        Latte latte = new Latte(350, 100);
+        latte.brew();
+        System.out.println(latte);   // 调用继承自父类的 toString
+
+        System.out.println("\\n--- 创建美式 ---");
+        Americano ame = new Americano(400, 300);
+        ame.brew();
+
+        System.out.println("\\n--- final 常量 ---");
+        final int MAX_CUP = 10;
+        System.out.println("今日限售：" + MAX_CUP + " 杯");
+    }
+}`} />
+
+Notice the output: **the parent's constructor runs first, the subclass's constructor runs after** — this is exactly "parent first, then child" in action.
+
+## 9. Chapter Summary
+
+| Concept | Key Point |
+| --- | --- |
+| `extends` | Single inheritance; the subclass gains the parent's non-private members |
+| `super(...)` | Calls the parent's constructor; must be the first statement of a subclass constructor |
+| `super.method` | Calls a parent method that was overridden |
+| Method overriding | Between parent and child, same method signature, runtime polymorphism |
+| `@Override` | Override annotation; strongly recommended to write explicitly |
+| `final` class | Cannot be inherited (e.g. String) |
+| `final` method | Cannot be overridden |
+| `final` variable | Can only be assigned once (reference immutable, object contents can change) |
+| `Object` | The root of all classes; provides toString/equals/hashCode etc. |
+| `==` | Primitives compare values; references compare addresses |
+| `equals` | Default compares addresses; after overriding, compares contents |
+
+## Conclusion
+
+Inheritance lets us stand on the shoulders of giants — a subclass reuses the parent's code and extends its own features. But inheritance is a double-edged sword: too-deep hierarchies make code hard to maintain, and tightly coupled parent-child classes mean one change can ripple far. That's why the industry often says "**favor composition over inheritance**" — if a problem can be solved by "holding an object", don't use an "inheritance relationship".
+
+However, the true power of inheritance lies not in "reuse", but in "polymorphism". When a parent reference points to a child object and the same method call can exhibit myriad behaviors, the elegance of OOP truly shines. The next chapter unveils polymorphism — the most fascinating and profound of the three pillars of OOP.

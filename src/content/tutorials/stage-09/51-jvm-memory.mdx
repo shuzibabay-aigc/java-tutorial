@@ -1,0 +1,508 @@
+---
+title: "JVM 内存模型"
+chapter: 51
+stage: "第九阶段"
+stageName: "JVM 深度"
+order: 1
+description: "深入 JVM 运行时数据区、堆内存分代（Eden/Survivor/Old）、方法区与元空间、虚拟机栈与栈帧、本地方法栈、程序计数器、直接内存 NIO"
+pubDate: 2026-07-03
+tags: ["Java", "JVM", "内存模型", "堆", "元空间", "栈帧", "直接内存"]
+---
+
+# JVM 内存模型
+
+从这一章开始，我们进入 **第九阶段：JVM 深度**。前面八个阶段讲的都是"用 Java 写程序"——语法、API、并发、IO。这一阶段我们钻进 JVM 内部，看 Java 程序"跑起来"时到底在内存里发生了什么。这是 Java 工程师的"内功"——会写 Java 的人很多，懂 JVM 的少；懂 JVM 才能真正调性能、查问题、面试硬气。
+
+我们从最基础的 **JVM 内存模型** 开始——它定义了 JVM 在运行 Java 程序时，内存被分成哪些区域，每个区域存什么。这是后面所有章节（GC、类加载、调优）的基础。
+
+## 一、运行时数据区：JVM 规范的"五区"
+
+**Java 虚拟机规范（JVM Specification）** 定义了 JVM 运行时的内存布局，叫**运行时数据区（Runtime Data Areas）**。规范定义了五个区域：
+
+| 区域 | 线程私有? | 存什么 | OOM 风险 |
+| --- | --- | --- | --- |
+| 程序计数器（PC Register） | 是 | 当前线程执行的字节码行号 | 不会 OOM |
+| 虚拟机栈（VM Stack） | 是 | 方法调用的栈帧 | 可能 StackOverflowError/OOM |
+| 本地方法栈（Native Method Stack） | 是 | native 方法的栈帧 | 可能 StackOverflowError/OOM |
+| 堆（Heap） | 否 | 对象实例、数组 | 主要 OOM 来源 |
+| 方法区（Method Area） | 否 | 类元数据、常量池、静态变量 | 可能 OOM（元空间溢出） |
+
+外加一个不算"规范定义"但实际存在的——**直接内存（Direct Memory）**，被 NIO 使用。
+
+我们一个一个看。
+
+## 二、程序计数器（PC Register）
+
+### 2.1 是什么
+
+**程序计数器（Program Counter Register，PC）** 是一块**很小的内存区域**，记录**当前线程正在执行的字节码指令地址**。
+
+类比：人读书用书签记录"读到哪一行"——PC 就是线程的"书签"。
+
+### 2.2 特点
+
+- **线程私有**——每个线程一个 PC，互不干扰。
+- **不会 OOM**——太小，规范明确规定 PC 不会有 OOM。
+- **如果执行 native 方法，PC 是 undefined**——native 方法不是字节码，没有"行号"概念。
+
+### 2.3 为什么必须线程私有
+
+多线程切换时，CPU 把当前线程挂起、跑别的线程，过会儿再切回来——切回来时怎么知道从哪继续？靠 PC。如果 PC 是共享的，线程 A 切回来会跑到线程 B 的代码——逻辑全乱了。线程私有 PC 是多线程"轮转"的基础。
+
+## 三、虚拟机栈（VM Stack）与栈帧
+
+### 3.1 虚拟机栈是什么
+
+**虚拟机栈（VM Stack）** 是**线程私有**的，描述**Java 方法调用**的内存模型。每个方法被调用时，会创建一个**栈帧（Stack Frame）** 压入栈；方法返回时，栈帧弹出。
+
+```
+线程 A 的虚拟机栈:
+┌─────────────────┐
+│ main 的栈帧      │  ← 栈底
+├─────────────────┤
+│ methodA 的栈帧   │
+├─────────────────┤
+│ methodB 的栈帧   │  ← 栈顶 (当前执行)
+└─────────────────┘
+```
+
+### 3.2 栈帧的结构
+
+每个栈帧包含：
+
+- **局部变量表（Local Variable Table）** —— 存方法参数和方法内局部变量。基本类型直接存值，引用类型存引用（指向堆）。
+- **操作数栈（Operand Stack）** —— 字节码指令的"工作区"。比如 `a + b` 要把 a、b 压入操作数栈，再 `iadd` 弹出求和压回。
+- **动态链接（Dynamic Linking）** —— 指向运行时常量池中该方法的引用，支持动态分派。
+- **方法返回地址** —— 方法结束后跳回调用者的 PC 位置。
+- **附加信息** —— 调试、注解等。
+
+### 3.3 局部变量表
+
+局部变量表是**数组**结构，每个"槽（slot）"32 位。`long`/`double` 占两个槽，其他类型占一个槽。
+
+```java
+public int add(int a, int b) {
+    int c = a + b;
+    return c;
+}
+// 局部变量表:
+// slot 0: this (实例方法隐含 this)
+// slot 1: a
+// slot 2: b
+// slot 3: c
+```
+
+### 3.4 StackOverflowError 与 OOM
+
+虚拟机栈有两种异常：
+
+- **StackOverflowError** —— 栈深度超过限制（递归调用太深）。默认栈大小 512KB-1MB，可以用 `-Xss` 调整。
+- **OutOfMemoryError** —— 栈扩展时内存不够。
+
+```java
+public static void recurse(int n) {
+    recurse(n + 1);   // 无限递归, 必然 StackOverflowError
+}
+```
+
+### 3.5 调栈大小
+
+```bash
+java -Xss512k MyProgram   # 每个线程栈 512KB
+java -Xss2m MyProgram     # 2MB
+```
+
+栈越大，能支持的递归越深，但能开的线程数越少（总内存固定）。栈越小，递归越浅，但能开更多线程——这是栈大小的权衡。
+
+## 四、本地方法栈（Native Method Stack）
+
+**本地方法栈（Native Method Stack）** 和虚拟机栈几乎一样，区别只在于——虚拟机栈服务 Java 方法，本地方法栈服务 **native 方法**（C/C++ 实现的方法，如 `Object.hashCode`、`System.currentTimeMillis` 等）。
+
+有些 JVM（如 HotSpot）把虚拟机栈和本地方法栈合并成一个——规范允许这么做。异常也是 `StackOverflowError` 和 `OutOfMemoryError`。
+
+## 五、堆（Heap）：对象的家
+
+### 5.1 堆是什么
+
+**堆（Heap）** 是 JVM 最大的一块内存，**所有线程共享**，**几乎所有的对象实例和数组都在堆上分配**（逃逸分析可能栈上分配，但绝大多数还是堆）。
+
+堆是 **GC（垃圾回收）的主战场**——后面整章讲 GC，这里先看堆的结构。
+
+### 5.2 堆的分代结构
+
+现代 JVM 把堆分成**新生代（Young Generation）** 和**老年代（Old Generation）**，因为"绝大多数对象朝生夕死"，分代让 GC 更高效。
+
+```
+堆 (Heap)
+├── 新生代 (Young Gen) - 约 1/3 堆
+│   ├── Eden (约 8/10 新生代)
+│   ├── Survivor 0 (约 1/10)
+│   └── Survivor 1 (约 1/10)
+└── 老年代 (Old Gen) - 约 2/3 堆
+```
+
+**Eden : Survivor0 : Survivor1 = 8 : 1 : 1**，这是默认比例（`-XX:SurvivorRatio=8`）。
+
+### 5.3 对象的生命周期
+
+新对象先在 **Eden** 分配。Eden 满了触发 **Minor GC（小型垃圾回收）**：
+
+1. Eden 中存活的对象复制到 S0（Survivor 0）。
+2. Eden 清空。
+3. 下次 Minor GC，Eden + S0 存活的对象复制到 S1。
+4. S0 清空。
+5. 下次 Minor GC，Eden + S1 存活的对象复制到 S0。
+6. 如此往复，S0、S1 来回复制。
+
+每次 Minor GC 后还存活的对象，**年龄 +1**。年龄达到阈值（默认 15，`-XX:MaxTenuringThreshold`）就**晋升到老年代**。
+
+大对象（如大数组）直接进老年代——避免在 Survivor 间来回复制开销大（`-XX:PretenureSizeThreshold` 控制）。
+
+### 5.4 老年代
+
+老年代存放**长期存活的对象**——缓存、单例、长期持有的集合。老年代 GC 频率低，但单次耗时长。
+
+老年代满了触发 **Major GC / Full GC**——比 Minor GC 慢得多，会 STW（Stop The World，暂停所有应用线程）。
+
+### 5.5 堆的参数
+
+```bash
+-Xms2g           # 堆初始大小 2GB
+-Xmx4g           # 堆最大大小 4GB
+-Xmn1g           # 新生代大小 1GB
+-XX:NewRatio=2   # 老年代:新生代 = 2:1
+-XX:SurvivorRatio=8   # Eden:S = 8:1
+-XX:MaxTenuringThreshold=15   # 晋升年龄
+```
+
+`-Xms` 和 `-Xmx` 设一样大可以避免堆动态扩展的开销——生产环境的常见配置。
+
+## 六、方法区（Method Area）与元空间（Metaspace）
+
+### 6.1 方法区是什么
+
+**方法区（Method Area）** 也是线程共享的，存储：
+
+- **类的元数据**——类名、父类、接口、字段、方法、字节码。
+- **运行时常量池**——类编译时的常量池加载后的运行时版本。
+- **静态变量**——`static` 字段。
+- **JIT 编译后的本地代码**（部分实现）。
+
+方法区是 JVM 规范定义的逻辑区域，不同 JVM 实现不同：
+
+| JDK 版本 | 方法区实现 | 位置 |
+| --- | --- | --- |
+| JDK 7 及以前 | 永久代（PermGen） | 堆内 |
+| JDK 8+ | 元空间（Metaspace） | 堆外（本地内存） |
+
+### 6.2 永久代为什么被废
+
+JDK 8 之前用**永久代（PermGen）** 实现方法区，问题：
+
+- **大小固定**——`-XX:MaxPermSize` 设小了容易 OOM，设大了浪费。
+- **GC 效率低**——永久代的 GC 和老年代耦合，性能差。
+- **难以预估**——动态生成类（CGLIB、Groovy）多的话，永久代容易爆。
+
+JDK 8 把永久代移除，改用**元空间（Metaspace）**，存在**本地内存（Native Memory）**——大小受限于机器内存，不再受 JVM 堆大小限制。
+
+```bash
+-XX:MetaspaceSize=256m      # 元空间初始大小, 触发 GC 阈值
+-XX:MaxMetaspaceSize=512m   # 元空间最大大小
+```
+
+### 6.3 字符串常量池的位置变化
+
+字符串常量池（String Pool）的位置也有变化：
+
+- **JDK 6**：在永久代。
+- **JDK 7+**：移到堆中——因为永久代太小，`String.intern()` 大量使用会 OOM。
+
+```java
+String s1 = "hello";              // 字符串常量池
+String s2 = new String("hello");  // 堆中新建对象, 但引用常量池的 "hello"
+System.out.println(s1 == s2);     // false
+System.out.println(s1 == s2.intern());   // true
+```
+
+## 七、运行时常量池
+
+**运行时常量池（Runtime Constant Pool）** 是方法区的一部分。每个类编译后会生成**常量池表**（在 class 文件里），类加载后这个表被加载到运行时常量池。
+
+常量池里存：
+
+- **字面量**——字符串、final 常量的值。
+- **符号引用**——类名、方法名、字段名的符号（还没解析成直接引用）。
+- **方法句柄、方法类型**——invokedynamic 用的。
+
+运行时常量池是**动态的**——`String.intern()` 可以在运行时往里加字符串。
+
+## 八、直接内存（Direct Memory）
+
+### 8.1 不是 JVM 规范定义的
+
+**直接内存（Direct Memory）** 不是 JVM 规范定义的运行时数据区，但被广泛使用——主要是 NIO 的 `ByteBuffer.allocateDirect`。
+
+直接内存是**堆外内存**——不在 Java 堆里，通过 `unsafe.allocateMemory` 或 NIO 的 DirectByteBuffer 申请，由操作系统管理。
+
+### 8.2 为什么用直接内存
+
+- **零拷贝**——NIO 的 Channel + DirectByteBuffer 可以直接和 OS 缓冲区交换数据，省去"内核缓冲区 → Java 堆"的拷贝。
+- **大对象**——避免大对象在 Java 堆的 GC 开销。
+- **JNI 交互**——native 代码可以直接访问这块内存。
+
+```java
+ByteBuffer buf = ByteBuffer.allocateDirect(1024 * 1024);   // 1MB 直接内存
+```
+
+### 8.3 风险
+
+- **不归 GC 管**——DirectByteBuffer 的释放靠 Cleaner（虚引用机制），不及时可能内存泄漏。
+- **OOM 风险**——`OutOfMemoryError: Direct buffer memory`。
+
+```bash
+-XX:MaxDirectMemorySize=1g   # 直接内存最大 1GB
+```
+
+Netty 大量使用直接内存做网络缓冲区——是高吞吐网络框架的标配。
+
+## 九、对象的内存布局
+
+了解了内存区域，再看对象在堆里长什么样。一个 Java 对象在堆里由三部分组成：
+
+```
+对象头 (Object Header)  ────  12 字节 (64 位 JVM, 压缩指针)
+├── Mark Word (8 字节)        ── hashCode/分代年龄/锁状态/bias
+└── 类型指针 (4 字节, 压缩)   ── 指向 Class 元数据
+实例数据 (Instance Data)  ──  字段值 (按类型对齐)
+对齐填充 (Padding)        ──  让对象大小是 8 字节的倍数
+```
+
+- **对象头**：12 字节（开启了压缩指针 `-XX:+UseCompressedOops`，默认开），不开压缩是 16 字节。
+- **实例数据**：字段值，按字段类型占位（long/double 8 字节，int 4 字节，引用 4 字节压缩 / 8 字节不压缩）。
+- **对齐填充**：8 字节对齐，不够补齐。
+
+所以一个 `new Object()` 实际占 **16 字节**——12 字节头 + 0 字段 + 4 字节填充。
+
+```java
+class Point {
+    int x;   // 4 字节
+    int y;   // 4 字节
+}
+// Point 对象大小 = 12 (头) + 4 (x) + 4 (y) = 20 字节, 对齐到 24 字节
+```
+
+对象头里的 **Mark Word** 是后面讲锁升级（无锁→偏向锁→轻量级锁→重量级锁）的关键——记录锁状态、hashCode、分代年龄。
+
+## 十、实战：观察 JVM 内存
+
+下面的例子演示用 Java 代码观察各内存区域的使用情况。
+
+<CodeRunner code={`import java.util.*;
+import java.nio.ByteBuffer;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== JVM 内存模型演示 ===\\n");
+
+        // 1. 内存总览 - 用 Runtime 看堆内存
+        System.out.println("--- 1. 堆内存总览 (Runtime) ---");
+        Runtime rt = Runtime.getRuntime();
+        long MB = 1024 * 1024;
+        System.out.println("JVM 最大堆 (-Xmx): " + rt.maxMemory() / MB + " MB");
+        System.out.println("JVM 当前堆总量: " + rt.totalMemory() / MB + " MB");
+        System.out.println("JVM 当前堆空闲: " + rt.freeMemory() / MB + " MB");
+        System.out.println("已用堆: " + (rt.totalMemory() - rt.freeMemory()) / MB + " MB");
+        System.out.println("可用 CPU: " + rt.availableProcessors());
+
+        // 2. 系统/内存信息
+        System.out.println("\\n--- 2. 系统内存信息 ---");
+        java.lang.management.OperatingSystemMXBean os =
+            java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+        System.out.println("OS: " + os.getName() + " " + os.getVersion());
+        System.out.println("架构: " + os.getArch());
+        System.out.println("CPU 核数: " + os.getAvailableProcessors());
+
+        // 3. 内存池信息 - 显示堆的分代
+        System.out.println("\\n--- 3. 内存池 (堆分代) ---");
+        for (java.lang.management.MemoryPoolMXBean pool :
+             java.lang.management.ManagementFactory.getMemoryPoolMXBeans()) {
+            java.lang.management.MemoryUsage usage = pool.getUsage();
+            System.out.println("池: " + pool.getName() + " [" + pool.getType() + "]");
+            System.out.println("  已用: " + usage.getUsed() / MB + " MB"
+                + " / 已提交: " + usage.getCommitted() / MB + " MB"
+                + " / 最大: " + (usage.getMax() == -1 ? "无限制" : usage.getMax() / MB + " MB"));
+        }
+
+        // 4. 元空间 - JDK 8+ 方法区
+        System.out.println("\\n--- 4. 元空间 (Metaspace) ---");
+        for (java.lang.management.MemoryPoolMXBean pool :
+             java.lang.management.ManagementFactory.getMemoryPoolMXBeans()) {
+            if (pool.getName().toLowerCase().contains("metaspace")) {
+                java.lang.management.MemoryUsage usage = pool.getUsage();
+                System.out.println("元空间已用: " + usage.getUsed() / MB + " MB");
+                System.out.println("元空间已提交: " + usage.getCommitted() / MB + " MB");
+                System.out.println("元空间最大: " + (usage.getMax() == -1 ? "无限制" : usage.getMax() / MB + " MB"));
+            }
+        }
+
+        // 5. 加载的类数量 (类元数据在元空间)
+        java.lang.management.ClassLoadingMXBean cl =
+            java.lang.management.ManagementFactory.getClassLoadingMXBean();
+        System.out.println("\\n已加载类数量: " + cl.getLoadedClassCount());
+        System.out.println("累计加载: " + cl.getTotalLoadedClassCount());
+        System.out.println("卸载数量: " + cl.getUnloadedClassCount());
+
+        // 6. 演示堆分配 - 创建大量对象观察
+        System.out.println("\\n--- 6. 堆分配演示 ---");
+        long before = rt.freeMemory();
+        List<int[]> objects = new ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            objects.add(new int[1000]);   // 每个约 4KB
+        }
+        long after = rt.freeMemory();
+        System.out.println("创建 1000 个 int[1000] 后:");
+        System.out.println("  自由内存变化: " + (before - after) / MB + " MB");
+        System.out.println("  理论大小: " + (1000 * 1000 * 4L / MB) + " MB (4 字节/int)");
+        System.out.println("  实际多 (对象头+对齐): " + ((before - after) - 1000 * 1000 * 4L) / 1024 + " KB");
+
+        // 7. 直接内存 (NIO)
+        System.out.println("\\n--- 7. 直接内存 (NIO DirectByteBuffer) ---");
+        long directBefore = sumDirectMemory();
+        ByteBuffer directBuf = ByteBuffer.allocateDirect(10 * 1024 * 1024);   // 10MB 直接内存
+        long directAfter = sumDirectMemory();
+        System.out.println("分配 10MB 直接内存前: " + directBefore / MB + " MB");
+        System.out.println("分配 10MB 直接内存后: " + directAfter / MB + " MB");
+        System.out.println("直接内存在堆外, 不算 Runtime.heapMemory");
+        System.out.println("  Runtime.freeMemory 变化: "
+            + (rt.freeMemory() - after) / MB + " MB (可能不变, 直接内存不算堆)");
+
+        // 8. 演示栈深度 - 递归到 StackOverflow
+        System.out.println("\\n--- 8. 虚拟机栈深度 ---");
+        try {
+            deepRecurse(0);
+        } catch (StackOverflowError e) {
+            System.out.println("递归到 " + currentDepth + " 层触发 StackOverflowError");
+            System.out.println("(默认栈大小约 512KB-1MB, 可用 -Xss 调整)");
+        }
+
+        // 9. 线程信息 - 每个线程有自己的 PC + 栈
+        System.out.println("\\n--- 9. 线程信息 ---");
+        java.lang.management.ThreadMXBean tb =
+            java.lang.management.ManagementFactory.getThreadMXBean();
+        System.out.println("当前活动线程数: " + tb.getThreadCount());
+        System.out.println("累计启动线程数: " + tb.getTotalStartedThreadCount());
+        System.out.println("峰值线程数: " + tb.getPeakThreadCount());
+        System.out.println("每个线程都有: 程序计数器 + 虚拟机栈 + 本地方法栈 (线程私有)");
+
+        // 10. GC 信息
+        System.out.println("\\n--- 10. GC 信息 ---");
+        for (java.lang.management.GarbageCollectorMXBean gc :
+             java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+            System.out.println("GC: " + gc.getName()
+                + ", 收集次数: " + gc.getCollectionCount()
+                + ", 累计耗时: " + gc.getCollectionTime() + " ms");
+        }
+
+        System.out.println("\\n=== 总结 ===");
+        System.out.println("运行时数据区五区:");
+        System.out.println("  程序计数器 (PC)         - 线程私有, 记录字节码地址, 不 OOM");
+        System.out.println("  虚拟机栈 (VM Stack)     - 线程私有, 方法栈帧, SOF/OOM");
+        System.out.println("  本地方法栈              - 线程私有, native 方法栈帧");
+        System.out.println("  堆 (Heap)               - 共享, 对象/数组, 分代, 主要 OOM 源");
+        System.out.println("  方法区 (Metaspace)      - 共享, 类元数据/常量池/静态变量");
+        System.out.println("直接内存 (Direct Memory) - NIO 用, 堆外, 不归 GC 管");
+    }
+
+    static int currentDepth = 0;
+    static void deepRecurse(int n) {
+        currentDepth = n;
+        deepRecurse(n + 1);
+    }
+
+    static long sumDirectMemory() {
+        // 通过 NIO Bits 类反射获取 (JDK 9+ 不能直接访问)
+        // 这里用简单方法: 直接读 ByteBuffer 已分配的计数
+        try {
+            Class<?> bitsClass = Class.forName("java.nio.Bits");
+            java.lang.reflect.Field f = bitsClass.getDeclaredField("RESERVED_MEMORY");
+            f.setAccessible(true);
+            // JDK 9+ 是 LongAdder
+            Object value = f.get(null);
+            if (value instanceof java.util.concurrent.atomic.LongAdder) {
+                return ((java.util.concurrent.atomic.LongAdder) value).sum();
+            }
+            return ((java.util.concurrent.atomic.AtomicLong) value).get();
+        } catch (Throwable e) {
+            return -1;   // 反射失败, 不可访问
+        }
+    }
+}`} />
+
+> **观察重点**：
+> - **`MemoryPoolMXBean`** 列出了所有内存池——能看到 Eden、Survivor、Old、Metaspace 等具体区域。
+> - **元空间不在堆里**——`Runtime.freeMemory()` 看不到元空间使用。
+> - **直接内存不在堆里**——`ByteBuffer.allocateDirect(10MB)` 不影响 `Runtime.freeMemory()`。
+> - **递归深度受栈大小限制**——默认能到几千层（取决于栈帧大小）。
+> - **`-Xss` 调栈大小，`-Xms`/`-Xmx` 调堆，`-XX:MaxMetaspaceSize` 调元空间**——三组不同的参数。
+
+## 十一、对象创建过程：从 new 到可用
+
+了解了内存区域，最后看一个对象从 `new` 到可用的全过程——把所有区域串起来：
+
+1. **类加载检查**——`new` 指令时，JVM 检查类是否已加载、解析、初始化。没加载先走类加载（下一阶段第 53 章详讲）。
+2. **分配内存**——在堆的 Eden 区分一块内存。两种方式：
+   - **指针碰撞（Bump the Pointer）**：堆规整时（Serial/ParNew 带 Compact），移动指针即可。
+   - **空闲列表（Free List）**：堆不规整时（CMS），维护一个空闲块列表，从中找合适的块。
+3. **内存初始化零值**——分配的内存清零（不含对象头），所以字段默认值是 0/null。
+4. **设置对象头**——填充 Mark Word（hash、分代年龄、锁状态）、类型指针。
+5. **执行 `＜init＞`**——调用构造器，设置字段初始值。
+
+```java
+Person p = new Person("Alice", 30);
+// 1. JVM 检查 Person 是否已加载
+// 2. 在 Eden 分配内存 (假设指针碰撞)
+// 3. 内存清零 (name=null, age=0)
+// 4. 设置对象头 (类型指针 → Person.class)
+// 5. 调用 <init>("Alice", 30) 设置字段
+// 6. p 引用指向这块内存
+```
+
+## 十二、本章小结
+
+| 区域 | 线程私有 | 存什么 | 调优参数 | 异常 |
+| --- | --- | --- | --- | --- |
+| 程序计数器 | 是 | 字节码地址 | 无 | 不 OOM |
+| 虚拟机栈 | 是 | 方法栈帧 | `-Xss` | SOF / OOM |
+| 本地方法栈 | 是 | native 栈帧 | `-Xss` | SOF / OOM |
+| 堆 | 否 | 对象/数组 | `-Xms`/`-Xmx`/`-Xmn` | OOM |
+| 方法区（元空间） | 否 | 类元数据/常量池 | `-XX:MetaspaceSize`/`-XX:MaxMetaspaceSize` | OOM |
+| 直接内存 | 否 | NIO 堆外内存 | `-XX:MaxDirectMemorySize` | OOM |
+
+**堆的分代**：
+
+| 区域 | 比例 | 存什么 | GC |
+| --- | --- | --- | --- |
+| Eden | 8/10 新生代 | 新对象 | Minor GC |
+| Survivor 0/1 | 1/10 各 | 复制来的存活对象 | Minor GC |
+| Old | 2/3 堆 | 长期存活对象 | Major GC / Full GC |
+
+**记忆口诀**：
+
+- **PC 是书签**——线程私有的"读到哪一行"。
+- **栈是方法调用栈**——一帧一方法，先调后出。
+- **堆是对象的家**——分代居住，朝生夕死的在新生代，老不死的在老年代。
+- **元空间是类的档案柜**——JDK 8+ 在堆外，CGLIB 动态类多了就爆。
+- **直接内存是后花园**——NIO 用，GC 管不着，要小心泄漏。
+- **Eden : S0 : S1 = 8:1:1**——新生代"复制收集"的标配。
+- **对象头 12 字节，Mark Word 是锁的命根子**——后面讲锁靠它。
+
+## 结语：内存模型是 JVM 的"地图"
+
+这一章是 JVM 深度的"地图"——后续所有章节都在这张地图上展开：
+
+- **GC（第 52 章）** 在堆上回收对象，分代决定 GC 策略。
+- **类加载（第 53 章）** 把类元数据塞进元空间。
+- **性能调优（第 54 章）** 调堆大小、栈大小、元空间大小。
+- **字节码（第 55 章）** 在操作数栈和局部变量表上跑指令。
+
+理解了内存模型，你才能看懂 GC 日志、看懂 heap dump、看懂 jstack 输出——它是 JVM 工程师的"地图"。下一章我们讲 **垃圾回收（GC）**——堆上的对象怎么被自动回收，为什么 Java 不用像 C/C++ 那样手动 free。我们下一章见。

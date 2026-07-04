@@ -1,0 +1,648 @@
+---
+title: "安全与认证"
+chapter: 72
+stage: "第十三阶段"
+stageName: "Java Web 与 Spring 生态"
+order: 5
+description: "理解 Spring Security 基础（过滤器链/认证/授权）、JWT 认证（Header.Payload.Signature）、OAuth 2.0 简介（授权码模式）"
+pubDate: 2026-07-03
+tags: ["Java", "Spring Security", "JWT", "OAuth2", "认证", "授权"]
+---
+
+# 安全与认证
+
+Web 应用的安全是大事——未登录的用户能看你的订单吗？普通员工能访问管理员接口吗？这些都要靠**认证（Authentication）**和**授权（Authorization）**机制。这一章看 Java 安全的两大主流——Spring Security 框架、JWT 令牌、以及 OAuth 2.0 协议。
+
+## 一、认证 vs 授权
+
+先理清两个概念：
+
+- **认证（Authentication，AuthN）** —— 你是谁？验证身份（用户名密码、短信、指纹）。回答"你是张三"。
+- **授权（Authorization，AuthZ）** —— 你能做什么？验证权限（角色、ACL）。回答"张三是管理员"。
+
+经典三件套：
+
+- **认证** —— 登录验证账号密码。
+- **会话** —— 登录后发个凭证（Session/JWT），后续请求带凭证。
+- **授权** —— 凭证有效后，检查能不能访问目标资源。
+
+## 二、Spring Security
+
+**Spring Security** 是 Spring 全家的安全框架——认证、授权、攻击防护（CSRF、CORS、Session 固定）一站式。功能强大但学习曲线陡，因为它抽象层次多。
+
+### 2.1 过滤器链
+
+Spring Security 的核心是 **FilterChainProxy**——一组 Servlet Filter 串联，每个 Filter 干一件事：
+
+```
+HTTP 请求
+  ↓
+SecurityContextPersistenceFilter    -- 加载/保存 SecurityContext
+HeaderWriterFilter                   -- 写安全响应头
+CorsFilter                           -- 跨域处理
+LogoutFilter                         -- 处理 /logout
+UsernamePasswordAuthenticationFilter -- 处理 /login (账号密码认证)
+JwtAuthenticationFilter              -- (自定义) JWT 解析认证
+ExceptionTranslationFilter           -- 翻译异常为 401/403
+FilterSecurityInterceptor            -- 授权检查
+  ↓
+Controller
+```
+
+每个请求穿过这堆 Filter——认证、授权都在 Filter 层完成，到达 Controller 时已经验证好了。
+
+### 2.2 配置
+
+Spring Boot 集成 Spring Security：
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+```
+
+```java
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity   // 启用方法级 @PreAuthorize
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        return http
+            .csrf(csrf -> csrf.disable())           // 关闭 CSRF (REST API 不需要)
+            .sessionManagement(s -> s.sessionCreationPolicy(
+                SessionCreationPolicy.STATELESS))    // 无状态 (用 JWT)
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/api/login", "/api/register").permitAll()
+                .requestMatchers("/api/admin/**").hasRole("ADMIN")
+                .requestMatchers("/api/user/**").authenticated()
+                .anyRequest().authenticated()
+            )
+            .addFilterBefore(jwtAuthFilter(),
+                UsernamePasswordAuthenticationFilter.class)
+            .build();
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();   // 密码加密
+    }
+}
+```
+
+`authorizeHttpRequests` 配置路径权限：
+
+- `permitAll()` —— 所有人可访问。
+- `authenticated()` —— 登录后可访问。
+- `hasRole("ADMIN")` —— 有 ADMIN 角色可访问。
+- `hasAnyRole("ADMIN", "USER")` —— 任一角色。
+- `hasAuthority("user:write")` —— 有特定权限。
+
+### 2.3 方法级授权
+
+```java
+@RestController
+public class AdminController {
+
+    @PreAuthorize("hasRole('ADMIN')")
+    @DeleteMapping("/api/users/{id}")
+    public void deleteUser(@PathVariable Long id) { ... }
+
+    @PreAuthorize("#user.id == authentication.principal.id")
+    @PutMapping("/api/users/{id}")
+    public User update(@PathVariable Long id, @RequestBody User user) { ... }
+    // 只能改自己的信息
+
+    @PostAuthorize("returnObject.owner == authentication.name")
+    @GetMapping("/api/orders/{id}")
+    public Order getOrder(@PathVariable Long id) { ... }
+    // 返回后检查: 只能看自己的订单
+}
+```
+
+`@PreAuthorize` 在方法执行前检查，`@PostAuthorize` 在执行后检查。SpEL 表达式支持 `#参数名`、`returnObject`、`authentication.principal` 等上下文。
+
+### 2.4 密码加密
+
+```java
+PasswordEncoder encoder = new BCryptPasswordEncoder();
+String raw = "123456";
+String hash = encoder.encode(raw);    // $2a$10$xxxxx...
+encoder.matches(raw, hash);            // true, 验证密码
+```
+
+**永远不要明文存密码**！`BCrypt` 是密码哈希的工业标准——加盐、慢哈希（防彩虹表、防暴力破解）。`MD5`/`SHA1` 不安全——快哈希容易被暴力穷举。
+
+## 三、JWT
+
+**JWT**（JSON Web Token）是无状态的认证令牌——服务端不存 Session，令牌本身携带用户信息。
+
+### 3.1 JWT 结构
+
+JWT 由三部分组成，用 `.` 分隔：
+
+```
+Header.Payload.Signature
+```
+
+- **Header** —— 令牌类型和签名算法，如 `{"alg":"HS256","typ":"JWT"}`。
+- **Payload** —— 用户信息和声明，如 `{"sub":"user42","role":"admin","exp":1700000000}`。
+- **Signature** —— 签名，`HMACSHA256(base64(header) + "." + base64(payload), secret)`。
+
+```
+eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyNDIiLCJyb2xlIjoiYWRtaW4ifQ.abc123signature
+```
+
+前两段是 Base64 编码（不是加密，能解出来），第三段是签名——防止篡改。
+
+### 3.2 工作流程
+
+```
+1. 用户登录 (账号密码)
+       ↓
+2. 服务端验证 -> 生成 JWT (含用户信息 + 签名)
+       ↓
+3. 返回 JWT 给客户端
+       ↓
+4. 客户端存 JWT (localStorage / cookie)
+       ↓
+5. 后续请求带 Authorization: Bearer <JWT>
+       ↓
+6. 服务端验签 -> 解出用户信息 -> 处理请求
+       ↓
+7. 不需要 Session (无状态)
+```
+
+### 3.3 生成与验证 JWT
+
+```java
+import io.jsonwebtoken.*;
+import io.jsonwebtoken.security.Keys;
+import java.security.Key;
+import java.util.Date;
+
+public class JwtUtil {
+    private static final Key KEY = Keys.secretKeyFor(SignatureAlgorithm.HS256);
+    private static final long EXPIRATION = 3600_000L;   // 1 小时
+
+    // 生成
+    public static String generate(Long userId, String role) {
+        return Jwts.builder()
+            .setSubject(userId.toString())
+            .claim("role", role)
+            .setIssuedAt(new Date())
+            .setExpiration(new Date(System.currentTimeMillis() + EXPIRATION))
+            .signWith(KEY)
+            .compact();
+    }
+
+    // 验证 + 解析
+    public static Claims parse(String token) {
+        return Jwts.parserBuilder()
+            .setSigningKey(KEY)
+            .build()
+            .parseClaimsJws(token)
+            .getBody();
+    }
+}
+
+// 使用
+String token = JwtUtil.generate(42L, "admin");
+Claims claims = JwtUtil.parse(token);
+claims.getSubject();    // "42"
+claims.get("role");     // "admin"
+```
+
+### 3.4 JWT vs Session
+
+| 对比 | Session | JWT |
+| --- | --- | --- |
+| 状态 | 服务端存（内存/Redis） | 无状态，令牌自带 |
+| 扩展性 | 需共享 Session（Redis） | 天然分布式友好 |
+| 撤销 | 删 Session 即可 | 难（要黑名单） |
+| 大小 | JSESSIONID Cookie 小 | JWT 较大（含 Payload） |
+| 安全 | 服务端控制 | 签名防篡改，但 Payload 可读 |
+
+JWT 的代价——**难主动撤销**。令牌签发后，未过期前一直有效——用户改密码、退出登录都不能让令牌立即失效。解法是维护"黑名单"（但这就破坏了无状态）。
+
+### 3.5 JWT 注意事项
+
+1. **Payload 不要存敏感信息** —— Base64 能解出来，只放 user_id、role 等非敏感信息。
+2. **设置短过期时间** —— 1 小时左右，配合 refresh token 续期。
+3. **HTTPS 传输** —— JWT 被截获就能冒充，必须 HTTPS。
+4. **签名密钥保密** —— 密钥泄漏，所有人都能伪造令牌。
+5. **不要存大量数据** —— JWT 每次请求都带，太大浪费带宽。
+
+## 四、OAuth 2.0
+
+**OAuth 2.0** 是授权框架——让用户授权第三方应用访问其在另一服务上的资源，**不用交出密码**。比如"用 GitHub 账号登录"、"用微信账号登录"。
+
+### 4.1 四种角色
+
+| 角色 | 例子 |
+| --- | --- |
+| **资源拥有者（Resource Owner）** | 用户 |
+| **客户端（Client）** | 第三方应用 |
+| **授权服务器（Authorization Server）** | GitHub/微信 |
+| **资源服务器（Resource Server）** | GitHub API |
+
+### 4.2 授权码模式（最常用）
+
+```
+        用户        客户端        GitHub授权服务器        GitHub资源服务器
+         |            |                |                       |
+         |---登录---->|                |                       |
+         |            |---重定向到 GitHub 登录页----------->  |
+         |            |                |                       |
+         |---在 GitHub 输入密码----->|                       |
+         |            |<--回调带 code-|                       |
+         |            |                |                       |
+         |            |--用 code 换 token (后端, 带密钥)---->|
+         |            |<--access token-|                       |
+         |            |                |                       |
+         |            |--带 token 访问 API------------------>|
+         |            |<--用户数据------|                       |
+```
+
+核心步骤：
+
+1. 客户端把用户重定向到 GitHub 授权页（带 `client_id` 和 `redirect_uri`）。
+2. 用户在 GitHub 登录并同意授权。
+3. GitHub 重定向回客户端的 `redirect_uri`，带 `code`（一次性短期码）。
+4. 客户端**后端**用 `code` + `client_secret` 换 `access_token`（这一步在服务端，密钥不暴露）。
+5. 客户端用 `access_token` 调 GitHub API 拿用户信息。
+
+为什么有 `code` 这一步？——前端直接拿 token 的话 `client_secret` 要暴露在前端，不安全。`code` 是一次性短期的，前端拿 `code` 给后端，后端用 `code`+`secret` 换 token——密钥永远在后端。
+
+### 4.3 Spring Security OAuth2 客户端
+
+```java
+@Configuration
+public class OAuth2Config {
+    @Bean
+    public SecurityFilterChain filter(HttpSecurity http) throws Exception {
+        return http
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/", "/login**").permitAll()
+                .anyRequest().authenticated()
+            )
+            .oauth2Login(Customizer.withDefaults())   // 启用 OAuth2 登录
+            .build();
+    }
+}
+```
+
+```yaml
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          github:
+            client-id: your-github-client-id
+            client-secret: your-github-client-secret
+            scope: read:user, user:email
+          google:
+            client-id: xxx
+            client-secret: yyy
+            scope: profile, email
+```
+
+访问需登录的页面会自动跳到 GitHub/Google 授权页——授权后回调，自动建立本地 Session/JWT。这就是"用 GitHub 登录"的原理。
+
+## 五、实战：JWT 生成与验证
+
+由于 Spring Security 需要 Spring 容器，Piston 跑不了。下面用纯 Java SE 模拟 JWT 的核心机制——HMAC 签名、Base64 编码、防篡改验证。
+
+<CodeRunner code={`import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+
+// === 迷你 JWT 实现 (演示原理) ===
+class JwtUtil {
+    private static final String SECRET = "my-secret-key-demo-only-not-secure";
+    private static final String HMAC_ALGO = "HmacSHA256";
+
+    // Base64 URL 编码 (JWT 用 URL 安全的 Base64)
+    private static String b64UrlEncode(byte[] data) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(data);
+    }
+    private static String b64UrlEncode(String s) {
+        return b64UrlEncode(s.getBytes(StandardCharsets.UTF_8));
+    }
+    private static byte[] b64UrlDecode(String s) {
+        return Base64.getUrlDecoder().decode(s);
+    }
+
+    // HMAC-SHA256 签名
+    private static String sign(String data) throws Exception {
+        Mac mac = Mac.getInstance(HMAC_ALGO);
+        mac.init(new SecretKeySpec(SECRET.getBytes(StandardCharsets.UTF_8), HMAC_ALGO));
+        return b64UrlEncode(mac.doFinal(data.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    // 生成 JWT
+    public static String generate(Map<String, Object> claims) throws Exception {
+        String header = b64UrlEncode("{\\"alg\\":\\"HS256\\",\\"typ\\":\\"JWT\\"}");
+        String payload = b64UrlEncode(toJson(claims));
+        String signingInput = header + "." + payload;
+        String signature = sign(signingInput);
+        return signingInput + "." + signature;
+    }
+
+    // 验证 + 解析 JWT
+    public static Map<String, Object> parse(String token) throws Exception {
+        String[] parts = token.split("\\\\.");
+        if (parts.length != 3) throw new RuntimeException("JWT 格式错");
+
+        // 验证签名
+        String signingInput = parts[0] + "." + parts[1];
+        String expectedSig = sign(signingInput);
+        if (!expectedSig.equals(parts[2])) {
+            throw new RuntimeException("签名不匹配! 令牌被篡改");
+        }
+
+        // 解析 payload
+        String payload = new String(b64UrlDecode(parts[1]), StandardCharsets.UTF_8);
+        return parseJson(payload);
+    }
+
+    // 极简 JSON 序列化
+    private static String toJson(Map<String, Object> m) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (var e : m.entrySet()) {
+            if (!first) sb.append(",");
+            sb.append("\\"").append(e.getKey()).append("\\":");
+            Object v = e.getValue();
+            if (v instanceof Number) sb.append(v);
+            else sb.append("\\"").append(v).append("\\");
+            first = false;
+        }
+        return sb.append("}").toString();
+    }
+
+    // 极简 JSON 解析
+    private static Map<String, Object> parseJson(String json) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        json = json.replaceAll("[{}\\\"]", "");
+        for (String kv : json.split(",")) {
+            String[] parts = kv.split(":", 2);
+            if (parts.length == 2) {
+                String k = parts[0];
+                String v = parts[1];
+                try { m.put(k, Long.parseLong(v)); }
+                catch (NumberFormatException e) { m.put(k, v); }
+            }
+        }
+        return m;
+    }
+}
+
+// === 模拟 Spring Security 的认证授权 ===
+class SecurityContext {
+    private static final ThreadLocal<Map<String, Object>> current = ThreadLocal.withInitial(HashMap::new);
+
+    public static void setCurrentUser(Map<String, Object> claims) {
+        current.set(claims);
+    }
+
+    public static Map<String, Object> getCurrentUser() {
+        return current.get();
+    }
+
+    public static boolean hasRole(String role) {
+        Map<String, Object> user = getCurrentUser();
+        return role.equals(user.get("role"));
+    }
+
+    public static void clear() { current.remove(); }
+}
+
+// 权限检查注解 (模拟 @PreAuthorize)
+@java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+@java.lang.annotation.Target(java.lang.annotation.ElementType.METHOD)
+@interface PreAuthorize { String value(); }
+
+class AuthException extends RuntimeException {
+    public AuthException(String msg) { super(msg); }
+}
+
+// 业务接口
+class AdminController {
+    @PreAuthorize("hasRole('ADMIN')")
+    public String deleteUser(long id) {
+        return "删除用户 " + id;
+    }
+
+    @PreAuthorize("hasRole('USER')")
+    public String viewProfile(long id) {
+        return "查看用户 " + id + " 的资料";
+    }
+}
+
+// 模拟 Filter 拦截 + 权限检查
+class SecurityFilter {
+    private final AdminController controller = new AdminController();
+
+    // 模拟 HTTP 请求处理
+    public String handle(String token, String action, long id) throws Exception {
+        System.out.println("\\n[请求] action=" + action + ", id=" + id);
+
+        // 1. 认证: 解析 JWT
+        if (token == null || token.isEmpty()) {
+            throw new AuthException("未登录 (401 Unauthorized)");
+        }
+        Map<String, Object> claims;
+        try {
+            claims = JwtUtil.parse(token);
+        } catch (Exception e) {
+            throw new AuthException("令牌无效 (401): " + e.getMessage());
+        }
+        SecurityContext.setCurrentUser(claims);
+        System.out.println("[认证] 当前用户: " + claims);
+
+        // 2. 授权: 检查权限
+        try {
+            if ("deleteUser".equals(action)) {
+                checkPreAuthorize("hasRole('ADMIN')");
+                return controller.deleteUser(id);
+            } else if ("viewProfile".equals(action)) {
+                checkPreAuthorize("hasRole('USER')");
+                return controller.viewProfile(id);
+            }
+            throw new AuthException("未知操作 (404)");
+        } finally {
+            SecurityContext.clear();
+        }
+    }
+
+    private void checkPreAuthorize(String expr) {
+        if (expr.contains("hasRole('ADMIN')") && !SecurityContext.hasRole("ADMIN")) {
+            throw new AuthException("权限不足 (403 Forbidden), 需要 ADMIN 角色");
+        }
+        if (expr.contains("hasRole('USER')") && !SecurityContext.hasRole("USER")
+                && !SecurityContext.hasRole("ADMIN")) {
+            throw new AuthException("权限不足 (403 Forbidden), 需要 USER 角色");
+        }
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 安全与认证: JWT + 授权演示 ===\\n");
+
+        // 1. 生成 JWT
+        System.out.println("--- 1. 用户登录, 生成 JWT ---");
+        Map<String, Object> adminClaims = new LinkedHashMap<>();
+        adminClaims.put("sub", "user42");
+        adminClaims.put("role", "ADMIN");
+        adminClaims.put("exp", System.currentTimeMillis() + 3600000);
+        String adminToken = JwtUtil.generate(adminClaims);
+        System.out.println("Admin JWT: " + adminToken);
+
+        Map<String, Object> userClaims = new LinkedHashMap<>();
+        userClaims.put("sub", "user100");
+        userClaims.put("role", "USER");
+        String userToken = JwtUtil.generate(userClaims);
+        System.out.println("User  JWT: " + userToken);
+
+        // 2. JWT 结构解析
+        System.out.println("\\n--- 2. JWT 三段结构 ---");
+        String[] parts = adminToken.split("\\\\.");
+        System.out.println("Header   : " + parts[0]);
+        System.out.println("Payload  : " + parts[1]);
+        System.out.println("Signature: " + parts[2]);
+        System.out.println("解码 Payload: " + new String(
+            java.util.Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8));
+
+        // 3. Admin 访问 (有权限)
+        SecurityFilter filter = new SecurityFilter();
+        System.out.println("\\n--- 3. Admin 访问 ---");
+        System.out.println("结果: " + filter.handle(adminToken, "deleteUser", 1L));
+        System.out.println("结果: " + filter.handle(adminToken, "viewProfile", 1L));
+
+        // 4. 普通用户访问 (无 admin 权限)
+        System.out.println("\\n--- 4. 普通用户访问 admin 接口 ---");
+        try {
+            filter.handle(userToken, "deleteUser", 1L);
+        } catch (AuthException e) {
+            System.out.println("捕获: " + e.getMessage());
+        }
+        System.out.println("\\n--- 普通用户访问 user 接口 ---");
+        System.out.println("结果: " + filter.handle(userToken, "viewProfile", 1L));
+
+        // 5. 未登录访问
+        System.out.println("\\n--- 5. 未登录访问 ---");
+        try {
+            filter.handle(null, "viewProfile", 1L);
+        } catch (AuthException e) {
+            System.out.println("捕获: " + e.getMessage());
+        }
+
+        // 6. 篡改 JWT (修改 payload 不改签名)
+        System.out.println("\\n--- 6. 篡改 JWT (改 role 为 ADMIN) ---");
+        String[] userParts = userToken.split("\\\\.");
+        String tamperedPayload = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString("{\\"sub\\":\\"user100\\",\\"role\\":\\"ADMIN\\"}".getBytes(StandardCharsets.UTF_8));
+        String tamperedToken = userParts[0] + "." + tamperedPayload + "." + userParts[2];
+        System.out.println("篡改后 token: " + tamperedToken);
+        try {
+            filter.handle(tamperedToken, "deleteUser", 1L);
+        } catch (AuthException e) {
+            System.out.println("捕获: " + e.getMessage());
+            System.out.println("(签名验证失败, 篡改被识破)");
+        }
+
+        System.out.println("\\n=== 安全要点 ===");
+        System.out.println("1. 认证 (AuthN) 验身份, 授权 (AuthZ) 验权限");
+        System.out.println("2. Spring Security: 过滤器链 + SecurityContext");
+        System.out.println("3. JWT = Header.Payload.Signature, 无状态");
+        System.out.println("4. JWT Payload 是 Base64 不是加密, 别放敏感信息");
+        System.out.println("5. 签名防篡改, 密钥必须保密");
+        System.out.println("6. 密码用 BCrypt, 不要 MD5/SHA");
+        System.out.println("7. OAuth2 授权码模式: code + secret 换 token");
+        System.out.println("8. 401 = 没认证, 403 = 认证了但没权限");
+    }
+}`} />
+
+> **观察重点**：
+> - **JWT 三段都解得出**——Payload 是 Base64，能读出 `role` 等信息，所以别放密码。
+> - **签名验证阻止篡改**——把 USER 的 token 改成 ADMIN，签名对不上，被识破。
+> - **401 vs 403**——没 token 是 401，有 token 但权限不够是 403。
+> - **ThreadLocal 存当前用户**——`SecurityContext` 在 Filter 设置，业务代码任意位置可读。
+
+## 六、其他安全要点
+
+### 6.1 CSRF
+
+CSRF（Cross-Site Request Forgery，跨站请求伪造）——恶意网站利用用户的 Cookie 冒充用户发请求。Spring Security 默认开 CSRF Token 防护。REST API 用 JWT（不带 Cookie）天然防 CSRF，可关闭。
+
+### 6.2 XSS
+
+XSS（Cross-Site Scripting，跨站脚本）——恶意脚本注入页面执行。防：
+
+- 输出转义（Thymeleaf 默认转义）。
+- Cookie 设 `HttpOnly`（JS 读不到）。
+- Content Security Policy（CSP）头。
+
+### 6.3 CORS
+
+CORS（Cross-Origin Resource Sharing，跨源资源共享）——浏览器同源策略限制跨域请求。前后端分离必须配：
+
+```java
+@Bean
+public CorsConfigurationSource corsConfigurationSource() {
+    CorsConfiguration config = new CorsConfiguration();
+    config.setAllowedOrigins(List.of("https://frontend.com"));
+    config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE"));
+    config.setAllowedHeaders(List.of("*"));
+    config.setAllowCredentials(true);
+    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+    source.registerCorsConfiguration("/**", config);
+    return source;
+}
+```
+
+### 6.4 HTTPS
+
+生产必须 HTTPS——加密传输，防中间人。Let's Encrypt 免费证书，Spring Boot 配 SSL 即可。
+
+## 七、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| 认证 AuthN | 验证身份（你是谁） |
+| 授权 AuthZ | 验证权限（能做什么） |
+| Spring Security | 过滤器链 + SecurityContext |
+| `@PreAuthorize` | 方法级授权 |
+| BCrypt | 密码哈希标准 |
+| JWT | Header.Payload.Signature，无状态 |
+| JWT 签名 | HMAC-SHA256，防篡改 |
+| OAuth 2.0 | 授权码模式，code 换 token |
+| 401 vs 403 | 401 没认证，403 没权限 |
+
+**记忆口诀**：
+
+- **认证问"你是谁"，授权问"你能干啥"**。
+- **JWT 三段**——Header / Payload / Signature。
+- **Payload 别放敏感**——Base64 能解。
+- **签名防篡改**——密钥保密。
+- **密码 BCrypt**——慢哈希防暴力。
+- **401 没认证，403 没授权**。
+- **OAuth2 授权码模式**——code + secret 换 token。
+
+## 结语：第十三阶段完结
+
+这一章我们看了 Spring Security、JWT、OAuth 2.0——Java Web 安全的全景。回头看第十三阶段：
+
+- **第 68 章 Java Web 基础** —— HTTP、Servlet、Session、Tomcat。
+- **第 69 章 Spring 核心** —— IoC、DI、AOP、事务。
+- **第 70 章 Spring Boot** —— 自动配置、REST API、虚拟线程、Actuator。
+- **第 71 章 数据访问层** —— MyBatis、MyBatis-Plus、JPA、Flyway。
+- **第 72 章 安全与认证（本章）** —— Spring Security、JWT、OAuth 2.0。
+
+这五章让你能构建完整的 Web 应用——从 HTTP 接入到业务逻辑到数据存储到安全认证。下一阶段进入更高级的话题——**设计模式、数据结构与算法、Redis、消息队列、微服务、Docker**——把单体应用升级到分布式系统。

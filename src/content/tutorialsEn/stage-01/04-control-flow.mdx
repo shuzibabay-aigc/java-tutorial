@@ -1,0 +1,426 @@
+---
+title: "Control Flow"
+chapter: 4
+stage: "Stage 1"
+stageName: "Java Fundamentals"
+order: 4
+description: "Master if-else, switch expressions, while, for, break/continue, and other control flow statements, with a hands-on guess-the-number game"
+pubDate: 2026-07-03
+tags: ["Java", "控制流程", "switch", "循环", "基础入门"]
+---
+
+# Control Flow
+
+Up to now, every program we have written executes top to bottom in sequence—like a straight highway with no forks. But real-world problems are far more complex: a barista must decide whether to add sugar based on a customer's request, whether a cup can be served based on inventory, and how many cups to extract based on the number of orders... Programs need the ability to **choose** and to **repeat**.
+
+This is the responsibility of **control flow**. It teaches programs to "make decisions" and "repeat work." In this chapter, we will learn Java's two major control structures: **branching** and **looping**, and then bring everything together with a classic "guess the number" game.
+
+## I. if-else: The Wisdom of Choice
+
+`if-else` is the most fundamental conditional statement. It is like a barista asking a customer, "Would you like sugar?"—the answer determines which branch is taken.
+
+### 1.1 Basic Forms
+
+```java
+// 1. Single branch
+if (condition) {
+    // Executed when condition is true
+}
+
+// 2. Two branches
+if (condition) {
+    // Executed when condition is true
+} else {
+    // Executed when condition is false
+}
+
+// 3. Multiple branches
+if (condition1) {
+    // condition1 is true
+} else if (condition2) {
+    // condition2 is true
+} else if (condition3) {
+    // condition3 is true
+} else {
+    // None of the above conditions are met
+}
+```
+
+### 1.2 Example: Recommending Coffee Based on Temperature
+
+```java
+int temperature = 35;  // Temperature 35°C
+
+if (temperature >= 30) {
+    System.out.println("天气炎热，推荐冰美式 ☕🧊");
+} else if (temperature >= 20) {
+    System.out.println("天气温和，推荐拿铁 ☕");
+} else if (temperature >= 10) {
+    System.out.println("天气微凉，推荐卡布奇诺 ☕");
+} else {
+    System.out.println("天气寒冷，推荐热可可 🍫");
+}
+```
+
+Both `else if` and `else` are optional. The `if` statement evaluates conditions from top to bottom—**as soon as one condition is true, its block executes, and all subsequent branches are skipped**.
+
+### 1.3 Things to Watch Out For
+
+- **Never omit the braces**: Although braces can be omitted for a single statement, this leads to hard-to-spot bugs (the infamous Apple `goto fail` vulnerability stemmed from this). **Always use braces**.
+- **Dangling else**: An `else` always pairs with the nearest `if`. When code indentation is misleading, this can cause errors—braces eliminate the ambiguity.
+- **Avoid deep nesting**: More than three levels of `if` nesting makes code hard to read. You can simplify with "early return" or "guard clauses":
+
+```java
+// Not recommended: nesting too deep
+public String check(int score) {
+    if (score >= 0) {
+        if (score >= 60) {
+            if (score >= 90) {
+                return "优秀";
+            } else {
+                return "及格";
+            }
+        } else {
+            return "不及格";
+        }
+    } else {
+        return "无效分数";
+    }
+}
+
+// Recommended: guard clauses, flattened
+public String check(int score) {
+    if (score < 0) return "无效分数";
+    if (score < 60) return "不及格";
+    if (score < 90) return "及格";
+    return "优秀";
+}
+```
+
+## II. switch: A Powerful Tool for Multi-Way Branching
+
+When you need to route a single variable through many possible values, `if-else if` chains become verbose. The `switch` statement was built for exactly this—it is clearer and more efficient.
+
+### 2.1 The Traditional switch Statement
+
+```java
+int dayOfWeek = 3;  // 1=Monday...7=Sunday
+switch (dayOfWeek) {
+    case 1:
+        System.out.println("星期一，意式浓缩提神");
+        break;
+    case 2:
+        System.out.println("星期二，美式续命");
+        break;
+    case 3:
+        System.out.println("星期三，拿铁小确幸");
+        break;
+    case 6:
+    case 7:
+        System.out.println("周末，摩卡享受时光");
+        break;
+    default:
+        System.out.println("其他日子，喝什么都行");
+        break;
+}
+```
+
+Types supported by switch: `byte`, `short`, `int`, `char`, `String` (Java 7+), `enum` (Java 5+). It does not support `long`, `float`, `double`, or `boolean`.
+
+### 2.2 Fall-Through and break
+
+An important characteristic of switch is **fall-through**: if a `case` has no `break`, execution "falls through" to the next `case` until a `break` is encountered or the switch ends.
+
+This is sometimes a source of bugs (forgetting to write `break`), but it can also be intentional—as in the example above, where `case 6` and `case 7` share the same code by leveraging fall-through.
+
+### 2.3 Switch Expressions (Java 14+)
+
+Java 14 introduced **switch expressions**, which use a more concise "arrow syntax" (`-＞`) in place of the traditional `:` and `break`, and have **no fall-through**:
+
+```java
+int dayOfWeek = 3;
+String coffee = switch (dayOfWeek) {
+    case 1 -> "意式浓缩";
+    case 2 -> "美式";
+    case 3 -> "拿铁";
+    case 4 -> "卡布奇诺";
+    case 5 -> "摩卡";
+    case 6, 7 -> "周末特调";
+    default -> "随便";
+};
+System.out.println("今天的咖啡：" + coffee);
+```
+
+Key features:
+- Uses the `-＞` arrow; no `break` needed, and there is no fall-through.
+- **switch is now an expression**—it can produce a value, assigned with `=`.
+- Multiple values can be combined with commas: `case 6, 7 -＞`.
+- The right side of the arrow can be a single statement, a block, or a value.
+- All possible cases must be covered, or a `default` must be provided.
+
+### 2.4 The yield Keyword
+
+When the right side of the arrow is a block (`{}`) and needs to return a value, use the `yield` keyword:
+
+```java
+int dayOfWeek = 3;
+int price = switch (dayOfWeek) {
+    case 1, 2, 3, 4, 5 -> {
+        System.out.println("工作日，原价");
+        yield 28;  // Use yield to return a value from a block
+    }
+    case 6, 7 -> {
+        System.out.println("周末，打八折");
+        yield 22;
+    }
+    default -> 0;
+};
+```
+
+> 💡 **When to use switch, when to use if-else?**
+> - Equality matching (a variable equals a specific value) → `switch`
+> - Range checks, complex conditions → `if-else`
+> switch is typically clearer for equality matching, and the JVM optimizes it into a jump table (tableswitch) for better performance.
+
+## III. while Loops: Indefinite Repetition
+
+The `while` loop is used for "as long as a condition holds, keep repeating." It is like an automatic coffee machine—as long as there are orders (the condition is true), it keeps making coffee.
+
+### 3.1 The while Loop
+
+```java
+while (condition) {
+    // Loop body
+}
+// The condition is checked first, then the body executes
+```
+
+```java
+int cups = 1;
+while (cups <= 5) {
+    System.out.println("制作第 " + cups + " 杯咖啡");
+    cups++;
+}
+System.out.println("5 杯咖啡全部完成！");
+```
+
+> ⚠️ **Infinite loop trap**: If the loop body never changes the condition, the loop will never end and the program will "hang." Always ensure the loop condition will eventually become `false`.
+
+### 3.2 The do-while Loop
+
+```java
+do {
+    // Loop body
+} while (condition);
+// The body executes first, then the condition is checked
+```
+
+The difference between `do-while` and `while`: **the body executes at least once**. It is suited for situations where you "do it once first, then decide whether to continue."
+
+```java
+int password;
+do {
+    System.out.println("请输入密码：");
+    // password = scanner.nextInt();  // Assume this reads user input
+    password = 1234;  // For demonstration
+} while (password != 1234);
+System.out.println("密码正确，登录成功！");
+```
+
+## IV. for Loops: Definite Repetition
+
+The `for` loop is used when "the number of iterations is known." It brings the three essential parts—initialization, condition, and step—together on a single line for a clear structure.
+
+### 4.1 The Classic for Loop
+
+```java
+for (initialization; condition; step) {
+    // Loop body
+}
+```
+
+```java
+// Print the squares of 1 through 10
+for (int i = 1; i <= 10; i++) {
+    System.out.printf("%d 的平方是 %d%n", i, i * i);
+}
+```
+
+Execution order:
+1. **Initialization** (`int i = 1`) — executed only once, at the start of the loop.
+2. **Condition check** (`i ＜= 10`) — if true, execute the body; if false, exit the loop.
+3. **Loop body** — execute the actual logic.
+4. **Step** (`i++`) — modify the loop variable.
+5. Return to step 2 and repeat.
+
+All three parts can be omitted, but the semicolons cannot: `for (;;)` is an infinite loop (equivalent to `while (true)`).
+
+### 4.2 The Enhanced for Loop (for-each)
+
+Java 5 introduced the enhanced for loop, also called for-each, for iterating over arrays or collections with more concise syntax:
+
+```java
+int[] scores = {90, 85, 78, 92, 88};
+for (int score : scores) {
+    System.out.println("分数：" + score);
+}
+// Equivalent to:
+// for (int i = 0; i < scores.length; i++) {
+//     int score = scores[i];
+//     System.out.println("分数：" + score);
+// }
+```
+
+`for (element type variable : container)` takes each element from the container in turn. Its advantages are conciseness and safety against index out-of-bounds, but it **cannot access the index** and **cannot modify the container** during iteration.
+
+## V. break and continue: Controlling Loops
+
+### 5.1 break: Exit the Loop
+
+`break` immediately terminates the loop it is in:
+
+```java
+for (int i = 1; i <= 100; i++) {
+    if (i * i > 500) {
+        System.out.println("找到第一个平方大于 500 的数：" + i);
+        break;  // Exit the loop immediately
+    }
+}
+```
+
+### 5.2 continue: Skip This Iteration
+
+`continue` skips the current iteration and proceeds directly to the next one:
+
+```java
+// Print all odd numbers from 1 to 10
+for (int i = 1; i <= 10; i++) {
+    if (i % 2 == 0) {
+        continue;  // Skip even numbers
+    }
+    System.out.println(i);
+}
+```
+
+### 5.3 Labeled break
+
+Java supports **labeled break**, which can exit multiple nested loops—a feature many other languages lack:
+
+```java
+outer:  // Label
+for (int i = 1; i <= 10; i++) {
+    for (int j = 1; j <= 10; j++) {
+        if (i * j > 50) {
+            System.out.printf("第一个 i*j>50 的组合：i=%d, j=%d%n", i, j);
+            break outer;  // Break out of the outer loop directly
+        }
+    }
+}
+```
+
+`continue` can also take a label, jumping to the next iteration of an outer loop. However, labeled break/continue is rarely used in practice—refactoring (such as extracting a method or using a return value) usually makes the code clearer.
+
+## VI. Nested Loops and Performance
+
+Loops can be nested, but be mindful of performance. In a doubly nested loop where the outer loop runs n times and the inner loop runs m times, the total number of executions is n × m. When both n and m are large, performance degrades sharply.
+
+A classic example: printing a multiplication table.
+
+```java
+for (int i = 1; i <= 9; i++) {
+    for (int j = 1; j <= i; j++) {
+        System.out.printf("%d×%d=%-4d", j, i, i * j);
+    }
+    System.out.println();
+}
+```
+
+Output:
+```
+1×1=1   
+1×2=2   2×2=4   
+1×3=3   2×3=6   3×3=9   
+...(and so on)
+```
+
+> 💡 **Optimization tips**: Minimize the depth of loop nesting; hoist computations that do not depend on the inner loop to the outer loop; avoid repeating expensive operations (such as method calls or object creation) inside loops.
+
+## VII. Hands-On: The Guess the Number Game
+
+Let us put everything from this chapter together and write a classic "guess the number" game: the program generates a random number between 1 and 100, the player guesses repeatedly, and the program responds with "too high" or "too low" until the player guesses correctly.
+
+Since the online execution environment cannot read user input, we will have the program "guess automatically"—using a binary search strategy to simulate the player's guessing process:
+
+<CodeRunner code={`public class Main {
+    public static void main(String[] args) {
+        // 1. 生成一个 1-100 的随机目标数字
+        int target = (int) (Math.random() * 100) + 1;
+        System.out.println("🎯 系统生成了一个 1-100 之间的神秘数字：" + target);
+        System.out.println("=== 开始猜数字游戏 ===");
+
+        // 2. 自动猜测：使用二分查找策略
+        int low = 1;
+        int high = 100;
+        int guessCount = 0;
+        boolean guessed = false;
+
+        while (low <= high && !guessed) {
+            int guess = (low + high) / 2;  // 取中间值
+            guessCount++;
+
+            if (guess == target) {
+                System.out.printf("第 %d 次猜测：%d —— 猜对了！🎉%n", guessCount, guess);
+                guessed = true;
+            } else if (guess < target) {
+                System.out.printf("第 %d 次猜测：%d —— 太小了，往大猜 ↑%n", guessCount, guess);
+                low = guess + 1;
+            } else {
+                System.out.printf("第 %d 次猜测：%d —— 太大了，往小猜 ↓%n", guessCount, guess);
+                high = guess - 1;
+            }
+        }
+
+        // 3. 游戏结束总结
+        System.out.println("=== 游戏结束 ===");
+        System.out.printf("目标数字：%d，共猜了 %d 次%n", target, guessCount);
+
+        // 4. 根据 switch 表达式给出评价
+        String rating = switch (guessCount) {
+            case 1, 2, 3 -> "神机妙算！🏆";
+            case 4, 5, 6 -> "相当不错！👍";
+            case 7 -> "及格水平 🙂";
+            default -> "还需要练习 🤔";
+        };
+        System.out.println("评价：" + rating);
+    }
+}`} />
+
+This program puts together:
+- `Math.random()` to generate a random number
+- A `while` loop to control the guessing process
+- `if-else if-else` to evaluate each guess
+- A `switch` expression to produce a rating
+- A `boolean` variable `guessed` to control loop exit
+- `printf` for formatted output
+
+> 💡 Binary search is a classic algorithm in computer science. Each guess eliminates half of the remaining possibilities, so a number between 1 and 100 can always be found in at most 7 guesses (since 2⁷ = 128 > 100). That is the power of algorithms.
+
+## VIII. Chapter Recap
+
+| Structure | Use Case | Key Points |
+| --- | --- | --- |
+| `if-else if-else` | Conditional branching | Always use braces; avoid deep nesting |
+| `switch` statement | Multi-way equality branching | Watch for fall-through; remember `break` |
+| `switch` expression (Java 14+) | Multi-way branching with a return value | Arrow syntax `-＞`, no fall-through |
+| `while` | Indefinite iteration | Checks condition first, then executes |
+| `do-while` | Loop that runs at least once | Executes first, then checks condition |
+| `for` | Definite iteration | Three parts on one line |
+| `for-each` | Iterating arrays/collections | Concise, but no index access |
+| `break` | Exit a loop | Can take a label to exit multiple levels |
+| `continue` | Skip the current iteration | Can take a label |
+
+## Conclusion
+
+Control flow gives programs the ability to "think" and "repeat." `if-else` lets a program make choices, `switch` makes multi-way branching elegant, and `while` and `for` let a program repeat tirelessly. These are the building blocks of any complex logic—from games to operating systems, none can do without them.
+
+In the next chapter, we will learn about Java **arrays**—a container that can hold multiple values of the same type. Just as a coffee shop's shelf can hold many cups of coffee, arrays let us process data in bulk. We will also use arrays to implement the classic bubble sort and binary search algorithms, putting the looping techniques from this chapter to the ultimate test.

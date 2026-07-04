@@ -1,0 +1,557 @@
+---
+title: "Git 版本控制"
+chapter: 64
+stage: "第十二阶段"
+stageName: "工程化与生态"
+order: 2
+description: "掌握 Git 基础（init/add/commit/push/pull/clone）、分支管理（branch/checkout/merge/rebase）、远程协作（remote/PR/Code Review）、.gitignore 与 GitHub/Gitee 实战"
+pubDate: 2026-07-03
+tags: ["Java", "Git", "版本控制", "GitHub", "分支管理"]
+---
+
+# Git 版本控制
+
+写代码最痛的瞬间是什么？"昨天还能跑，今天怎么不行了？"——你忘了改了什么。或者更糟——多人协作时，A 改了 `UserService.java`，B 也改了 `UserService.java`，互相覆盖一团糟。**版本控制系统（Version Control System, VCS）** 就是为解决这个问题而生——它记录每次修改，让你随时回退、并行开发、合并代码。
+
+Git 是 Linus Torvalds（Linux 之父）2005 年开发的分布式 VCS，现在是事实标准。这一章我们看 Git 怎么用、怎么协作。
+
+## 一、为什么需要 Git
+
+设想一个不用版本控制的团队：
+
+- **备份靠复制** —— `UserService.java.bak`、`UserService.java.bak2`、`UserService_final.java`、`UserService_真的final.java`……文件爆炸。
+- **合并靠人工** —— A 把文件发给 B，B 手动 diff 合并，改到吐血。
+- **回退靠记忆** —— "上周三我改了哪行？"——没人记得。
+- **协作靠喊** —— "你别动这个文件，我在改！"——一不喊就冲突。
+
+Git 解决这些问题：
+
+1. **完整历史** —— 每次提交（commit）都是个快照，能回到任意历史版本。
+2. **分支并行** —— 开新分支不影响主分支，多人各自开发。
+3. **自动合并** —— 同文件不同位置改动自动合并，冲突才需人工。
+4. **远程协作** —— push/pull 同步到远程仓库，团队共享。
+
+## 二、Git 基础
+
+### 2.1 三个区域与三种状态
+
+Git 有三个核心区域：
+
+- **工作区（Working Directory）** —— 你看到的目录文件。
+- **暂存区（Staging Area / Index）** —— 准备提交的快照。
+- **版本库（Repository）** —— 提交历史。
+
+对应三种状态：
+
+```
+工作区 --git add--> 暂存区 --git commit--> 版本库
+       (modified)        (staged)            (committed)
+```
+
+### 2.2 基本工作流
+
+```bash
+# 1. 初始化仓库
+git init                        # 在当前目录创建 .git/
+git clone https://github.com/user/repo.git   # 克隆远程仓库
+
+# 2. 配置 (一次性)
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+
+# 3. 日常工作流
+git status                      # 查看状态
+git add Main.java               # 加入暂存区
+git add .                       # 加入所有改动
+git commit -m "修复登录bug"     # 提交到版本库
+git log --oneline -5            # 查看最近 5 次提交
+
+# 4. 同步远程
+git push origin main            # 推送到远程 main 分支
+git pull origin main            # 拉取远程更新
+git fetch                       # 拉取但不合并
+```
+
+**提交信息（commit message）的好习惯**：
+
+- 用祈使句：`修复登录bug`，不是 `修复了登录bug`。
+- 第一行简短（＜50 字），空一行再写详细说明。
+- 描述"为什么"而不是"做了什么"——diff 已经说明做了什么。
+- 用前缀分类：`feat:`、`fix:`、`docs:`、`refactor:`、`test:`。
+
+```
+fix: 修复用户登录时密码为空导致的 NPE
+
+UserService.verify 在 password 为 null 时直接调用 equals,
+导致 NPE. 提前判空返回 false.
+```
+
+### 2.3 .gitignore
+
+有些文件不该进版本库——编译输出、IDE 配置、密钥。`.gitignore` 文件指定忽略规则：
+
+```gitignore
+# 编译输出
+target/
+build/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+logs/
+
+# 敏感 (千万别提交!)
+.env
+application-local.yml
+*.pem
+*.key
+
+# 依赖
+node_modules/
+```
+
+`github.com/github/gitignore` 有各种语言的现成模板。**密钥类文件千万别提交**——一旦推到 GitHub 公共仓库，爬虫秒抓，必须立即吊销。
+
+## 三、分支管理
+
+分支是 Git 的灵魂——它让"并行开发"成为可能。每个分支是个独立的时间线，互不干扰。
+
+### 3.1 基本分支操作
+
+```bash
+git branch                      # 查看本地分支
+git branch -a                   # 查看所有分支 (含远程)
+git branch feature-login        # 创建分支
+git checkout feature-login      # 切换分支
+git checkout -b feature-login   # 创建并切换 (常用)
+git switch feature-login        # 切换分支 (新命令, 比 checkout 语义清晰)
+git switch -c feature-login     # 创建并切换
+
+git branch -d feature-login     # 删除分支 (已合并才能删)
+git branch -D feature-login     # 强制删除
+git push origin --delete feature-login  # 删除远程分支
+```
+
+### 3.2 分支策略
+
+常见分支模型：
+
+- **`main` / `master`** —— 生产分支，永远可部署。
+- **`develop`** —— 开发主线，集成各 feature 分支。
+- **`feature/*`** —— 新功能分支，从 develop 拉出，完成后合并回。
+- **`hotfix/*`** —— 紧急修复，从 main 拉出，合并回 main 和 develop。
+- **`release/*`** —— 发布准备。
+
+GitHub Flow（简化版）：
+
+- `main` 是生产分支。
+- 任何改动从 `main` 拉新分支（`feature/xxx`）。
+- 完成后发 PR，Code Review 通过后合并回 `main`。
+- 没有 `develop`/`release`，足够小团队用。
+
+### 3.3 合并 vs Rebase
+
+把分支合并回主干有两种方式：
+
+**Merge**——保留分支历史，创建合并提交：
+
+```bash
+git checkout main
+git merge feature-login
+# 生成 merge commit, 历史是分叉+合并的形状
+```
+
+```
+*   merge commit (main)
+|\
+| * feature commit 3 (feature-login)
+| * feature commit 2
+| * feature commit 1
+|/
+*   previous main commit
+```
+
+**Rebase**——把分支提交"挪"到主干顶部，历史是直线的：
+
+```bash
+git checkout feature-login
+git rebase main      # 把 feature 的提交"重放"在 main 顶部
+git checkout main
+git merge feature-login   # fast-forward, 直线历史
+```
+
+```
+* feature commit 3 (main)
+* feature commit 2
+* feature commit 1
+* previous main commit
+```
+
+| 方式 | 历史 | 优点 | 缺点 |
+| --- | --- | --- | --- |
+| Merge | 分叉+合并 | 保留完整上下文 | 历史杂乱 |
+| Rebase | 直线 | 历史清晰 | 改写了提交哈希 |
+
+**经验**：
+
+- 团队主分支用 **merge**（保留上下文）。
+- 个人 feature 分支更新主干时用 **rebase**（避免无谓的 merge commit）。
+- **永远不要 rebase 已推到公共分支的提交**——会改写历史，别人 pull 时冲突爆炸。
+
+### 3.4 解决冲突
+
+当两个分支改了同一行代码，合并时冲突：
+
+```
+git merge feature-login
+# Auto-merging UserService.java
+# CONFLICT (content): Merge conflict in UserService.java
+```
+
+打开文件，会看到冲突标记：
+
+```java
+public void login(String name) {
+<<<<<<< HEAD
+    System.out.println("main 分支版本");
+=======
+    System.out.println("feature 分支版本");
+>>>>>>> feature-login
+}
+```
+
+手动选择保留哪个（或合并两者），删掉冲突标记，再 `git add` + `git commit`。
+
+```bash
+git mergetool        # 用图形工具解决冲突
+git add UserService.java
+git commit           # 完成合并
+git merge --abort    # 放弃合并, 回到合并前状态
+```
+
+减少冲突的策略——**频繁同步** + **小步提交** + **短生命周期分支**。一个分支活两周，冲突必然大；活两天，冲突就小。
+
+## 四、远程协作
+
+### 4.1 远程仓库
+
+```bash
+git remote -v                   # 查看远程仓库
+git remote add origin https://github.com/user/repo.git   # 添加远程
+git remote remove origin        # 移除
+git remote set-url origin URL   # 修改 URL
+
+git push origin main            # 推送
+git push -u origin feature      # 推送并设置上游 (后续 git push 不用指定)
+git pull                        # 拉取并合并 (等价 fetch + merge)
+git fetch                       # 拉取但不合并, 看 git log origin/main 看远程状态
+```
+
+### 4.2 SSH vs HTTPS
+
+```bash
+# HTTPS: 每次要输密码 (用 token 代替密码, GitHub 2021 起强制)
+git clone https://github.com/user/repo.git
+
+# SSH: 配好 key 后免密, 推荐
+git clone git@github.com:user/repo.git
+```
+
+配 SSH key：
+
+```bash
+ssh-keygen -t ed25519 -C "you@example.com"
+# 一路回车, 生成 ~/.ssh/id_ed25519 (私钥) 和 .pub (公钥)
+# 把 .pub 内容粘到 GitHub -> Settings -> SSH and GPG keys
+```
+
+### 4.3 Pull Request (PR) 工作流
+
+GitHub/Gitee 的核心协作机制——PR（Pull Request）：
+
+1. **Fork** 主仓库到自己的账号（如果是开源贡献）。
+2. **Clone** 自己的 fork 到本地。
+3. **新建分支** `feature/xxx`，开发。
+4. **Push** 到自己的 fork。
+5. 在 GitHub 上发 **Pull Request** 到主仓库。
+6. 维护者 **Code Review**，提意见，你修改。
+7. 通过后 **Merge** 到主分支。
+
+Code Review 是 PR 的核心——同事看你的代码，提建议、找 bug、统一风格。这是团队代码质量的关键保障。
+
+```bash
+# 同步上游 (主仓库) 的更新到自己的 fork
+git remote add upstream https://github.com/original/repo.git
+git fetch upstream
+git checkout main
+git merge upstream/main
+git push origin main
+```
+
+## 五、实战：常用命令速查
+
+由于 Git 是命令行工具，无法在 Piston 运行，下面用 Java 模拟一个**简易提交历史**——展示 commit/branch/merge 的概念。
+
+<CodeRunner code={`import java.util.*;
+import java.util.stream.*;
+
+// 模拟 Git 提交
+class Commit {
+    final String id;            // 哈希 (模拟)
+    final String message;
+    final List<Commit> parents; // 父提交 (1 个普通, 2 个 merge)
+    Commit(String id, String msg, Commit... parents) {
+        this.id = id; this.message = msg; this.parents = Arrays.asList(parents);
+    }
+    @Override public String toString() { return id + ":" + message; }
+}
+
+// 模拟 Git 仓库
+class MiniGit {
+    private final Map<String, Commit> branches = new LinkedHashMap<>();
+    private String current;
+    private int seq = 0;
+
+    public MiniGit(String initialBranch) {
+        branches.put(initialBranch, null);
+        current = initialBranch;
+    }
+
+    public void checkout(String branch) {
+        if (!branches.containsKey(branch)) {
+            System.out.println("[Git] 创建并切换到分支 " + branch);
+            branches.put(branch, branches.get(current));   // 从当前分支拉
+        } else {
+            System.out.println("[Git] 切换到分支 " + branch);
+        }
+        current = branch;
+    }
+
+    public Commit commit(String msg) {
+        Commit c = new Commit("c" + (++seq), msg,
+            branches.get(current) == null ? new Commit[0] : new Commit[]{branches.get(current)});
+        branches.put(current, c);
+        System.out.println("[Git] (" + current + ") " + c);
+        return c;
+    }
+
+    public void merge(String fromBranch) {
+        Commit fromHead = branches.get(fromBranch);
+        Commit curHead = branches.get(current);
+        if (fromHead == null) {
+            System.out.println("[Git] " + fromBranch + " 是空分支, 无需合并");
+            return;
+        }
+        if (curHead == null) {
+            branches.put(current, fromHead);
+            System.out.println("[Git] fast-forward 合并 " + fromBranch + " -> " + current);
+            return;
+        }
+        // 模拟 merge commit
+        Commit merge = new Commit("c" + (++seq),
+            "Merge branch '" + fromBranch + "' into " + current, curHead, fromHead);
+        branches.put(current, merge);
+        System.out.println("[Git] 创建 merge commit: " + merge);
+    }
+
+    public void log() {
+        System.out.println("[Git] === " + current + " 提交历史 (逆序) ===");
+        Commit c = branches.get(current);
+        Set<String> visited = new HashSet<>();
+        Deque<Commit> stack = new ArrayDeque<>();
+        stack.push(c);
+        while (!stack.isEmpty()) {
+            Commit cur = stack.pop();
+            if (cur == null || !visited.add(cur.id)) continue;
+            System.out.println("    " + cur);
+            for (Commit p : cur.parents) stack.push(p);
+        }
+    }
+
+    public void branchList() {
+        System.out.println("[Git] 分支列表:");
+        branches.forEach((b, head) ->
+            System.out.println("    " + (b.equals(current) ? "* " : "  ") + b
+                + " -> " + (head == null ? "(空)" : head.id)));
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== Git 工作流模拟 ===\\n");
+
+        MiniGit git = new MiniGit("main");
+
+        // 1. 在 main 上提交初始代码
+        System.out.println("--- 1. main 分支初始提交 ---");
+        git.commit("初始化项目");
+        git.commit("添加用户实体");
+
+        // 2. 拉新分支开发登录功能
+        System.out.println("\\n--- 2. 新建 feature/login 分支开发 ---");
+        git.checkout("feature/login");
+        git.commit("实现登录方法");
+        git.commit("添加密码校验");
+
+        // 3. 同时 main 修了个 bug
+        System.out.println("\\n--- 3. main 分支修 bug ---");
+        git.checkout("main");
+        git.commit("修复空指针 bug");
+
+        // 4. 看分支状态
+        System.out.println("\\n--- 4. 分支列表 ---");
+        git.branchList();
+
+        // 5. 合并 feature/login 到 main
+        System.out.println("\\n--- 5. 合并 feature/login 到 main ---");
+        git.merge("feature/login");
+
+        // 6. 查看 main 的历史
+        System.out.println("\\n--- 6. main 提交历史 ---");
+        git.log();
+
+        // 7. 删除已合并分支
+        System.out.println("\\n--- 7. 删除已合并的 feature/login ---");
+        System.out.println("[Git] 删除分支 feature/login (已合并)");
+
+        System.out.println("\\n=== Git 常用命令速查 ===");
+        System.out.println("基础: init/clone/add/commit/status/log");
+        System.out.println("分支: branch/checkout/switch/merge");
+        System.out.println("远程: remote/push/pull/fetch");
+        System.out.println("撤销: reset/revert/checkout --");
+        System.out.println("高级: rebase/cherry-pick/stash/tag");
+        System.out.println("协作: PR/Code Review/Issue");
+
+        System.out.println("\\n=== 最佳实践 ===");
+        System.out.println("1. 小步提交, message 写清\"为什么\"");
+        System.out.println("2. .gitignore 排除编译产物和密钥");
+        System.out.println("3. 频繁 pull, 减少冲突");
+        System.out.println("4. 公共分支用 merge, 个人分支用 rebase");
+        System.out.println("5. 永远不 rebase 已推送的公共提交");
+        System.out.println("6. 密钥绝不提交 (用 .env + .gitignore)");
+    }
+}`} />
+
+> **观察重点**：
+> - **`main` 和 `feature/login` 是两条独立时间线**——切分支不影响对方历史。
+> - **`merge` 创建合并提交**——它有两个父提交，是两条分支的交点。
+> - **`log` 倒序遍历**——从最新提交往回追父提交。
+> - **冲突不在模拟里**——真实 Git 同行改动才冲突，要手动解决。
+
+## 六、撤销操作
+
+撤销是 Git 最常用的"后悔药"：
+
+```bash
+# 撤销工作区改动 (未 add)
+git restore Main.java              # 新命令
+git checkout -- Main.java          # 老命令
+
+# 撤销暂存 (已 add, 未 commit)
+git restore --staged Main.java
+git reset HEAD Main.java
+
+# 撤销最近一次提交 (保留改动)
+git reset --soft HEAD~1            # 改动留在暂存区
+git reset HEAD~1                   # 改动留在工作区 (默认 --mixed)
+git reset --hard HEAD~1            # 完全丢弃改动 (危险!)
+
+# 用新提交撤销旧提交 (不改历史, 安全)
+git revert HEAD                    # 创建一个"反向"提交
+
+# 暂存当前改动 (不提交, 留着以后用)
+git stash                          # 保存当前工作区
+git stash list                     # 查看
+git stash pop                      # 取回最近一个
+```
+
+**`reset` vs `revert`**：
+
+- `reset` 改写历史——把 HEAD 移到指定提交。**只用于本地未推送的提交**。
+- `revert` 创建新提交——历史里多一个"反向"提交，原提交还在。**用于已推送的公共提交**。
+
+铁律：**已推送到公共分支的提交，永远用 `revert` 不用 `reset`**——改写历史会让其他人 pull 时爆炸。
+
+## 七、高级技巧
+
+### 7.1 cherry-pick
+
+只挑某个分支的某个提交过来：
+
+```bash
+git cherry-pick abc1234   # 把 abc1234 这个提交应用到当前分支
+```
+
+场景：`hotfix` 分支修了个 bug，要同步到 `develop`，但不想合并整个分支——只 cherry-pick 那个修复提交。
+
+### 7.2 stash
+
+临时切换任务，当前改动没提交又不想丢：
+
+```bash
+git stash                # 保存当前改动到栈
+git checkout other-branch
+# 干别的活...
+git checkout original-branch
+git stash pop            # 取回
+```
+
+### 7.3 tag
+
+打标签标记发布版本：
+
+```bash
+git tag v1.0.0                    # 轻量标签
+git tag -a v1.0.0 -m "正式版"      # 附注标签 (推荐)
+git push origin v1.0.0            # 推送标签
+git tag                           # 查看标签
+```
+
+### 7.4 reflog
+
+Git 的"后悔药之后悔药"——记录所有 HEAD 移动，连 reset 删掉的提交都能找回：
+
+```bash
+git reflog                # 查看 HEAD 历史
+git reset --hard HEAD@{5} # 回到 5 步之前的状态
+```
+
+误删分支、reset 错了都靠它救命。
+
+## 八、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| 三个区域 | 工作区/暂存区/版本库 |
+| 基本流 | add → commit → push |
+| 分支 | 独立时间线，并行开发 |
+| merge | 保留分支历史，创建 merge commit |
+| rebase | 直线历史，不改公共提交 |
+| 冲突 | 同行改动需手动解决 |
+| `.gitignore` | 排除文件不入库 |
+| PR | Pull Request 协作工作流 |
+| `reset` | 改写历史，仅本地用 |
+| `revert` | 反向提交，公共分支用 |
+
+**记忆口诀**：
+
+- **三区流转**——工作区 add 暂存区 commit 版本库 push 远程。
+- **分支即时间线**——切分支互不干扰。
+- **公共分支用 merge**——保留历史。
+- **公共提交别 rebase**——会改写哈希。
+- **撤销本地用 reset**，**公共用 revert**。
+- **密钥进 .gitignore**——千万别提交。
+
+## 结语：从单机到协作
+
+这一章我们看了 Git——从单机版本控制到远程协作，从分支并行到 PR Review。Git 是程序员必备工具，越早熟练越受益。下一章我们看另一个工程化利器——**测试**，用 JUnit + Mockito 让代码质量可量化、可回归。

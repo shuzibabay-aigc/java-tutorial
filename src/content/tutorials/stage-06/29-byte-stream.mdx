@@ -1,0 +1,343 @@
+---
+title: "字节流"
+chapter: 29
+stage: "第六阶段"
+stageName: "I/O 与 NIO"
+order: 2
+description: "掌握 InputStream/OutputStream 抽象类、文件流、缓冲流、数据流，理解装饰器模式在 IO 中的应用与 try-with-resources 资源管理"
+pubDate: 2026-07-03
+tags: ["Java", "IO", "字节流", "InputStream", "OutputStream", "装饰器模式", "try-with-resources"]
+---
+
+# 字节流
+
+如果说文件是数据的归宿，那字节流（byte stream）就是数据流动的"水管"。计算机里的一切——文本、图片、视频、可执行文件——归根到底都是一串字节。Java 的字节流抽象让"读写字节"这件事变得统一：无论数据来自磁盘、网络还是内存，都用同一套 API 处理。
+
+这一章，我们从最底层的 `InputStream`/`OutputStream` 抽象类讲起，一路到缓冲流、数据流，最后揭示一个被很多人忽视的设计之美——**装饰器模式**如何让 Java IO 拥有"乐高式"的组合能力。
+
+## 一、为什么需要"流"
+
+想象你有一份 10GB 的日志文件要处理。如果"一次性读入内存再处理"，内存直接爆炸。但用流的方式——一次读 1KB、处理、再读 1KB——10GB 也能在 512MB 内存的机器上跑完。
+
+流的本质是：**把数据当作"连续的水流"处理，而不是"一桶水"**。你不必知道总量有多少，只需一勺一勺地舀。这种"边读边处理"的模式，是处理大数据、网络通信的基础。
+
+Java 的字节流以 `byte`（8 位）为最小单位，对应抽象类 `InputStream`（读）与 `OutputStream`（写）。
+
+## 二、InputStream：读字节的水管
+
+`InputStream` 是所有字节输入流的抽象基类，定义了"读字节"的契约。
+
+### 2.1 核心方法
+
+```java
+public abstract class InputStream implements Closeable {
+    public abstract int read() throws IOException;          // 读 1 个字节（返回 0~255，到末尾返回 -1）
+    public int read(byte[] b) throws IOException;           // 批量读入 b.length 个字节
+    public int read(byte[] b, int off, int len);            // 读入 len 个字节到 b[off..]
+    public int available() throws IOException;              // 估计还能读多少字节（不阻塞）
+    public long transferTo(OutputStream out);               // 把剩余数据全部转到 out（Java 9+）
+    public void close() throws IOException;                 // 关闭流
+}
+```
+
+**关键细节**：`read()` 返回 `int` 而不是 `byte`——因为要用 `-1` 表示"读到末尾"。`byte` 是有符号的（-128~127），无法表示 -1 与正常字节的区别；用 `int` 则 0~255 表示字节值，-1 表示结束。
+
+### 2.2 经典读取循环
+
+```java
+InputStream in = ...;
+byte[] buffer = new byte[1024];
+int n;
+while ((n = in.read(buffer)) != -1) {
+    // 处理 buffer 的前 n 个字节
+    // 注意：是 n，不是 buffer.length！最后一次通常不满
+}
+in.close();
+```
+
+这个 `while ((n = in.read(buffer)) != -1)` 模式是字节流的"hello world"——记下来，它会陪你写一辈子 IO 代码。
+
+## 三、OutputStream：写字节的水管
+
+`OutputStream` 是 `InputStream` 的镜像，定义"写字节"的契约：
+
+```java
+public abstract class OutputStream implements Closeable, Flushable {
+    public abstract void write(int b) throws IOException;        // 写 1 个字节（取低 8 位）
+    public void write(byte[] b) throws IOException;              // 写整个数组
+    public void write(byte[] b, int off, int len);               // 写 b[off..off+len]
+    public void flush() throws IOException;                      // 把缓冲区数据强制写出
+    public void close() throws IOException;
+}
+```
+
+**flush 的意义**：很多输出流内部有缓冲区（先攒一波再写磁盘，性能更高）。`flush()` 强制把缓冲区的内容真正写出去——不调 flush 就关程序，缓冲区里的数据可能丢失。
+
+## 四、FileInputStream / FileOutputStream：文件字节流
+
+最常用的字节流——直接对接文件。
+
+```java
+import java.io.*;
+
+// 写
+try (OutputStream out = new FileOutputStream("data.bin")) {
+    out.write(new byte[]{1, 2, 3, 4, 5});
+}
+
+// 读
+try (InputStream in = new FileInputStream("data.bin")) {
+    byte[] buf = new byte[16];
+    int n = in.read(buf);
+    System.out.println("读到 " + n + " 字节");
+    for (int i = 0; i < n; i++) System.out.print(buf[i] + " ");
+}
+// 输出：读到 5 字节
+//      1 2 3 4 5
+```
+
+`FileOutputStream` 默认覆盖写——文件已存在会被截断。要"追加"得用两参构造器：
+
+```java
+new FileOutputStream("log.txt", true)   // true = append
+```
+
+## 五、BufferedInputStream / BufferedOutputStream：缓冲流
+
+直接用 `FileInputStream` 每读一个字节就调一次系统调用——慢得惊人。缓冲流在内存里维护一个数组（默认 8KB），一次从磁盘读一大块，之后 `read()` 从内存数组里取，性能提升几十倍。
+
+```java
+// 慢：每次 read 都系统调用
+InputStream slow = new FileInputStream("big.dat");
+
+// 快：包一层 BufferedInputStream，内部有 8KB 缓冲区
+InputStream fast = new BufferedInputStream(new FileInputStream("big.dat"));
+```
+
+注意写法——`new BufferedInputStream(new FileInputStream(...))`。这种"流包流"的写法是 Java IO 的标志，下一节揭示它的设计本质。
+
+## 六、装饰器模式：IO 的乐高积木
+
+Java IO 的类层次有个怪现象——`BufferedInputStream` 不是 `FileInputStream` 的子类，而是 `InputStream` 的子类，且**内部持有一个 `InputStream` 字段**：
+
+```java
+public class BufferedInputStream extends FilterInputStream {
+    protected volatile InputStream in;   // 被装饰的底层流
+    ...
+}
+```
+
+这是经典的**装饰器模式**（Decorator Pattern）：装饰器和被装饰者实现同一个接口，装饰器内部委托给被装饰者，并在前后加上新功能。
+
+### 6.1 模式结构
+
+```
+InputStream（抽象组件）
+   ├── FileInputStream（具体组件：从文件读）
+   ├── ByteArrayInputStream（具体组件：从内存读）
+   └── FilterInputStream（抽象装饰器）
+          ├── BufferedInputStream（装饰：加缓冲）
+          ├── DataInputStream（装饰：读基本类型）
+          └── PushbackInputStream（装饰：可回退）
+```
+
+`FilterInputStream` 是所有装饰器的基类，它持有一个 `in` 字段，默认把所有方法转发给 `in`。子类只重写需要"加料"的方法。
+
+### 6.2 像乐高一样组合
+
+装饰器模式让你**任意叠加功能**：
+
+```java
+// 文件流 → 加缓冲 → 加数据读写
+DataInputStream in = new DataInputStream(
+    new BufferedInputStream(
+        new FileInputStream("data.bin")));
+
+// 读一个 int（4 字节，按 big-endian）
+int n = in.readInt();
+```
+
+三层嵌套，每层加一个能力：底层读文件、中层加速、顶层读基本类型。你可以按需增减——只想要缓冲就只包两层，想要数据读写就再加一层。这种"组合优于继承"的设计，是面向对象设计的经典范例。
+
+## 七、DataInputStream / DataOutputStream：基本类型读写
+
+`DataInput`/`DataOutput` 接口定义了读写基本类型的方法：`readInt/writeInt`、`readLong/writeLong`、`readDouble/writeDouble`、`readUTF/writeUTF`（修改版 UTF-8）等。
+
+```java
+import java.io.*;
+
+// 写
+try (DataOutputStream out = new DataOutputStream(
+        new BufferedOutputStream(
+            new FileOutputStream("record.bin")))) {
+    out.writeInt(42);
+    out.writeDouble(3.14159);
+    out.writeUTF("你好，世界");
+    out.writeBoolean(true);
+}
+
+// 读（顺序必须和写一致！）
+try (DataInputStream in = new DataInputStream(
+        new BufferedInputStream(
+            new FileInputStream("record.bin")))) {
+    int n = in.readInt();           // 42
+    double d = in.readDouble();     // 3.14159
+    String s = in.readUTF();        // 你好，世界
+    boolean b = in.readBoolean();   // true
+    System.out.printf("n=%d d=%f s=%s b=%b%n", n, d, s, b);
+}
+```
+
+**注意**：`DataInputStream` 读取的顺序必须和 `DataOutputStream` 写入的顺序**完全一致**——它不知道字段边界，只能按你给的顺序解读字节。这是"二进制协议"的典型工作方式。
+
+**字节序**：Java 用 big-endian（高位在前）——`writeInt(1)` 写出的 4 字节是 `00 00 00 01`。这与网络字节序一致，但和 x86 机器内部的小端序相反。读写双方都得用 DataStream，不能一个用 DataStream 一个用别的。
+
+## 八、try-with-resources：自动关闭流
+
+流持有操作系统资源（文件句柄、网络连接），用完必须关闭。Java 7 引入的 try-with-resources 让这件事自动化：
+
+```java
+// 旧写法：冗长易错
+InputStream in = null;
+try {
+    in = new FileInputStream("a.txt");
+    // 使用 in
+} catch (IOException e) {
+    // ...
+} finally {
+    if (in != null) {
+        try { in.close(); } catch (IOException e) { /* 吞掉 */ }
+    }
+}
+
+// 新写法：try-with-resources
+try (InputStream in = new FileInputStream("a.txt")) {
+    // 使用 in
+}   // 这里自动调 in.close()，即使抛异常也会关
+```
+
+**原理**：try-with-resources 要求资源实现 `AutoCloseable` 接口（`Closeable` 是它的子接口）。退出 try 块时（无论正常或异常），JVM 自动调用 `close()`。多个资源用分号隔开：
+
+```java
+try (InputStream in = new FileInputStream("src");
+     OutputStream out = new FileOutputStream("dst")) {
+    in.transferTo(out);
+}   // 先关 out，再关 in（逆序关闭）
+```
+
+**逆序关闭**是个细节——后开的先关，符合"栈"的后进先出语义，避免依赖关系出问题。
+
+**Java 9+ 改进**：可以引用外部已存在的 final 变量，不必在 try 内重新声明：
+
+```java
+InputStream in = new FileInputStream("a.txt");
+try (in) {   // Java 9+
+    in.transferTo(out);
+}
+```
+
+## 九、实战：文件复制（多种方式对比性能）
+
+下面我们用三种方式复制文件，对比性能——基础循环、transferTo、Files.copy：
+
+<CodeRunner code={`import java.io.*;
+import java.nio.file.*;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class Main {
+    public static void main(String[] args) throws IOException {
+        // 准备一个 5MB 的测试文件
+        Path src = Paths.get("src.bin");
+        try (OutputStream out = new BufferedOutputStream(
+                new FileOutputStream(src.toFile()))) {
+            byte[] block = new byte[8192];
+            for (int i = 0; i < block.length; i++) block[i] = (byte) (i & 0xFF);
+            for (int i = 0; i < 640; i++) out.write(block);   // ~5MB
+        }
+        System.out.println("源文件大小: " + Files.size(src) + " 字节\\n");
+
+        // 方式 1：裸字节流 + 手写循环（慢）
+        Path dst1 = Paths.get("dst1.bin");
+        long t1 = System.currentTimeMillis();
+        try (InputStream in = new FileInputStream(src.toFile());
+             OutputStream out = new FileOutputStream(dst1.toFile())) {
+            byte[] buf = new byte[1024];
+            int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+        }
+        long time1 = System.currentTimeMillis() - t1;
+        System.out.println("方式 1（裸流 + 1KB 缓冲）: " + time1 + " ms, 大小=" + Files.size(dst1));
+
+        // 方式 2：缓冲流 + transferTo（Java 9+）
+        Path dst2 = Paths.get("dst2.bin");
+        long t2 = System.currentTimeMillis();
+        try (InputStream in = new BufferedInputStream(new FileInputStream(src.toFile()));
+             OutputStream out = new BufferedOutputStream(new FileOutputStream(dst2.toFile()))) {
+            in.transferTo(out);
+        }
+        long time2 = System.currentTimeMillis() - t2;
+        System.out.println("方式 2（缓冲流 + transferTo）: " + time2 + " ms, 大小=" + Files.size(dst2));
+
+        // 方式 3：Files.copy（最简洁）
+        Path dst3 = Paths.get("dst3.bin");
+        long t3 = System.currentTimeMillis();
+        Files.copy(src, dst3, StandardCopyOption.REPLACE_EXISTING);
+        long time3 = System.currentTimeMillis() - t3;
+        System.out.println("方式 3（Files.copy）: " + time3 + " ms, 大小=" + Files.size(dst3));
+
+        // 校验三份复制结果一致
+        System.out.println("\\n--- 校验 ---");
+        long h1 = Files.size(dst1), h2 = Files.size(dst2), h3 = Files.size(dst3);
+        System.out.println("三份文件大小一致: " + (h1 == h2 && h2 == h3 && h1 == Files.size(src)));
+
+        // 清理
+        Files.deleteIfExists(src);
+        Files.deleteIfExists(dst1);
+        Files.deleteIfExists(dst2);
+        Files.deleteIfExists(dst3);
+        System.out.println("\\n清理完毕");
+    }
+}`} />
+
+> **性能对比要点**：
+> - 裸流（方式 1）每次 read/write 都系统调用，慢但稳定。
+> - 缓冲流（方式 2）批量读写，性能通常高一个数量级。
+> - `Files.copy`（方式 3）内部用 NIO 通道，往往最快且代码最简。
+>
+> 实际项目中：能写一行 `Files.copy` 就别写十行流循环——简洁往往意味着正确。
+
+## 十、字节流的局限
+
+字节流处理"原始字节"很合适，但处理**文本**就别扭——你得自己关心编码、自己拆行、自己处理中文字符。比如读 UTF-8 的中文文本：
+
+```java
+// 别扭：字节流读中文，遇到多字节字符容易截断乱码
+try (InputStream in = new FileInputStream("poem.txt")) {
+    byte[] buf = new byte[16];
+    int n = in.read(buf);   // 16 字节可能正好切断一个汉字
+    String s = new String(buf, 0, n);   // 乱码风险
+}
+```
+
+文本要交给"字符流"——`Reader`/`Writer`，那是下一章的主题。规则很简：**字节流管二进制（图片、视频、序列化数据），字符流管文本**。
+
+## 十一、本章速查表
+
+| 流类型 | 用途 | 关键方法 |
+| --- | --- | --- |
+| `FileInputStream` / `FileOutputStream` | 文件读写 | `read` / `write` |
+| `BufferedInputStream` / `BufferedOutputStream` | 加缓冲，提速 | 内部维护缓冲区 |
+| `DataInputStream` / `DataOutputStream` | 读写基本类型 | `readInt` / `writeInt` / `readUTF` |
+| `ByteArrayInputStream` / `ByteArrayOutputStream` | 内存中读写 | 字节数组当源/目标 |
+| `ObjectInputStream` / `ObjectOutputStream` | 对象序列化 | `readObject` / `writeObject`（下一章详解） |
+
+## 结语：流的设计之美
+
+Java 的字节流抽象有两层美：
+
+- **统一抽象**：`InputStream`/`OutputStream` 把"数据从哪来、到哪去"封装成同一个接口——文件、网络、内存都用一样的 `read`/`write`。你写的处理逻辑可以无缝切换数据源。
+- **装饰器组合**：`Buffered`、`Data`、`Pushback` 这些装饰器像乐高积木，按需叠加。**你不需要"缓冲文件输入数据流"这种特化类**——`new DataInputStream(new BufferedInputStream(new FileInputStream(...)))` 用三个通用积木拼出来。
+
+这种"小类多组合"的设计，是面向对象设计的精髓。try-with-resources 又把"资源关闭"这个最容易出 bug 的环节自动化了——配合装饰器，多个资源逆序关闭，干净利落。
+
+字节流是 IO 的根基。下一章我们看字符流——它建立在字节流之上，解决了"字节到字符"的编码问题，让文本处理变得优雅。

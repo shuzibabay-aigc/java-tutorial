@@ -1,0 +1,485 @@
+---
+title: "封装"
+chapter: 7
+stage: "第二阶段"
+stageName: "面向对象编程"
+order: 2
+description: "掌握访问修饰符、getter/setter、包与 import、static 关键字及单例模式，理解封装的本质"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "封装", "static", "单例模式"]
+---
+
+# 封装
+
+上一章我们设计的英雄类有个隐患：`hp` 字段对外完全敞开，任何人都能写 `arthur.hp = -999`，让英雄莫名其妙地"负血阵亡"。这种不受控的修改，在真实项目里就是 bug 的温床。
+
+**封装（Encapsulation）**就是解决这个问题的第一道防线。它把对象的内部状态藏起来，只通过精心设计的"接口"与外界交互——就像咖啡机的外壳把复杂的电路、水泵、加热器包裹其中，你只需按下按钮，机器自己处理一切。
+
+本章我们将学习访问修饰符、getter/setter、包机制、`static` 关键字，并用 `static` 实现一个经典设计——单例模式。
+
+## 一、为什么需要封装？
+
+### 1.1 一个失控的例子
+
+假设我们有一个银行账户类，余额字段公开：
+
+```java
+public class Account {
+    public double balance;   // 余额：公开！
+}
+
+// 使用：
+Account acc = new Account();
+acc.balance = -1000;   // 余额变成 -1000？账户凭空欠款？
+acc.balance = 1e9;     // 直接变成十亿？漏洞百出。
+```
+
+字段一旦公开，所有校验逻辑都成了摆设。任何人都能绕过业务规则直接改数据。这种代码在真实世界里会酿成灾难——想想看，如果银行系统这么写，你的存款随时可能被改成负数。
+
+### 1.2 封装的核心思想
+
+封装有两层含义：
+
+1. **隐藏内部实现**：把字段设为 `private`，外界不能直接访问。
+2. **暴露受控接口**：通过 `public` 方法（如 `deposit`、`withdraw`）提供操作入口，在方法内部做校验。
+
+这样，对象就像一个"黑盒"——你只能通过它提供的方法来影响它的状态，而它内部如何存储、如何校验，对外是隐藏的。
+
+## 二、访问修饰符：四道门禁
+
+Java 提供了四种访问修饰符，从最严格到最宽松依次是：`private`、`default`（包级别，无关键字）、`protected`、`public`。
+
+### 2.1 作用范围表
+
+| 修饰符 | 同一个类 | 同一个包 | 子类（不同包） | 其他包 |
+| --- | :---: | :---: | :---: | :---: |
+| `private` | ✅ | ❌ | ❌ | ❌ |
+| `default`（默认/包级） | ✅ | ✅ | ❌ | ❌ |
+| `protected` | ✅ | ✅ | ✅ | ❌ |
+| `public` | ✅ | ✅ | ✅ | ✅ |
+
+记忆口诀：**"本类 → 本包 → 子类 → 全部"**，访问范围逐级扩大。`default` 不写关键字，省略即视为包级访问。
+
+### 2.2 各修饰符的典型用途
+
+- **`private`**：字段、辅助方法。**强烈建议字段默认全部 `private`**，这是封装的第一步。
+- **`default`**：包内工具类、内部辅助方法。注意：不写修饰符不等于 `private`，而是包级可见。
+- **`protected`**：留给子类 override 的钩子方法，或包内共享的扩展点。
+- **`public`**：对外提供的服务接口，如 API 方法、构造方法。
+
+> ⚠️ **顶层数类的修饰符**：一个 `.java` 文件中只能有一个 `public` 顶层类，且类名必须与文件名一致。其他类只能是 `default`。`private`/`protected` 不能修饰顶层类。
+
+## 三、getter/setter 与数据保护
+
+### 3.1 标准的封装写法
+
+把字段设为 `private`，然后提供 `public` 的 getter（读取）和 setter（设置）方法：
+
+```java
+public class Account {
+    private double balance;   // 私有字段
+
+    // getter：读取余额
+    public double getBalance() {
+        return balance;
+    }
+
+    // setter：设置余额（带校验）
+    public void setBalance(double balance) {
+        if (balance < 0) {
+            throw new IllegalArgumentException("余额不能为负");
+        }
+        this.balance = balance;
+    }
+}
+```
+
+现在，外界只能通过 `setBalance` 修改余额，而该方法会拒绝负数。**封装让我们把"业务规则"集中在 setter 里**，而不是散落在调用方各处。
+
+### 3.2 为什么不直接 public 字段？
+
+| 对比项 | public 字段 | private + getter/setter |
+| --- | --- | --- |
+| 数据校验 | 无，可被随意赋值 | 在 setter 中校验 |
+| 只读控制 | 无法只读 | 只提供 getter，不提供 setter |
+| 修改内部实现 | 字段名一改，调用方全崩 | 内部可自由重构，接口不变 |
+| 框架集成 | 不支持（Spring/Hibernate 等依赖方法） | 完美支持 |
+
+举个真实的例子：你最初把年龄存为 `int age`。后来需求变化，要根据出生日期计算年龄。如果字段公开，所有调用 `user.age` 的地方都要改。如果用了 getter `getAge()`，你只需在 getter 内部改实现，调用方一行不用动——这就是封装的"抗变化"能力。
+
+### 3.3 IDE 自动生成
+
+IntelliJ IDEA 中按 `Cmd + N`（macOS）或 `Alt + Insert`（Windows），选择 "Getter and Setter"，即可自动生成。无需手写，也避免出错。
+
+### 3.4 一个完整的账户类
+
+<CodeRunner code={`public class Main {
+    static class Account {
+        private String owner;
+        private double balance;
+
+        public Account(String owner, double initialBalance) {
+            this.owner = owner;
+            // 调用 setter 复用校验逻辑
+            setBalance(initialBalance);
+        }
+
+        public String getOwner() {
+            return owner;
+        }
+
+        public double getBalance() {
+            return balance;
+        }
+
+        public void setBalance(double balance) {
+            if (balance < 0) {
+                throw new IllegalArgumentException("余额不能为负: " + balance);
+            }
+            this.balance = balance;
+        }
+
+        // 存款
+        public void deposit(double amount) {
+            if (amount <= 0) {
+                throw new IllegalArgumentException("存款金额必须为正");
+            }
+            this.balance += amount;
+            System.out.println(owner + " 存入 " + amount + "，余额：" + balance);
+        }
+
+        // 取款
+        public void withdraw(double amount) {
+            if (amount <= 0) {
+                throw new IllegalArgumentException("取款金额必须为正");
+            }
+            if (amount > balance) {
+                throw new IllegalArgumentException("余额不足");
+            }
+            this.balance -= amount;
+            System.out.println(owner + " 取出 " + amount + "，余额：" + balance);
+        }
+    }
+
+    public static void main(String[] args) {
+        Account acc = new Account("小明", 1000);
+        System.out.println("初始余额：" + acc.getBalance());
+
+        acc.deposit(500);
+        acc.withdraw(200);
+
+        // 尝试非法操作
+        try {
+            acc.withdraw(99999);   // 余额不足
+        } catch (IllegalArgumentException e) {
+            System.out.println("操作失败：" + e.getMessage());
+        }
+
+        try {
+            acc.setBalance(-100);  // 负余额
+        } catch (IllegalArgumentException e) {
+            System.out.println("操作失败：" + e.getMessage());
+        }
+
+        System.out.println("最终余额：" + acc.getBalance());
+    }
+}`} />
+
+注意构造方法中 `setBalance(initialBalance)` 的写法——**复用 setter 的校验逻辑**，避免在多处重复校验代码。这是封装带来的另一个好处。
+
+## 四、包（package）与 import
+
+### 4.1 为什么需要包
+
+随着类越来越多，命名冲突在所难免——你写了个 `User`，第三方库也有个 `User`。包（Package）就是 Java 的"命名空间"，用反向域名风格命名，如 `com.company.project.service`。
+
+```java
+package com.cafe.order;   // 声明当前类所属的包
+
+public class Order { ... }
+```
+
+包对应的物理结构是**目录**：`com/cafe/order/Order.java`。包名全小写，避免与类名混淆。
+
+### 4.2 import 机制
+
+要使用其他包中的类，需要 `import`：
+
+```java
+import java.util.List;          // 导入单个类
+import java.util.*;             // 导入整个包（通配符）
+import static java.lang.Math.*; // 静态导入：直接用 PI、sqrt() 等
+```
+
+`java.lang` 包（含 `String`、`System`、`Math` 等）会被自动导入，无需手动 `import`。
+
+> ⚠️ **通配符导入的注意事项**：`import java.util.*;` 不会递归导入子包。`java.util.*` 只导入 `java.util` 下的类，不包括 `java.util.concurrent` 下的。通配符导入虽方便，但可能引起歧义，企业项目通常明确导入单个类。
+
+### 4.3 完整限定名
+
+如果两个包中有同名类（如 `java.util.Date` 和 `java.sql.Date`），可以用**完整限定名**区分：
+
+```java
+java.util.Date d1 = new java.util.Date();
+java.sql.Date d2 = new java.sql.Date(System.currentTimeMillis());
+```
+
+## 五、static 关键字：从"实例"到"类"
+
+到目前为止，我们写的字段和方法都属于**对象**（实例）——每个对象有自己的一份字段副本，方法通过对象调用。但有些东西应该是"类级别"的，与具体对象无关。
+
+### 5.1 静态字段（类变量）
+
+用 `static` 修饰的字段叫**静态字段**或**类变量**，它属于**类本身**，所有对象**共享**同一份。
+
+```java
+public class CoffeeShop {
+    static int totalOrders = 0;   // 静态字段：所有店铺共享的总订单数
+    String name;                  // 实例字段：每个店铺自己的名字
+
+    public CoffeeShop(String name) {
+        this.name = name;
+        totalOrders++;            // 每开一家店，订单计数 +1（这里只是举例）
+    }
+}
+```
+
+访问静态字段推荐用**类名**：`CoffeeShop.totalOrders`（虽然也能用对象名访问，但不推荐，容易误导）。
+
+```
+实例字段：每个对象一份副本，互不影响
+        shop1.name="A店"   shop2.name="B店"
+
+静态字段：所有对象共享一份
+        shop1 ─┐
+        shop2 ─┼──► CoffeeShop.totalOrders = 2
+```
+
+### 5.2 静态方法
+
+用 `static` 修饰的方法叫**静态方法**，它属于类，无需创建对象即可调用：
+
+```java
+public class MathUtils {
+    public static int square(int n) {
+        return n * n;
+    }
+}
+
+// 调用：
+int result = MathUtils.square(5);   // 无需 new MathUtils()
+```
+
+`java.lang.Math` 的所有方法都是静态的——`Math.sqrt(2)`、`Math.abs(-3)`、`Math.max(a, b)`——你不需要 `new Math()`，因为 `Math` 本质上是一组数学函数的容器。
+
+> ⚠️ **静态方法的限制**：
+> - 静态方法中**不能直接访问实例字段和实例方法**（因为没有 `this`）。
+> - 静态方法中**不能使用 `this` 和 `super`**。
+> - 静态方法**可以**访问静态字段和静态方法。
+> - 实例方法**可以**访问静态成员。
+
+### 5.3 静态代码块
+
+`static { ... }` 修饰的代码块叫**静态初始化块**，在类被加载时执行**一次**，常用于初始化静态资源：
+
+```java
+public class Config {
+    static {
+        System.out.println("Config 类被加载，执行静态代码块");
+        // 例如：读取配置文件、初始化连接池
+    }
+}
+```
+
+类加载的时机通常是：第一次创建对象、第一次访问静态成员、或通过反射加载。静态代码块在 `main` 方法执行之前就可能运行。
+
+### 5.4 实例初始化块 vs 静态初始化块
+
+```java
+public class Demo {
+    static {
+        System.out.println("1. 静态代码块（类加载时，仅一次）");
+    }
+
+    {
+        System.out.println("2. 实例初始化块（每次 new 对象时）");
+    }
+
+    public Demo() {
+        System.out.println("3. 构造方法");
+    }
+}
+```
+
+执行顺序：**静态代码块 → 实例初始化块 → 构造方法**。`new Demo()` 两次，会打印：1, 2, 3, 2, 3（静态代码块只执行一次）。
+
+## 六、main 方法为什么是 static？
+
+每个 Java 程序的入口都是：
+
+```java
+public static void main(String[] args)
+```
+
+为什么是 `static`？因为 **JVM 启动时还没有任何对象**。如果 `main` 是实例方法，JVM 就得先 `new` 一个对象才能调用——但调用哪个构造方法？传什么参数？这会陷入"鸡生蛋"的困境。
+
+`static` 让 `main` 成为类级别的方法，JVM 只需加载类就能调用：`java Main` 实际上是让 JVM 加载 `Main` 类，然后调用 `Main.main(args)`。
+
+逐字解读 `main` 方法的每个修饰符：
+
+- `public`：JVM 在外部调用，必须公开。
+- `static`：无需创建对象即可调用。
+- `void`：主方法不返回值（程序退出码通过 `System.exit` 设置）。
+- `main`：JVM 约定的方法名，不可更改。
+- `String[] args`：命令行参数，由 JVM 传入。
+
+## 七、单例模式初探：static 的经典应用
+
+**单例模式（Singleton Pattern）**是一种设计模式，确保一个类**只有一个实例**，并提供全局访问点。它在配置管理、日志系统、数据库连接池等场景中极为常见。
+
+### 7.1 为什么需要单例
+
+想象一个日志记录器（Logger）。如果每个类都 `new Logger()`，会有几十个 Logger 实例，浪费内存，且日志可能写到不同地方。我们希望**全局只有一个 Logger**，所有类共享。
+
+### 7.2 饿汉式单例
+
+最简单的实现：在类加载时就创建实例。
+
+```java
+public class Logger {
+    // 1. 私有构造方法：外界无法 new
+    private Logger() {}
+
+    // 2. 静态字段持有唯一实例（类加载时创建）
+    private static final Logger INSTANCE = new Logger();
+
+    // 3. 公共静态方法返回实例
+    public static Logger getInstance() {
+        return INSTANCE;
+    }
+
+    public void log(String msg) {
+        System.out.println("[LOG] " + msg);
+    }
+}
+```
+
+三个关键点：
+
+1. **私有构造方法**：堵死 `new Logger()` 的可能。
+2. **静态字段持有实例**：类加载时创建，天然线程安全。
+3. **公共静态方法返回**：外界通过 `Logger.getInstance()` 获取。
+
+### 7.3 懒汉式单例
+
+饿汉式的缺点是：即使从不用 Logger，类加载时也会创建实例。**懒汉式**推迟到第一次使用时才创建：
+
+```java
+public class Logger {
+    private static Logger instance;   // 不立即创建
+
+    private Logger() {}
+
+    public static Logger getInstance() {
+        if (instance == null) {            // 第一次调用时才创建
+            instance = new Logger();
+        }
+        return instance;
+    }
+}
+```
+
+> ⚠️ 上述懒汉式在**多线程下不安全**——两个线程可能同时通过 `null` 检查，创建出两个实例。线程安全的版本需要加锁（`synchronized`）或使用"双重检查锁"（Double-Checked Locking）。多线程相关的内容会在后续章节详细讨论。
+
+### 7.4 完整示例
+
+<CodeRunner code={`public class Main {
+    // 单例 Logger
+    static class Logger {
+        private static final Logger INSTANCE = new Logger();
+        private int logCount = 0;
+
+        private Logger() {
+            System.out.println("Logger 实例被创建（只会发生一次）");
+        }
+
+        public static Logger getInstance() {
+            return INSTANCE;
+        }
+
+        public void log(String msg) {
+            logCount++;
+            System.out.println("[LOG #" + logCount + "] " + msg);
+        }
+
+        public int getLogCount() {
+            return logCount;
+        }
+    }
+
+    // 模拟"全局计数器"单例
+    static class Counter {
+        private static Counter instance;
+        private int count = 0;
+
+        private Counter() {}
+
+        // 懒汉式（单线程）
+        public static Counter getInstance() {
+            if (instance == null) {
+                instance = new Counter();
+                System.out.println("Counter 实例被创建");
+            }
+            return instance;
+        }
+
+        public void increment() { count++; }
+        public int getCount() { return count; }
+    }
+
+    public static void main(String[] args) {
+        Logger logger1 = Logger.getInstance();
+        Logger logger2 = Logger.getInstance();
+        System.out.println("logger1 == logger2 ? " + (logger1 == logger2));
+
+        logger1.log("系统启动");
+        logger2.log("收到请求");
+        logger1.log("处理完成");
+        System.out.println("总日志数：" + logger1.getLogCount());
+
+        System.out.println("\\n--- 测试懒汉式 Counter ---");
+        Counter c1 = Counter.getInstance();
+        Counter c2 = Counter.getInstance();
+        System.out.println("c1 == c2 ? " + (c1 == c2));
+
+        c1.increment();
+        c2.increment();
+        c2.increment();
+        System.out.println("通过 c1 读取计数：" + c1.getCount());
+        System.out.println("通过 c2 读取计数：" + c2.getCount());
+    }
+}`} />
+
+`logger1 == logger2` 返回 `true`，证明它们是**同一个对象**——这就是单例模式的魔力。注意 `c1.increment()` 后，通过 `c2.getCount()` 也能看到结果，因为 `c1` 和 `c2` 是同一个实例，共享 `count` 字段。
+
+## 八、本章小结
+
+| 概念 | 要点 |
+| --- | --- |
+| 封装 | 隐藏内部状态，通过公共方法暴露受控访问 |
+| `private`/`default`/`protected`/`public` | 四级访问控制，范围由窄到宽 |
+| getter/setter | 读写 private 字段的标准方式，可在 setter 中校验 |
+| 包（package） | 类的命名空间，对应目录结构 |
+| `import` | 引入其他包的类，`java.lang` 自动导入 |
+| 静态字段 | `static` 修饰，属于类，所有对象共享 |
+| 静态方法 | `static` 修饰，无 `this`，不能直接访问实例成员 |
+| 静态代码块 | 类加载时执行一次，用于初始化静态资源 |
+| 单例模式 | 保证一个类只有一个实例，常用 static 实现 |
+
+## 结语
+
+封装是面向对象的第一大特性。它把"数据"和"操作数据的规则"绑在一起，让对象成为自己状态的主人。通过 `private` 字段 + `public` 方法，我们获得了校验、只读、抗变化三大好处；通过 `static`，我们拥有了类级别的共享数据和工具方法。
+
+但封装只是起点。当我们想"复用"已有的类、扩展其功能时，就需要面向对象的第二大特性——**继承**。下一章，我们将让"英雄"产生后代，让"咖啡"衍生出拿铁、卡布奇诺、摩卡，体会"代码复用"的优雅与陷阱。
+
+继承的世界，远比"extends"这两个字母要丰富得多。

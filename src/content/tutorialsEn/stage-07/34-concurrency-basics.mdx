@@ -1,0 +1,299 @@
+---
+title: "Concurrency Basics"
+chapter: 34
+stage: "Stage 7"
+stageName: "Concurrent Programming"
+order: 1
+description: "Start from the difference between processes and threads, understand the essence of concurrency versus parallelism, the two concurrency models of shared state versus separate state, and survey the evolution of Java concurrency from Thread to virtual threads"
+pubDate: 2026-07-03
+tags: ["Java", "Concurrency", "Multithreading", "Concurrency Model"]
+---
+
+# Concurrency Basics
+
+Welcome to Stage 7 — **Concurrent Programming**. This is the deepest, most trap-laden stage in the entire Java tutorial, and the one that most separates junior engineers from senior ones. In the previous six stages, every line of code we wrote was "one person doing the work": the main thread executed top to bottom, and the world was orderly. But real-world programs almost always need to "do many things at once" — a server must respond to thousands of concurrent requests, a desktop app must load images in the background while reacting to user clicks, and big-data processing splits work into millions of pieces to compute in parallel.
+
+Concurrency is Java's core capability for "doing many things at once." But to master it, you must first understand its essence — not just know how to write `new Thread().start()`. This chapter starts from the most fundamental concepts and builds up your mental model of concurrency.
+
+## 1. Processes and Threads: From Factory to Workers
+
+To understand threads, you must first understand processes.
+
+A **Process** is the operating system's smallest unit of resource allocation. Each process has its own independent memory space, file descriptors, network ports, and so on. You can think of a process as a **factory** — it has its own building, warehouse, and electricity, physically isolated from other factories. One process cannot directly access another process's memory, which is why one program crashing does not bring down another.
+
+A **Thread** is the smallest unit of CPU scheduling. A process can contain multiple threads, and they **share the process's memory space and resources**. A thread is the **worker** inside the factory — they share the same building and warehouse, but each one has their own workbench (stack space, registers, program counter). Workers can collaborate, but they also fight over the same machines and the same raw materials.
+
+### 1.1 Process vs Thread Comparison
+
+| Dimension | Process | Thread |
+| --- | --- | --- |
+| Resources | Independent memory space | Shared process memory |
+| Creation cost | High (a few MB of memory, OS scheduling) | Low (KB-level stack space) |
+| Communication | Pipes, message queues, shared memory, sockets | Direct read/write of shared variables |
+| Switching cost | High (memory space switch) | Low (in-process switch) |
+| Crash impact | Process crash does not affect other processes | Thread crash may take down the whole process |
+| Count limit | Tens to hundreds (typical apps) | Hundreds to thousands (platform threads) |
+
+**Key insight**: threads share memory — this is concurrency's "double-edged sword." On one hand it makes communication extremely fast (just read a variable); on the other hand it is the root of all concurrency problems: when multiple threads modify the same variable at the same time, things go wrong.
+
+### 1.2 Java Threads and OS Threads
+
+Java threads (before JDK 21) are mapped one-to-one to native operating system threads — these are **Platform Threads**. Every time you create a Java thread, the OS allocates an OS thread. This means thread creation, destruction, and switching all have to trap into the kernel, and the cost is non-trivial. That is also why we cannot create threads limitlessly — tens of thousands of threads would consume all system resources.
+
+The **Virtual Thread**, officially introduced in JDK 21, changes this — it "decouples" Java threads from OS threads, allowing millions of virtual threads to run on a small number of platform threads. We will cover this in detail in Chapter 45.
+
+## 2. Concurrency vs Parallelism: An Easily Confused Distinction
+
+Both words mean "executing at the same time" in everyday Chinese, but in computer science they have distinct meanings.
+
+**Concurrency**: multiple tasks are processed **within the same time period**, but at any given instant only one may be executing. The CPU uses time-slicing to make multiple tasks "look simultaneous" — running 100 threads on a single-core CPU is concurrency.
+
+**Parallelism**: multiple tasks truly execute **at the same instant**. Four cores on a multi-core CPU running 4 threads simultaneously — that is parallelism.
+
+A metaphor:
+
+- **Concurrency** is one chef cooking three dishes at the same time — he chops vegetables for a moment, stir-fries meat for a moment, simmers soup for a moment, switching between the three tasks rapidly so that all three dishes feel like they are "in progress."
+- **Parallelism** is three chefs each cooking one dish — truly starting at the same time.
+
+> Rob Pike (the father of the Go language) famously said: **"Concurrency is about dealing with lots of things at once. Parallelism is about doing lots of things at once."**
+> Concurrency is about **structure**, parallelism is about **execution**. A program can be concurrent but not parallel (multi-threading on a single core), or parallel but not concurrent (one task running on multiple cores).
+
+### 2.1 Why Concurrency Is Necessary
+
+Even if you only have one CPU core, concurrency is still valuable:
+
+1. **Resource utilization** — while one thread waits for disk IO, another thread can use the CPU. The CPU does not sit idle.
+2. **Responsiveness** — in GUI programs, the main thread handles user actions while a background thread loads images. Even on a single core, the app "does not freeze."
+3. **Fairness** — multiple users/requests can be served in turn, rather than one long task blocking everyone.
+4. **Simpler designs for certain problems** — some problems (like servers) are inherently "handle many independent connections at the same time," and the concurrency model describes them most naturally.
+
+Parallelism, on the other hand, is about **performance** — splitting a large task into pieces and running them on multiple cores at the same time to shorten total time.
+
+## 3. The Benefits and Costs of Concurrency
+
+Concurrency is not a silver bullet. It brings benefits, but also heavy costs.
+
+### 3.1 Benefits
+
+- **Higher throughput** — multi-threading takes full advantage of multi-core CPUs.
+- **Better responsiveness** — long tasks go to the background, the main thread stays responsive.
+- **Better resource utilization** — let the CPU do something else during IO waits.
+- **More natural modeling** — the server "one thread per connection" model is intuitive.
+
+### 3.2 Costs
+
+- **Complexity explosion** — multi-threaded programs have unpredictable execution order, and bugs are hard to reproduce. A race condition that appears with one-in-a-million probability may keep you debugging for a week.
+- **Thread safety overhead** — locking, CAS, and memory barriers all have performance costs. Wrong synchronization can make multi-threaded code run slower than single-threaded.
+- **Context-switching cost** — when the CPU switches from one thread to another, it must save/restore registers and flush caches. Frequent switching is a performance killer.
+- **Deadlock, livelock, starvation** — concurrency-specific "traps" that single-threaded programs will never encounter.
+- **Memory visibility** — a thread modifies a variable, but another thread may not see it. This is the core problem that the JMM (Java Memory Model) exists to solve.
+
+> **Golden rule**: if a problem can be solved with a single thread, do not use multi-threading. The complexity of concurrency is only worth paying for when the benefit clearly outweighs the cost.
+
+## 4. Two Concurrency Models: Shared State vs Separate State
+
+The two major schools of concurrent programming differ essentially in "how threads communicate with each other."
+
+### 4.1 Shared State Concurrency
+
+Multiple threads share the same piece of memory and communicate by reading and writing shared variables. This is Java's traditional concurrency model.
+
+```
+Thread A ──┐
+           ├──► shared variable counter ──◄── Thread B
+Thread C ──┘
+```
+
+**Advantages**: communication is fast (direct memory read/write), and it matches the hardware model.
+
+**Disadvantages**: requires synchronization (locks, CAS) to avoid data races, and synchronization brings complexity and performance loss.
+
+Java's `synchronized`, `ReentrantLock`, `AtomicInteger`, and `ConcurrentHashMap` are all tools of this model.
+
+### 4.2 Separate State Concurrency
+
+Each thread has its own private state; threads do not share mutable data but communicate through **message passing**.
+
+```
+Thread A (private state) ──message──► Thread B (private state)
+```
+
+**Advantages**: no data races by nature (no sharing means no locks needed), easier to reason about.
+
+**Disadvantages**: message passing has overhead, and in some scenarios it is less direct than shared memory.
+
+The representatives of this model are the **Actor model** (Akka, Erlang) and the **CSP model** (Go's channels). Driven by JDK 21's **structured concurrency** and virtual threads, Java is also evolving toward "more separate state, less shared mutable state."
+
+### 4.3 Immutability: The Bridge Between the Two Models
+
+Immutable objects are an interesting "middle ground" — even if shared by multiple threads, they cause no data races (because they cannot be changed at all). So "shared immutable" is thread-safe. This is why `String`, `Integer`, `LocalDate`, and other immutable classes are inherently safe in concurrent environments.
+
+Chapter 36 dives deep into "thread safety," and Chapter 38 covers how to use `synchronized`/`volatile` to protect shared mutable state.
+
+## 5. A History of Java Concurrency: From Bare Threads to Virtual Threads
+
+Java's concurrency capabilities were not built in a day. They evolved over nearly 30 years, with each generation solving the previous generation's pain points.
+
+### 5.1 1995-2004: The Bare Thread Era (JDK 1.0 - 1.4)
+
+Java has had built-in thread support since 1.0 — `java.lang.Thread`, `Runnable`, `synchronized`, `wait`/`notify`. This was revolutionary at the time: C++ had to rely on OS APIs to write multi-threaded code, while Java made it a language feature.
+
+But this generation's tools were primitive: you had to manually `new Thread().start()`, manage thread lifecycles, and use `synchronized` to protect every shared data location. Thread pools, concurrent collections, atomic classes — none of them existed.
+
+### 5.2 2004: The JUC Revolution (JDK 5)
+
+JDK 5 (led by Doug Lea through JSR-166) introduced the `java.util.concurrent` package (abbreviated **JUC**) — a watershed moment for Java concurrency. It brought, all at once:
+
+- **The Executor framework** — thread pools, farewell to manual `new Thread`.
+- **The Lock interface** — `ReentrantLock`, more flexible than `synchronized`.
+- **Atomic classes** — `AtomicInteger` and friends, lock-free programming based on CAS.
+- **Concurrent collections** — `ConcurrentHashMap`, `CopyOnWriteArrayList`, `BlockingQueue`.
+- **Synchronizers** — `CountDownLatch`, `CyclicBarrier`, `Semaphore`.
+- **Future** — the "promise" of an asynchronous task.
+
+JUC turned Java from "able to use threads" into "able to use threads industrially." Doug Lea almost single-handedly elevated Java concurrency to industrial grade.
+
+### 5.3 2011: The Fork/Join Framework (JDK 7)
+
+JDK 7 introduced `ForkJoinPool` — a thread pool specifically designed for **divide-and-conquer tasks**. It can recursively split a large task into smaller ones, and its work-stealing algorithm lets idle threads steal tasks from other threads' queues, improving CPU utilization. This is the underlying engine of `parallelStream`.
+
+### 5.4 2014: CompletableFuture (JDK 8)
+
+JDK 8 brought `CompletableFuture` — finally giving Java **composable asynchronous programming**. The original `Future` could only block on `get()` with no chained callbacks. `CompletableFuture` supports chained orchestration, exception handling, and multi-task composition — bringing Java asynchronous programming to the same level as JavaScript Promises and C# Tasks.
+
+### 5.5 2017-2021: Reactive and Incremental Improvements (JDK 9-17)
+
+These versions progressively brought the `Flow` API (the reactive programming specification), `VarHandle` (lower-level memory operations), and an enhanced `ForkJoinPool`. But reactive programming has a high barrier to entry and is hard to debug, and the industry kept asking for a simpler solution.
+
+### 5.6 2023: Virtual Threads and Structured Concurrency (JDK 21)
+
+JDK 21 officially released **Virtual Threads (JEP 444)** — the biggest change to Java concurrency in 20 years.
+
+Virtual threads let Java return to the simple "one thread per request" model, but no longer constrained by the OS thread count. A server can run millions of virtual threads at the same time, handle millions of connections, yet the code stays as simple to write as traditional blocking IO. It brings the elegance of Go's goroutines back to Java.
+
+The simultaneously introduced **Structured Concurrency (JEP 453, preview)** and **Scoped Values (JEP 446, preview)** further standardize the lifecycle management of concurrent tasks.
+
+### 5.7 Timeline at a Glance
+
+| Year | JDK | Milestone | Core capability |
+| --- | --- | --- | --- |
+| 1996 | 1.0 | `Thread`/`synchronized` | Bare threads |
+| 2004 | 5 | JUC package | Thread pools, concurrent collections, atomic classes |
+| 2006 | 6 | `java.util.concurrent` extensions | More complete concurrency utilities |
+| 2011 | 7 | Fork/Join | Divide-and-conquer and work-stealing |
+| 2014 | 8 | `CompletableFuture` | Composable async |
+| 2017 | 9 | `Flow` API | Reactive specification |
+| 2017-21 | 9-17 | `VarHandle`, enhancements | Low-level memory operations |
+| 2023 | 21 | Virtual threads, structured concurrency | Massive lightweight threads |
+
+## 6. Hands-On: Demonstrating the Two Models
+
+The example below demonstrates both the "shared state" and "separate state" concurrency models — using 4 threads to count up to 1 million. The shared state model uses `AtomicLong`, and the separate state model has each thread accumulate independently and then aggregates the results.
+
+<CodeRunner code={`import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        final int threadCount = 4;
+        final int perThread = 250_000;
+
+        // === Model 1: Shared State ===
+        // Multiple threads read/write the same AtomicLong
+        AtomicLong sharedCounter = new AtomicLong(0);
+        long t1 = System.nanoTime();
+        Thread[] sharedThreads = new Thread[threadCount];
+        for (int i = 0; i < threadCount; i++) {
+            sharedThreads[i] = new Thread(() -> {
+                for (int j = 0; j < perThread; j++) {
+                    sharedCounter.incrementAndGet(); // CAS contention
+                }
+            });
+            sharedThreads[i].start();
+        }
+        for (Thread t : sharedThreads) t.join();
+        long sharedTime = System.nanoTime() - t1;
+
+        // === Model 2: Separate State ===
+        // Each thread accumulates into its own local variable, then aggregates
+        long[] localCounters = new long[threadCount];
+        long t2 = System.nanoTime();
+        Thread[] localThreads = new Thread[threadCount];
+        for (int i = 0; i < threadCount; i++) {
+            final int idx = i;
+            localThreads[i] = new Thread(() -> {
+                long sum = 0;
+                for (int j = 0; j < perThread; j++) {
+                    sum++; // No contention, pure local variable
+                }
+                localCounters[idx] = sum;
+            });
+            localThreads[i].start();
+        }
+        long localTotal = 0;
+        for (int i = 0; i < threadCount; i++) {
+            localThreads[i].join();
+            localTotal += localCounters[i];
+        }
+        long localTime = System.nanoTime() - t2;
+
+        System.out.println("=== Shared State Model ===");
+        System.out.println("Result: " + sharedCounter.get());
+        System.out.println("Time: " + (sharedTime / 1_000_000) + " ms");
+        System.out.println();
+        System.out.println("=== Separate State Model ===");
+        System.out.println("Result: " + localTotal);
+        System.out.println("Time: " + (localTime / 1_000_000) + " ms");
+        System.out.println();
+        System.out.println("Separate state is " + (sharedTime / localTime) + "x faster");
+
+        // === Concurrency vs Parallelism demo ===
+        System.out.println("\\n=== CPU Core Count ===");
+        System.out.println("Available processors: " + Runtime.getRuntime().availableProcessors());
+        System.out.println("(Multi-core enables parallelism; single-core only concurrency)");
+    }
+}`} />
+
+> **Key observations**:
+> - **The separate state model is clearly faster** — each thread operates on its own local variable, with no CAS contention and no CPU cache invalidation.
+> - **The shared state model produces the correct result** (1000000), but pays the cost of CAS retries.
+> - This "local accumulation + final aggregation" idea is exactly the design principle behind `LongAdder` (covered in Chapter 41).
+> - **`Runtime.getRuntime().availableProcessors()`** returns the number of available CPU cores — a key parameter that determines the degree of parallelism.
+
+## 7. Chapter Summary
+
+| Concept | Key points |
+| --- | --- |
+| Process vs Thread | A process is a unit of resources (factory); a thread is a unit of scheduling (worker); threads share process memory |
+| Concurrency vs Parallelism | Concurrency = simultaneous handling (structure), parallelism = simultaneous execution (execution); single-core can be concurrent, only multi-core can be parallel |
+| Concurrency benefits | Throughput, responsiveness, resource utilization, natural modeling |
+| Concurrency costs | Complexity, synchronization overhead, context switching, deadlock risk, visibility issues |
+| Shared state model | Multiple threads read/write shared variables, requires synchronization (Java's traditional model) |
+| Separate state model | Thread-private state + message passing, no data races (Actor/CSP) |
+| Immutability | The bridge between the two models — shared immutable is inherently safe |
+| Java concurrency history | Thread(1996) → JUC(2004) → Fork/Join(2011) → CompletableFuture(2014) → Virtual Threads(2023) |
+
+**Mnemonics**:
+
+- **A process is a factory, a thread is a worker** — workers share the building, so collaboration is fast but conflicts easily arise.
+- **Concurrency is switching, parallelism is truly simultaneous** — single-core can be concurrent, only multi-core can be parallel.
+- **Shared is fast but needs locks; separate is safe but needs messaging** — each has tradeoffs.
+- **Immutability is the lock-free master key** — make it immutable whenever you can.
+
+## Conclusion: The Road Ahead in This Stage
+
+Concurrency is one of Java's deepest domains. In this stage we cover it from foundation to pinnacle across 12 chapters:
+
+- **Chapter 35 Thread Basics** — how to create, start, and control threads.
+- **Chapter 36 Thread Safety** — why multi-threading goes wrong, and what "safe" really means.
+- **Chapter 37 Java Memory Model** — JMM is the theoretical foundation of concurrent correctness.
+- **Chapter 38 Synchronization Mechanisms** — `synchronized`/`volatile`/`ThreadLocal`/`wait`/`notify`.
+- **Chapter 39 Typical Concurrency Problems** — deadlocks, starvation, livelock, and the pits we have fallen into over the years.
+- **Chapter 40 Locks and Synchronizers** — `ReentrantLock`, read-write locks, `StampedLock`, `Semaphore`, `CountDownLatch`, and more.
+- **Chapter 41 Atomic Classes and CAS** — the cornerstone of lock-free programming.
+- **Chapter 42 Concurrent Collections** — `ConcurrentHashMap`, `CopyOnWriteArrayList`, blocking queues.
+- **Chapter 43 Thread Pools** — the seven parameters of `ThreadPoolExecutor`, rejection policies, `ForkJoinPool`.
+- **Chapter 44 CompletableFuture** — the Swiss army knife of asynchronous programming.
+- **Chapter 45 Virtual Threads and Structured Concurrency** — the future of Java concurrency.
+
+Each chapter is the foundation of the next. Solidify the basics, and the "advanced" material that follows will not be a castle in the air. Ready? Let us start writing real concurrent code in the next chapter, "Thread Basics."

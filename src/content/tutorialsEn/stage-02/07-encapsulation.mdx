@@ -1,0 +1,485 @@
+---
+title: "Encapsulation"
+chapter: 7
+stage: "Stage 2"
+stageName: "Object-Oriented Programming"
+order: 2
+description: "Master access modifiers, getter/setter, packages and imports, the static keyword, and the singleton pattern — understand the essence of encapsulation"
+pubDate: 2026-07-03
+tags: ["Java", "OOP", "封装", "static", "单例模式"]
+---
+
+# Encapsulation
+
+The Hero class we designed in the last chapter has a hidden risk: the `hp` field is fully exposed, so anyone can write `arthur.hp = -999` and make the hero mysteriously "die from negative HP". This kind of uncontrolled modification is a breeding ground for bugs in real projects.
+
+**Encapsulation** is the first line of defense against this problem. It hides an object's internal state and lets it interact with the outside world only through carefully designed "interfaces" — just like a coffee machine's shell encloses its complex wiring, pumps, and heaters. You just press a button, and the machine handles everything itself.
+
+In this chapter we will learn about access modifiers, getters and setters, the package mechanism, the `static` keyword, and use `static` to implement a classic design — the Singleton pattern.
+
+## 1. Why Do We Need Encapsulation?
+
+### 1.1 An Example of Things Going Wrong
+
+Suppose we have a bank account class with a public balance field:
+
+```java
+public class Account {
+    public double balance;   // 余额：公开！
+}
+
+// 使用：
+Account acc = new Account();
+acc.balance = -1000;   // 余额变成 -1000？账户凭空欠款？
+acc.balance = 1e9;     // 直接变成十亿？漏洞百出。
+```
+
+Once a field is public, all validation logic becomes decoration. Anyone can bypass business rules and modify the data directly. This kind of code causes disasters in the real world — imagine if a banking system were written this way; your savings could be turned negative at any moment.
+
+### 1.2 The Core Idea of Encapsulation
+
+Encapsulation has two layers of meaning:
+
+1. **Hide the internal implementation**: Mark fields as `private` so the outside world cannot access them directly.
+2. **Expose controlled interfaces**: Provide operation entry points through `public` methods (such as `deposit` and `withdraw`) that perform validation internally.
+
+This way, an object is like a "black box" — you can only affect its state through the methods it provides, while how it stores and validates data internally stays hidden from the outside.
+
+## 2. Access Modifiers: Four Gates of Control
+
+Java provides four access modifiers, from the most restrictive to the most permissive: `private`, `default` (package-private, no keyword), `protected`, and `public`.
+
+### 2.1 Scope Table
+
+| Modifier | Same class | Same package | Subclass (different package) | Other packages |
+| --- | :---: | :---: | :---: | :---: |
+| `private` | ✅ | ❌ | ❌ | ❌ |
+| `default` (default/package-private) | ✅ | ✅ | ❌ | ❌ |
+| `protected` | ✅ | ✅ | ✅ | ❌ |
+| `public` | ✅ | ✅ | ✅ | ✅ |
+
+Mnemonic: **"same class → same package → subclass → everywhere"** — the scope widens at each level. `default` requires no keyword; omitting the modifier means package-private access.
+
+### 2.2 Typical Uses of Each Modifier
+
+- **`private`**: Fields, helper methods. **It is strongly recommended that all fields default to `private`** — this is the first step of encapsulation.
+- **`default`**: Package-internal utility classes, internal helper methods. Note: omitting the modifier is not the same as `private` — it means package-visible.
+- **`protected`**: Hook methods reserved for subclasses to override, or extension points shared within a package.
+- **`public`**: Service interfaces exposed to the outside, such as API methods and constructors.
+
+> ⚠️ **Modifiers for top-level classes**: A `.java` file can contain only one `public` top-level class, and its name must match the filename. Other classes can only be `default`. `private`/`protected` cannot modify top-level classes.
+
+## 3. Getters/Setters and Data Protection
+
+### 3.1 The Standard Encapsulation Pattern
+
+Mark fields as `private`, then provide `public` getter (read) and setter (write) methods:
+
+```java
+public class Account {
+    private double balance;   // 私有字段
+
+    // getter：读取余额
+    public double getBalance() {
+        return balance;
+    }
+
+    // setter：设置余额（带校验）
+    public void setBalance(double balance) {
+        if (balance < 0) {
+            throw new IllegalArgumentException("余额不能为负");
+        }
+        this.balance = balance;
+    }
+}
+```
+
+Now the outside world can only modify the balance through `setBalance`, which rejects negative values. **Encapsulation lets us concentrate "business rules" inside the setter** instead of scattering them across every call site.
+
+### 3.2 Why Not Just Use public Fields?
+
+| Comparison | public field | private + getter/setter |
+| --- | --- | --- |
+| Data validation | None — can be assigned arbitrarily | Validated inside the setter |
+| Read-only control | Cannot be read-only | Provide only a getter, no setter |
+| Changing internal implementation | Rename the field and every call site breaks | Free to refactor internally; the interface stays |
+| Framework integration | Not supported (Spring/Hibernate depend on methods) | Fully supported |
+
+A real example: you initially store age as `int age`. Later the requirement changes — you need to compute age from a birth date. If the field is public, every place that uses `user.age` has to change. If you used a getter `getAge()`, you only change the implementation inside the getter; not a single caller needs to be touched — this is encapsulation's "resistance to change".
+
+### 3.3 IDE Auto-Generation
+
+In IntelliJ IDEA, press `Cmd + N` (macOS) or `Alt + Insert` (Windows) and choose "Getter and Setter" to generate them automatically. No need to write them by hand, and fewer chances to make mistakes.
+
+### 3.4 A Complete Account Class
+
+<CodeRunner code={`public class Main {
+    static class Account {
+        private String owner;
+        private double balance;
+
+        public Account(String owner, double initialBalance) {
+            this.owner = owner;
+            // 调用 setter 复用校验逻辑
+            setBalance(initialBalance);
+        }
+
+        public String getOwner() {
+            return owner;
+        }
+
+        public double getBalance() {
+            return balance;
+        }
+
+        public void setBalance(double balance) {
+            if (balance < 0) {
+                throw new IllegalArgumentException("余额不能为负: " + balance);
+            }
+            this.balance = balance;
+        }
+
+        // 存款
+        public void deposit(double amount) {
+            if (amount <= 0) {
+                throw new IllegalArgumentException("存款金额必须为正");
+            }
+            this.balance += amount;
+            System.out.println(owner + " 存入 " + amount + "，余额：" + balance);
+        }
+
+        // 取款
+        public void withdraw(double amount) {
+            if (amount <= 0) {
+                throw new IllegalArgumentException("取款金额必须为正");
+            }
+            if (amount > balance) {
+                throw new IllegalArgumentException("余额不足");
+            }
+            this.balance -= amount;
+            System.out.println(owner + " 取出 " + amount + "，余额：" + balance);
+        }
+    }
+
+    public static void main(String[] args) {
+        Account acc = new Account("小明", 1000);
+        System.out.println("初始余额：" + acc.getBalance());
+
+        acc.deposit(500);
+        acc.withdraw(200);
+
+        // 尝试非法操作
+        try {
+            acc.withdraw(99999);   // 余额不足
+        } catch (IllegalArgumentException e) {
+            System.out.println("操作失败：" + e.getMessage());
+        }
+
+        try {
+            acc.setBalance(-100);  // 负余额
+        } catch (IllegalArgumentException e) {
+            System.out.println("操作失败：" + e.getMessage());
+        }
+
+        System.out.println("最终余额：" + acc.getBalance());
+    }
+}`} />
+
+Note the `setBalance(initialBalance)` call inside the constructor — **reusing the setter's validation logic** to avoid duplicating validation code in multiple places. This is another benefit of encapsulation.
+
+## 4. Packages and Imports
+
+### 4.1 Why Packages Are Needed
+
+As classes proliferate, naming conflicts become inevitable — you write a `User`, and a third-party library also has a `User`. A package is Java's "namespace", named in a reverse-domain style, such as `com.company.project.service`.
+
+```java
+package com.cafe.order;   // 声明当前类所属的包
+
+public class Order { ... }
+```
+
+The physical structure corresponding to a package is a **directory**: `com/cafe/order/Order.java`. Package names are all lowercase to avoid confusion with class names.
+
+### 4.2 The import Mechanism
+
+To use classes from other packages, you need `import`:
+
+```java
+import java.util.List;          // 导入单个类
+import java.util.*;             // 导入整个包（通配符）
+import static java.lang.Math.*; // 静态导入：直接用 PI、sqrt() 等
+```
+
+The `java.lang` package (containing `String`, `System`, `Math`, etc.) is imported automatically — no manual `import` needed.
+
+> ⚠️ **Note on wildcard imports**: `import java.util.*;` does not recursively import subpackages. `java.util.*` only imports the classes directly under `java.util`, not those under `java.util.concurrent`. Wildcard imports are convenient but can cause ambiguity; enterprise projects usually import individual classes explicitly.
+
+### 4.3 Fully Qualified Names
+
+If two packages contain classes with the same name (such as `java.util.Date` and `java.sql.Date`), you can distinguish them with **fully qualified names**:
+
+```java
+java.util.Date d1 = new java.util.Date();
+java.sql.Date d2 = new java.sql.Date(System.currentTimeMillis());
+```
+
+## 5. The static Keyword: From "Instance" to "Class"
+
+So far, the fields and methods we have written all belong to **objects** (instances) — each object has its own copy of a field, and methods are invoked through an object. But some things should be "class-level", independent of any particular object.
+
+### 5.1 Static Fields (Class Variables)
+
+A field modified with `static` is called a **static field** or **class variable**. It belongs to **the class itself**, and all objects **share** the same copy.
+
+```java
+public class CoffeeShop {
+    static int totalOrders = 0;   // 静态字段：所有店铺共享的总订单数
+    String name;                  // 实例字段：每个店铺自己的名字
+
+    public CoffeeShop(String name) {
+        this.name = name;
+        totalOrders++;            // 每开一家店，订单计数 +1（这里只是举例）
+    }
+}
+```
+
+It is recommended to access static fields through the **class name**: `CoffeeShop.totalOrders` (you can also access them through an object reference, but this is discouraged as it can be misleading).
+
+```
+Instance fields: each object has its own copy, independent of each other
+        shop1.name="A店"   shop2.name="B店"
+
+Static field: all objects share one copy
+        shop1 ─┐
+        shop2 ─┼──► CoffeeShop.totalOrders = 2
+```
+
+### 5.2 Static Methods
+
+A method modified with `static` is called a **static method**. It belongs to the class and can be called without creating an object:
+
+```java
+public class MathUtils {
+    public static int square(int n) {
+        return n * n;
+    }
+}
+
+// 调用：
+int result = MathUtils.square(5);   // 无需 new MathUtils()
+```
+
+Every method in `java.lang.Math` is static — `Math.sqrt(2)`, `Math.abs(-3)`, `Math.max(a, b)` — you never need to `new Math()`, because `Math` is essentially a container of mathematical functions.
+
+> ⚠️ **Limitations of static methods**:
+> - A static method **cannot directly access instance fields and instance methods** (because there is no `this`).
+> - A static method **cannot use `this` or `super`**.
+> - A static method **can** access static fields and other static methods.
+> - An instance method **can** access static members.
+
+### 5.3 Static Initializer Blocks
+
+A block modified with `static { ... }` is called a **static initialization block**. It runs **once** when the class is loaded, and is often used to initialize static resources:
+
+```java
+public class Config {
+    static {
+        System.out.println("Config 类被加载，执行静态代码块");
+        // 例如：读取配置文件、初始化连接池
+    }
+}
+```
+
+A class is typically loaded when: an object is created for the first time, a static member is accessed for the first time, or it is loaded via reflection. Static initializer blocks can run before the `main` method executes.
+
+### 5.4 Instance Initializer Blocks vs Static Initializer Blocks
+
+```java
+public class Demo {
+    static {
+        System.out.println("1. 静态代码块（类加载时，仅一次）");
+    }
+
+    {
+        System.out.println("2. 实例初始化块（每次 new 对象时）");
+    }
+
+    public Demo() {
+        System.out.println("3. 构造方法");
+    }
+}
+```
+
+Execution order: **static block → instance initializer block → constructor**. Calling `new Demo()` twice prints: 1, 2, 3, 2, 3 (the static block runs only once).
+
+## 6. Why Is main Static?
+
+The entry point of every Java program is:
+
+```java
+public static void main(String[] args)
+```
+
+Why `static`? Because **when the JVM starts up, no objects exist yet**. If `main` were an instance method, the JVM would have to `new` an object before calling it — but which constructor? What arguments? This would create a chicken-and-egg problem.
+
+`static` makes `main` a class-level method — the JVM only needs to load the class to call it: `java Main` actually tells the JVM to load the `Main` class and then call `Main.main(args)`.
+
+Let's break down every modifier of the `main` method:
+
+- `public`: The JVM calls it from the outside, so it must be public.
+- `static`: Can be called without creating an object.
+- `void`: The main method returns nothing (the program exit code is set via `System.exit`).
+- `main`: The method name agreed upon by the JVM; it cannot be changed.
+- `String[] args`: Command-line arguments, passed in by the JVM.
+
+## 7. A First Look at the Singleton Pattern: A Classic Use of static
+
+The **Singleton Pattern** is a design pattern that ensures a class has **only one instance** and provides a global access point. It is extremely common in configuration management, logging systems, database connection pools, and similar scenarios.
+
+### 7.1 Why We Need Singletons
+
+Imagine a Logger. If every class does `new Logger()`, you would end up with dozens of Logger instances, wasting memory, and logs might be written to different places. We want **a single global Logger** shared by all classes.
+
+### 7.2 Eager Singleton
+
+The simplest implementation: create the instance when the class is loaded.
+
+```java
+public class Logger {
+    // 1. 私有构造方法：外界无法 new
+    private Logger() {}
+
+    // 2. 静态字段持有唯一实例（类加载时创建）
+    private static final Logger INSTANCE = new Logger();
+
+    // 3. 公共静态方法返回实例
+    public static Logger getInstance() {
+        return INSTANCE;
+    }
+
+    public void log(String msg) {
+        System.out.println("[LOG] " + msg);
+    }
+}
+```
+
+Three key points:
+
+1. **Private constructor**: Closes off the possibility of `new Logger()`.
+2. **Static field holding the instance**: Created when the class is loaded, naturally thread-safe.
+3. **Public static method returning it**: The outside world obtains it via `Logger.getInstance()`.
+
+### 7.3 Lazy Singleton
+
+The drawback of the eager style is that the instance is created at class-load time even if Logger is never used. The **lazy style** defers creation until the first use:
+
+```java
+public class Logger {
+    private static Logger instance;   // 不立即创建
+
+    private Logger() {}
+
+    public static Logger getInstance() {
+        if (instance == null) {            // 第一次调用时才创建
+            instance = new Logger();
+        }
+        return instance;
+    }
+}
+```
+
+> ⚠️ The lazy version above is **not thread-safe** under multi-threading — two threads could both pass the `null` check and create two instances. A thread-safe version requires locking (`synchronized`) or "Double-Checked Locking". Multithreading is covered in detail in later chapters.
+
+### 7.4 Complete Example
+
+<CodeRunner code={`public class Main {
+    // 单例 Logger
+    static class Logger {
+        private static final Logger INSTANCE = new Logger();
+        private int logCount = 0;
+
+        private Logger() {
+            System.out.println("Logger 实例被创建（只会发生一次）");
+        }
+
+        public static Logger getInstance() {
+            return INSTANCE;
+        }
+
+        public void log(String msg) {
+            logCount++;
+            System.out.println("[LOG #" + logCount + "] " + msg);
+        }
+
+        public int getLogCount() {
+            return logCount;
+        }
+    }
+
+    // 模拟"全局计数器"单例
+    static class Counter {
+        private static Counter instance;
+        private int count = 0;
+
+        private Counter() {}
+
+        // 懒汉式（单线程）
+        public static Counter getInstance() {
+            if (instance == null) {
+                instance = new Counter();
+                System.out.println("Counter 实例被创建");
+            }
+            return instance;
+        }
+
+        public void increment() { count++; }
+        public int getCount() { return count; }
+    }
+
+    public static void main(String[] args) {
+        Logger logger1 = Logger.getInstance();
+        Logger logger2 = Logger.getInstance();
+        System.out.println("logger1 == logger2 ? " + (logger1 == logger2));
+
+        logger1.log("系统启动");
+        logger2.log("收到请求");
+        logger1.log("处理完成");
+        System.out.println("总日志数：" + logger1.getLogCount());
+
+        System.out.println("\\n--- 测试懒汉式 Counter ---");
+        Counter c1 = Counter.getInstance();
+        Counter c2 = Counter.getInstance();
+        System.out.println("c1 == c2 ? " + (c1 == c2));
+
+        c1.increment();
+        c2.increment();
+        c2.increment();
+        System.out.println("通过 c1 读取计数：" + c1.getCount());
+        System.out.println("通过 c2 读取计数：" + c2.getCount());
+    }
+}`} />
+
+`logger1 == logger2` returns `true`, proving they are **the same object** — this is the magic of the Singleton pattern. Note that after `c1.increment()`, the result can also be seen through `c2.getCount()`, because `c1` and `c2` are the same instance sharing the `count` field.
+
+## 8. Chapter Summary
+
+| Concept | Key Point |
+| --- | --- |
+| Encapsulation | Hide internal state, expose controlled access through public methods |
+| `private`/`default`/`protected`/`public` | Four levels of access control, from narrowest to widest |
+| getter/setter | The standard way to read/write private fields; validation can be added in the setter |
+| Package | A namespace for classes, corresponding to a directory structure |
+| `import` | Brings in classes from other packages; `java.lang` is auto-imported |
+| Static field | Modified with `static`, belongs to the class, shared by all objects |
+| Static method | Modified with `static`, has no `this`, cannot directly access instance members |
+| Static initializer block | Runs once at class load, used to initialize static resources |
+| Singleton pattern | Guarantees a class has only one instance, commonly implemented with `static` |
+
+## Conclusion
+
+Encapsulation is the first pillar of object-oriented programming. It binds "data" together with "the rules that operate on the data", making each object the master of its own state. Through `private` fields + `public` methods, we gain three benefits: validation, read-only control, and resistance to change. Through `static`, we gain class-level shared data and utility methods.
+
+But encapsulation is only the starting point. When we want to "reuse" an existing class and extend its functionality, we need the second pillar of OOP — **inheritance**. In the next chapter, we will let our "Hero" have descendants, and let "Coffee" branch out into Latte, Cappuccino, and Mocha, experiencing the elegance — and pitfalls — of code reuse.
+
+The world of inheritance is far richer than the two words "extends" suggest.

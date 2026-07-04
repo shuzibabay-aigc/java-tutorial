@@ -1,0 +1,505 @@
+---
+title: "内置函数式接口"
+chapter: 26
+stage: "第五阶段"
+stageName: "函数式编程"
+order: 2
+description: "系统掌握 Java 内置函数式接口：Function、Predicate、Consumer、Supplier 及其组合方法、Bi 系列与原始类型特化版本"
+pubDate: 2026-07-03
+tags: ["Java", "函数式接口", "Function", "Predicate", "Consumer", "Supplier", "BiFunction", "UnaryOperator"]
+---
+
+# 内置函数式接口
+
+上一章我们说，Lambda 需要一个"函数式接口"作为目标类型。如果你每次都要自己定义 `StringProcessor`、`IntChecker` 这些接口，那未免太累。Java 8 在 `java.util.function` 包里预定义了 43 个函数式接口，覆盖了绝大多数常见场景——它们是 Lambda 的"标准舞台"，也是 Stream API 的"通用语言"。
+
+这一章，我们把这些接口分门别类讲清楚。其实核心就四大金刚：`Function`、`Predicate`、`Consumer`、`Supplier`，其他都是它们的"变种"。
+
+## 一、四大核心接口
+
+### 1.1 Function＜T, R＞：转换器
+
+`Function<T, R>` 接收一个参数 T，返回一个结果 R——它是个"转换器"。
+
+```java
+@FunctionalInterface
+public interface Function<T, R> {
+    R apply(T t);
+
+    default <V> Function<V, R> compose(Function<? super V, ? extends T> before) { ... }
+    default <V> Function<T, V> andThen(Function<? super R, ? extends V> after) { ... }
+    static <T> Function<T, T> identity() { return t -> t; }
+}
+```
+
+核心方法 `apply`：传入 T，返回 R。
+
+```java
+Function<String, Integer> length = s -> s.length();
+System.out.println(length.apply("hello"));   // 5
+
+Function<Integer, Integer> square = x -> x * x;
+System.out.println(square.apply(5));         // 25
+```
+
+#### compose 与 andThen：函数组合
+
+`Function` 提供了两个组合方法，让函数像积木一样拼装：
+
+- `g.compose(f)`：先执行 f，再执行 g。等价于 `g(f(x))`。
+- `f.andThen(g)`：先执行 f，再执行 g。等价于 `g(f(x))`。
+
+两者结果相同，只是写法方向相反——`compose` 从后往前读，`andThen` 从前往后读。
+
+```java
+Function<Integer, Integer> plusOne = x -> x + 1;
+Function<Integer, Integer> square = x -> x * x;
+
+// (x+1) 的平方
+Function<Integer, Integer> f1 = square.compose(plusOne);   // 先 +1 再平方
+System.out.println(f1.apply(3));   // 16
+
+// x 的平方 +1
+Function<Integer, Integer> f2 = square.andThen(plusOne);   // 先平方再 +1
+System.out.println(f2.apply(3));   // 10
+```
+
+`andThen` 在 Stream 的 `map` 链式调用中特别有用——把多个转换组合成一个 Function，避免多次 map。
+
+#### identity：恒等函数
+
+`Function.identity()` 返回 `t -＞ t`——输入什么就返回什么。在 `Collectors.toMap` 等场景有用：
+
+```java
+Map<String, String> map = list.stream()
+    .collect(Collectors.toMap(Function.identity(), String::toUpperCase));
+// key 是元素本身，value 是大写形式
+```
+
+### 1.2 Predicate＜T＞：判断器
+
+`Predicate＜T＞` 接收一个参数 T，返回 boolean——它是个"判断器"。
+
+```java
+@FunctionalInterface
+public interface Predicate<T> {
+    boolean test(T t);
+
+    default Predicate<T> and(Predicate<? super T> other) { ... }
+    default Predicate<T> or(Predicate<? super T> other) { ... }
+    default Predicate<T> negate() { ... }
+    static <T> Predicate<T> isEqual(Object targetRef) { ... }
+    // Java 11+
+    static <T> Predicate<T> not(Predicate<? super T> target) { ... }
+}
+```
+
+核心方法 `test`：传入 T，返回 boolean。
+
+```java
+Predicate<Integer> isPositive = n -> n > 0;
+System.out.println(isPositive.test(5));    // true
+System.out.println(isPositive.test(-1));   // false
+
+Predicate<String> isEmpty = String::isEmpty;
+System.out.println(isEmpty.test(""));      // true
+```
+
+#### and / or / negate：逻辑组合
+
+`Predicate` 的强大在于可以组合：
+
+```java
+Predicate<Integer> isPositive = n -> n > 0;
+Predicate<Integer> isEven = n -> n % 2 == 0;
+Predicate<Integer> isPositiveEven = isPositive.and(isEven);   // 正且偶
+Predicate<Integer> isPositiveOrEven = isPositive.or(isEven);  // 正或偶
+Predicate<Integer> isNegative = isPositive.negate();          // 非正（负或零）
+
+System.out.println(isPositiveEven.test(4));   // true
+System.out.println(isPositiveEven.test(-2));  // false
+System.out.println(isPositiveEven.test(3));   // false
+```
+
+这就像布尔表达式的"动态版"——你可以把判断逻辑作为参数传递、组合。
+
+#### isEqual 与 not
+
+```java
+Predicate<String> isHello = Predicate.isEqual("hello");
+System.out.println(isHello.test("hello"));   // true
+
+// Java 11+ not
+Predicate<String> notEmpty = Predicate.not(String::isEmpty);
+System.out.println(notEmpty.test("hi"));   // true
+```
+
+`Predicate.not` 是 Java 11 新增的——之前要写 `s -＞ !s.isEmpty()`，现在可以 `Predicate.not(String::isEmpty)`，配合方法引用更优雅。
+
+### 1.3 Consumer＜T＞：消费者
+
+`Consumer＜T＞` 接收一个参数 T，无返回——它"消费"了参数。
+
+```java
+@FunctionalInterface
+public interface Consumer<T> {
+    void accept(T t);
+    default Consumer<T> andThen(Consumer<? super T> after) { ... }
+}
+```
+
+核心方法 `accept`：传入 T，无返回。
+
+```java
+Consumer<String> printer = s -> System.out.println("收到: " + s);
+printer.accept("数据");   // 输出: 收到: 数据
+```
+
+#### andThen：链式消费
+
+`Consumer.andThen` 把两个 Consumer 串起来——先执行当前，再执行参数：
+
+```java
+Consumer<String> step1 = s -> System.out.println("步骤1: " + s);
+Consumer<String> step2 = s -> System.out.println("步骤2: " + s);
+Consumer<String> pipeline = step1.andThen(step2);
+
+pipeline.accept("数据");
+// 输出:
+// 步骤1: 数据
+// 步骤2: 数据
+```
+
+`Consumer` 在 Stream 的 `forEach`、`peek`，以及各种回调场景中频繁出现。
+
+### 1.4 Supplier＜T＞：供应者
+
+`Supplier＜T＞` 无参数，返回 T——它"供应"一个值。
+
+```java
+@FunctionalInterface
+public interface Supplier<T> {
+    T get();
+}
+```
+
+核心方法 `get`：无参，返回 T。
+
+```java
+Supplier<String> helloSupplier = () -> "Hello!";
+System.out.println(helloSupplier.get());   // Hello!
+
+Supplier<Double> random = Math::random;
+System.out.println(random.get());          // 0.xxx
+```
+
+`Supplier` 的特点：**延迟计算**（lazy）。它不立即产生值，而是在调用 `get()` 时才计算。这让它在惰性求值、工厂模式、日志的延迟参数等场景很有用。
+
+```java
+// 日志的延迟参数：只在需要时计算
+logger.debug("用户: " + user.toString());   // ❌ 即使不记录日志也计算了 toString
+
+logger.debug(() -> "用户: " + user.toString());   // ✅ 只在真的记录时才调用
+```
+
+## 二、Bi 系列：两个参数的版本
+
+四大金刚都是单参数的。如果需要两个参数，用 Bi 系列：
+
+| 接口 | 签名 | 用途 |
+| --- | --- | --- |
+| `BiFunction＜T, U, R＞` | `(T, U) -＞ R` | 两参转换 |
+| `BiPredicate＜T, U＞` | `(T, U) -＞ boolean` | 两参判断 |
+| `BiConsumer＜T, U＞` | `(T, U) -＞ void` | 两参消费 |
+
+```java
+BiFunction<String, Integer, String> repeat = (s, n) -> s.repeat(n);
+System.out.println(repeat.apply("ab", 3));   // ababab
+
+BiPredicate<String, String> contains = String::contains;
+System.out.println(contains.test("hello world", "world"));   // true
+
+BiConsumer<String, Integer> printKV = (k, v) -> System.out.println(k + "=" + v);
+printKV.accept("age", 25);   // age=25
+```
+
+注意：**没有 `BiSupplier`**——Supplier 是"无参返回"，没有"两参"版本。
+
+`BiFunction` 还有特化版 `BinaryOperator＜T＞`，下文详述。
+
+## 三、UnaryOperator 与 BinaryOperator
+
+### 3.1 UnaryOperator＜T＞：一元运算
+
+`UnaryOperator＜T＞` 继承自 `Function＜T, T＞`——参数和返回类型相同。
+
+```java
+@FunctionalInterface
+public interface UnaryOperator<T> extends Function<T, T> {
+    static <T> UnaryOperator<T> identity() { return t -> t; }
+}
+```
+
+```java
+UnaryOperator<String> trim = String::strip;
+UnaryOperator<Integer> negate = x -> -x;
+
+System.out.println(trim.apply("  hi  "));   // "hi"
+System.out.println(negate.apply(5));        // -5
+```
+
+它适合"输入输出同类型"的转换——如 Stream 的 `map` 把 `Stream＜String＞` 还是 `Stream＜String＞` 时，用 `UnaryOperator` 比 `Function` 更语义化。
+
+### 3.2 BinaryOperator＜T＞：二元运算
+
+`BinaryOperator＜T＞` 继承自 `BiFunction＜T, T, T＞`——两个同类型参数，返回同类型。
+
+```java
+@FunctionalInterface
+public interface BinaryOperator<T> extends BiFunction<T, T, T> {
+    static <T> BinaryOperator<T> minBy(Comparator<? super T> comparator) { ... }
+    static <T> BinaryOperator<T> maxBy(Comparator<? super T> comparator) { ... }
+}
+```
+
+```java
+BinaryOperator<Integer> add = (a, b) -> a + b;
+BinaryOperator<Integer> max = BinaryOperator.maxBy(Integer::compare);
+
+System.out.println(add.apply(3, 5));   // 8
+System.out.println(max.apply(3, 5));   // 5
+```
+
+`BinaryOperator` 在 `Stream.reduce` 中是核心——`reduce` 把流元素两两合并，正是二元运算。
+
+```java
+int sum = Stream.of(1, 2, 3, 4).reduce(0, (a, b) -> a + b);
+// 也可以用方法引用
+int sum2 = Stream.of(1, 2, 3, 4).reduce(0, Integer::sum);
+```
+
+## 四、原始类型特化
+
+泛型 `Function＜T, R＞` 不能用基本类型——`Function＜int, int＞` 不行，得用 `Function＜Integer, Integer＞`，这就涉及装箱拆箱开销。Java 为基本类型提供了特化版本：
+
+### 4.1 IntFunction / LongFunction / DoubleFunction
+
+参数是基本类型，返回对象：
+
+```java
+IntFunction<String> intToStr = n -> "数字: " + n;
+System.out.println(intToStr.apply(42));   // 数字: 42
+```
+
+### 4.2 ToIntFunction / ToLongFunction / ToDoubleFunction
+
+参数是对象，返回基本类型：
+
+```java
+ToIntFunction<String> length = String::length;
+System.out.println(length.applyAsInt("hello"));   // 5
+```
+
+### 4.3 IntToLongFunction / IntToDoubleFunction 等
+
+基本类型之间的转换：
+
+```java
+IntToDoubleFunction toDouble = n -> n * 1.5;
+System.out.println(toDouble.applyAsDouble(4));   // 6.0
+```
+
+### 4.4 IntPredicate / LongPredicate / DoublePredicate
+
+基本类型的判断：
+
+```java
+IntPredicate isPrime = n -> {
+    if (n < 2) return false;
+    for (int i = 2; i * i <= n; i++) if (n % i == 0) return false;
+    return true;
+};
+System.out.println(isPrime.test(7));   // true
+```
+
+### 4.5 IntConsumer / IntSupplier 等
+
+基本类型的消费与供应：
+
+```java
+IntSupplier dice = () -> (int)(Math.random() * 6) + 1;
+System.out.println("掷骰子: " + dice.getAsInt());
+```
+
+注意：原始特化版本的方法名是 `applyAsInt`、`getAsInt`、`test`（IntPredicate 还是 `test`），不带 `apply`、`get`。
+
+### 4.6 为什么有这么多特化
+
+43 个接口看起来吓人，其实都是 4 大金刚的组合：
+
+- 4 种基本类型（int/long/double/boolean）
+- × 多种角色（Function/Predicate/Consumer/Supplier）
+- × 参数方向（对象→基本、基本→对象、基本→基本）
+
+这套设计避免了装箱开销，让数值计算更高效。你不需要全记——用到时查文档即可。
+
+## 五、实战：用函数式接口组合业务逻辑
+
+<CodeRunner code={`import java.util.*;
+import java.util.function.*;
+import java.util.stream.IntStream;
+
+public class Main {
+    public static void main(String[] args) {
+        // 1. Function 基础
+        System.out.println("--- Function ---");
+        Function<String, Integer> length = String::length;
+        Function<Integer, String> describe = n -> "长度" + n;
+        Function<String, String> composed = length.andThen(describe);
+        System.out.println(composed.apply("hello"));   // 长度5
+
+        Function<String, String> composed2 = describe.compose(length);
+        System.out.println(composed2.apply("world"));   // 长度5
+
+        // identity
+        Function<String, String> id = Function.identity();
+        System.out.println(id.apply("原样返回"));
+
+        // 2. Predicate 组合
+        System.out.println("\\n--- Predicate 组合 ---");
+        Predicate<Integer> isPositive = n -> n > 0;
+        Predicate<Integer> isEven = n -> n % 2 == 0;
+        Predicate<Integer> isPositiveEven = isPositive.and(isEven);
+        Predicate<Integer> isPositiveOrEven = isPositive.or(isEven);
+        Predicate<Integer> isOdd = isEven.negate();
+
+        System.out.println("4 正且偶? " + isPositiveEven.test(4));
+        System.out.println("-2 正或偶? " + isPositiveOrEven.test(-2));
+        System.out.println("3 是奇数? " + isOdd.test(3));
+
+        // 3. Consumer 链式
+        System.out.println("\\n--- Consumer 链式 ---");
+        Consumer<String> log = s -> System.out.println("[LOG] " + s);
+        Consumer<String> audit = s -> System.out.println("[AUDIT] " + s);
+        Consumer<String> notify = s -> System.out.println("[NOTIFY] " + s);
+        Consumer<String> pipeline = log.andThen(audit).andThen(notify);
+        pipeline.accept("用户登录");
+
+        // 4. Supplier 延迟计算
+        System.out.println("\\n--- Supplier 延迟 ---");
+        Supplier<String> lazyValue = () -> {
+            try { Thread.sleep(100); } catch (InterruptedException e) {}
+            return "耗时计算的结果";
+        };
+        System.out.println("Supplier 创建后未执行");
+        String result = lazyValue.get();
+        System.out.println(result);
+
+        // 5. BiFunction
+        System.out.println("\\n--- BiFunction ---");
+        BiFunction<String, Integer, String> repeat = (s, n) -> s.repeat(n);
+        System.out.println(repeat.apply("ab", 3));
+
+        // 6. BinaryOperator
+        System.out.println("\\n--- BinaryOperator ---");
+        BinaryOperator<Integer> max = BinaryOperator.maxBy(Integer::compare);
+        System.out.println("max(3, 7) = " + max.apply(3, 7));
+        BinaryOperator<Integer> min = BinaryOperator.minBy(Integer::compare);
+        System.out.println("min(3, 7) = " + min.apply(3, 7));
+
+        // 7. 原始类型特化
+        System.out.println("\\n--- 原始类型特化 ---");
+        IntPredicate isPrime = n -> {
+            if (n < 2) return false;
+            for (int i = 2; i * i <= n; i++) if (n % i == 0) return false;
+            return true;
+        };
+        System.out.print("1-20 素数: ");
+        IntStream.rangeClosed(1, 20).filter(isPrime).forEach(n -> System.out.print(n + " "));
+        System.out.println();
+
+        IntSupplier dice = () -> (int)(Math.random() * 6) + 1;
+        System.out.print("掷骰子 5 次: ");
+        for (int i = 0; i < 5; i++) System.out.print(dice.getAsInt() + " ");
+        System.out.println();
+
+        // 8. 综合实战：动态过滤
+        System.out.println("\\n--- 综合实战：动态过滤规则 ---");
+        List<Integer> nums = List.of(-3, -1, 0, 2, 4, 6, 7, 11, 15);
+        System.out.println("原始: " + nums);
+        System.out.println("正数: " + filter(nums, n -> n > 0));
+        System.out.println("正偶数: " + filter(nums, isPositive.and(isEven)));
+        System.out.println("非素数的正数: " + filter(nums, isPrime.negate().and(n -> n > 0)));
+
+        // 9. Function 链式处理
+        System.out.println("\\n--- 综合实战：数据处理管道 ---");
+        Function<String, String> cleanPipeline =
+            ((Function<String, String>)String::strip)
+            .andThen(s -> s.toLowerCase())
+            .andThen(s -> s.replace(" ", "_"));
+        System.out.println(cleanPipeline.apply("  Hello World  "));   // hello_world
+    }
+
+    static <T> List<T> filter(List<T> list, Predicate<T> p) {
+        List<T> result = new ArrayList<>();
+        for (T t : list) if (p.test(t)) result.add(t);
+        return result;
+    }
+}`} />
+
+## 六、何时自定义函数式接口
+
+虽然 `java.util.function` 已经覆盖了 90% 场景，但有时自定义更合适：
+
+1. **语义更清晰**：`Comparator＜T＞` 比 `BiFunction＜T, T, Integer＞` 好读。
+2. **需要抛检查异常**：标准接口的方法不声明检查异常，自定义接口可以。
+3. **需要多个 default 方法**：自定义接口可以附带丰富的组合方法。
+
+```java
+// 自定义：抛检查异常
+@FunctionalInterface
+interface ThrowingFunction<T, R, E extends Exception> {
+    R apply(T t) throws E;
+}
+
+// 自定义：语义化
+@FunctionalInterface
+interface PriceCalculator {
+    double calculate(Order order);
+    // 比 ToDoubleFunction<Order> 更有业务含义
+}
+```
+
+## 七、本章小结
+
+| 接口 | 签名 | 用途 |
+| --- | --- | --- |
+| `Function＜T, R＞` | `T -＞ R` | 转换 |
+| `Predicate＜T＞` | `T -＞ boolean` | 判断 |
+| `Consumer＜T＞` | `T -＞ void` | 消费 |
+| `Supplier＜T＞` | `() -＞ T` | 供应（延迟） |
+| `BiFunction＜T, U, R＞` | `(T, U) -＞ R` | 两参转换 |
+| `BiPredicate＜T, U＞` | `(T, U) -＞ boolean` | 两参判断 |
+| `BiConsumer＜T, U＞` | `(T, U) -＞ void` | 两参消费 |
+| `UnaryOperator＜T＞` | `T -＞ T` | 同类型转换 |
+| `BinaryOperator＜T＞` | `(T, T) -＞ T` | 同类型两参运算 |
+| `IntFunction＜R＞` | `int -＞ R` | int 转 R |
+| `ToIntFunction＜T＞` | `T -＞ int` | T 转 int |
+| `IntPredicate` | `int -＞ boolean` | int 判断 |
+
+**组合方法**：
+
+| 接口 | 组合方法 |
+| --- | --- |
+| `Function` | `compose`（先）、`andThen`（后）、`identity` |
+| `Predicate` | `and`、`or`、`negate`、`isEqual`、`not`（Java 11+） |
+| `Consumer` | `andThen` |
+| `BinaryOperator` | `minBy`、`maxBy` |
+
+## 结语：函数式接口的积木世界
+
+`java.util.function` 包是 Java 函数式编程的"标准件库"——43 个接口看似繁多，核心却只有四大金刚：`Function` 转换、`Predicate` 判断、`Consumer` 消费、`Supplier` 供应。其他都是它们的"双参版""同类型版""基本类型版"。
+
+掌握四大金刚的组合方法（`andThen`、`compose`、`and`、`or`、`negate`）后，你就能像搭积木一样组合函数——一个 `isPositive.and(isEven)` 比一个匿名类清爽得多。这正是函数式编程的力量：**用简单的积木，搭出复杂的逻辑**。
+
+下一章，我们看 Lambda 的"极简形态"——方法引用。它让 `s -＞ s.length()` 进一步简写成 `String::length`，把代码的噪音降到最低。

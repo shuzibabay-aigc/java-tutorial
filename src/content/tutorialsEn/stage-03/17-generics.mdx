@@ -1,0 +1,517 @@
+---
+title: "Generics"
+chapter: 17
+stage: "Stage 3"
+stageName: "Java Core Libraries"
+order: 5
+description: "Master generic classes and methods, wildcards and the PECS principle, type erasure and bridge methods, the limitations of generics, and a hands-on generic cache implementation"
+pubDate: 2026-07-03
+tags: ["Java", "泛型", "Generics", "类型擦除", "PECS"]
+---
+
+# Generics
+
+Suppose you write a "box" class for holding things. When it holds apples it's called `AppleBox`, when it holds books it's `BookBox`, when it holds phones it's `PhoneBox`... every new thing means copy-pasting and renaming. You might wonder: can't I just write one "universal box"?
+
+You could of course use `Object` — `class Box { Object item; }`. But the price is that when you retrieve something you have to **cast** (`(Apple) box.get()`), and the compiler won't check types for you — you can put a book into an apple box, the compiler won't complain, and it only blows up at runtime.
+
+**Generics** are the elegant solution to this dilemma. They let you write one piece of code that adapts to many types, while **guaranteeing type safety at compile time** — both generic and rigorous. After generics were introduced in Java 5, the Collections Framework was reborn. In this chapter we'll dig into every aspect of generics, including its most subtle feature — **type erasure**.
+
+## 1. The Motivation for Generics
+
+### 1.1 A world without generics
+
+Before Java 5, collections stored `Object`:
+
+```java
+List list = new ArrayList();
+list.add("hello");
+list.add(42);           // It actually lets you add this!
+String s = (String) list.get(1);   // ClassCastException at runtime!
+```
+
+Two pain points:
+
+1. **Not type-safe**: anything can be stuffed in; the compiler doesn't care.
+2. **Forced casts**: you have to cast on retrieval, which is error-prone.
+
+### 1.2 Generics to the rescue
+
+Generics let you "parameterize types" — treating a type as a parameter to a class or method:
+
+```java
+List<String> list = new ArrayList<>();
+list.add("hello");
+list.add(42);           // Compile error! List<String> can only hold String
+String s = list.get(0); // No cast needed
+```
+
+Both pain points vanish: illegal types are blocked at compile time, and no cast is needed on retrieval. This is the core value of generics — **type safety + elimination of casts**.
+
+## 2. Generic Classes
+
+### 2.1 Defining a generic class
+
+Declare a type parameter in `＜T＞` after the class name:
+
+```java
+public class Box<T> {
+    private T item;
+
+    public void put(T item) { this.item = item; }
+    public T get() { return item; }
+}
+```
+
+`T` is a **type parameter** (Type Parameter), like a placeholder. When used, you pass a **type argument**:
+
+```java
+Box<String> stringBox = new Box<>();
+stringBox.put("hello");
+String s = stringBox.get();     // No cast needed
+
+Box<Integer> intBox = new Box<>();
+intBox.put(42);
+int n = intBox.get();           // Autounboxing
+```
+
+The `＜＞` (diamond operator, Java 7+) lets the compiler infer the type argument on the right from the left, saving you from repeating it.
+
+### 2.2 Multiple type parameters
+
+A generic class can have multiple type parameters, for example a key-value pair:
+
+```java
+public class Pair<K, V> {
+    private final K key;
+    private final V value;
+
+    public Pair(K key, V value) {
+        this.key = key;
+        this.value = value;
+    }
+
+    public K getKey() { return key; }
+    public V getValue() { return value; }
+}
+
+Pair<String, Integer> p = new Pair<>("age", 25);
+System.out.println(p.getKey() + " = " + p.getValue());
+```
+
+## 3. Generic Methods
+
+### 3.1 Defining a generic method
+
+Generic methods aren't limited to generic classes — any ordinary class can have generic methods. The type parameter is declared **before the return type**:
+
+```java
+public class Util {
+    // <T> declares the type parameter; T is the return type
+    public static <T> T identity(T arg) {
+        return arg;
+    }
+}
+```
+
+When calling, you can specify the type explicitly or omit it and let the compiler infer:
+
+```java
+String s = Util.identity("hello");         // Infer T=String
+Integer n = Util.<Integer>identity(42);    // Specify explicitly
+```
+
+### 3.2 A practical generic method
+
+```java
+public static <T> T getFirst(List<T> list) {
+    if (list == null || list.isEmpty()) return null;
+    return list.get(0);
+}
+```
+
+This method works for `List＜String＞`, `List＜Integer＞`, and so on — one piece of code, many types.
+
+## 4. Generic Interfaces
+
+Interfaces can be generic too. The classic example is `Comparable＜T＞`:
+
+```java
+public interface Comparable<T> {
+    int compareTo(T o);
+}
+
+public class Product implements Comparable<Product> {
+    private double price;
+
+    @Override
+    public int compareTo(Product other) {
+        return Double.compare(this.price, other.price);
+    }
+}
+```
+
+`Comparable＜Product＞` means "Product only compares to Product" — type-safe; you'll never compare a Product with an Apple.
+
+`Iterable＜T＞`, `Comparator＜T＞`, `List＜T＞`, and `Map＜K,V＞` are all exemplary generic interfaces.
+
+## 5. Type Parameter Naming Conventions
+
+The Java community has a conventional set of naming rules, using a single uppercase letter for type parameters:
+
+| Letter | Meaning | Typical use |
+| --- | --- | --- |
+| `T` | Type | Generic type, e.g. `Box＜T＞` |
+| `E` | Element | Collection element, e.g. `List＜E＞` |
+| `K` | Key | Map key, e.g. `Map＜K, V＞` |
+| `V` | Value | Map value |
+| `N` | Number | Numeric type |
+| `R` | Result | Return value type |
+| `S, U, V` | Second, third, fourth types | Multiple type parameters |
+
+These names aren't mandatory, but following them makes your code more readable — when you see `K` you know it's a key, and when you see `E` you know it's a collection element.
+
+## 6. Wildcards: The Polymorphism Puzzle of Generics
+
+### 6.1 A counterintuitive phenomenon
+
+Generics are invariant — even though `Integer` is a subclass of `Number`, `List＜Integer＞` is **not** a subclass of `List＜Number＞`:
+
+```java
+List<Integer> ints = new ArrayList<>();
+List<Number> nums = ints;   // Compile error!
+```
+
+Why? Suppose it were allowed; the very next step could be `nums.add(3.14)` — putting a `Double` into what is fundamentally a `List＜Integer＞`, and type safety collapses. Generics prefers "strict" over "loose."
+
+But you do have a genuine need: a method that accepts `List＜Integer＞`, `List＜Double＞`, `List＜Number＞`... That's where **wildcards** (Wildcard) come in.
+
+### 6.2 The unbounded wildcard `?`
+
+`List＜?＞` means "a List of unknown type" — it accepts a List of any type:
+
+```java
+public static void printSize(List<?> list) {
+    System.out.println("Size: " + list.size());
+    // list.add("x");   // Compile error! Can't add elements to List<?> (except null)
+}
+
+printSize(new ArrayList<String>());   // OK
+printSize(new ArrayList<Integer>());  // OK
+```
+
+`List＜?＞` is **read-only** — you can only read out `Object`, and you can't add elements (because the actual type is unknown, and adding could break type safety).
+
+### 6.3 The upper-bounded wildcard `? extends T`
+
+`? extends T` means "T or a subclass of T":
+
+```java
+public static double sum(List<? extends Number> list) {
+    double total = 0;
+    for (Number n : list) {     // Can read out Number
+        total += n.doubleValue();
+    }
+    return total;
+}
+
+sum(new ArrayList<Integer>());   // OK
+sum(new ArrayList<Double>());    // OK
+```
+
+`? extends Number` lets the method accept `List＜Integer＞`, `List＜Double＞`, and so on. But it's a **producer** — you can **read** Numbers out of it, but you can't **write** (because the compiler doesn't know the specific subclass and can't safely add).
+
+### 6.4 The lower-bounded wildcard `? super T`
+
+`? super T` means "T or a superclass of T":
+
+```java
+public static void addNumbers(List<? super Integer> list) {
+    list.add(1);    // Can write Integer
+    list.add(2);
+}
+
+List<Number> nums = new ArrayList<>();
+addNumbers(nums);   // OK, Number is a superclass of Integer
+
+List<Object> objs = new ArrayList<>();
+addNumbers(objs);   // OK, Object is a superclass of Integer
+```
+
+`? super Integer` lets the method **write** Integers in (because no matter whether the actual list is `List＜Integer＞`, `List＜Number＞`, or `List＜Object＞`, it can hold an Integer). But on read you only get `Object` — because the compiler only knows "it's some superclass of Integer," not which one.
+
+### 6.5 The PECS principle
+
+When to use extends and when to use super? Remember the **PECS** mnemonic:
+
+> **P**roducer **E**xtends, **C**onsumer **S**uper
+>
+> - If the collection is a **producer** (you **read** data from it), use `? extends T`.
+> - If the collection is a **consumer** (you **write** data to it), use `? super T`.
+
+Take `Collections.copy` as an example:
+
+```java
+public static <T> void copy(List<? super T> dest, List<? extends T> src) {
+    // src is a producer (read), use extends
+    // dest is a consumer (write), use super
+}
+```
+
+This signature perfectly embodies PECS — read with extends, write with super.
+
+## 7. Type Erasure
+
+### 7.1 Generics exist only at compile time
+
+Java's generics are implemented via **type erasure** (Type Erasure) — generic information exists only at compile time for type checking and is **completely erased** after compilation.
+
+```java
+Box<String> a = new Box<>();
+Box<Integer> b = new Box<>();
+
+// At runtime, a and b have the same class!
+System.out.println(a.getClass() == b.getClass());   // true
+System.out.println(a.getClass().getName());          // Box (no <String>)
+```
+
+What the compiler does:
+
+1. **Erases type parameters**: `T` in `Box＜T＞` is erased to its upper bound (default `Object`; if `T extends Number`, erased to `Number`).
+2. **Inserts casts**: where a generic method's return value is used, the compiler automatically inserts casts like `(String)`, `(Integer)`.
+3. **Generates bridge methods** (see below): to ensure polymorphism is correct.
+
+`Box＜String＞` and `Box＜Integer＞` are the same `Box` class at runtime — that's "type erasure."
+
+### 7.2 The effects of erasure
+
+Because no generic information exists at runtime, the following are all **not allowed**:
+
+```java
+// ❌ Can't get the generic type at runtime
+if (list instanceof List<String>) { ... }   // Compile error
+
+// ❌ Can't new a type parameter
+T item = new T();                // Compile error
+
+// ❌ Can't new a generic array
+T[] arr = new T[10];             // Compile error
+
+// ❌ Primitive types can't be type arguments
+List<int> list;                  // Compile error, must use List<Integer>
+
+// ❌ Can't catch a generic exception class
+class MyException<T> extends Exception { }
+try { } catch (MyException<String> e) { }   // Compile error
+```
+
+What you can do:
+
+```java
+// ✅ Can use instanceof with the raw type
+if (list instanceof List) { ... }              // OK
+// Java 16+ supports instanceof pattern matching
+if (list instanceof List<?> ls) { ... }        // OK
+
+// ✅ Can obtain a generic class's type arguments via reflection (limited cases)
+// e.g. via getGenericSuperclass to get the parent class's generic arguments
+```
+
+### 7.3 Why Java chose type erasure
+
+When generics were introduced in Java 5, they had to remain **binary-compatible** with Java 4's "raw type" code — the old `List` and the new `List＜T＞` had to coexist on the same JVM. Type erasure is the price of that compatibility: generics only "virtually exist" at compile time and revert to raw types at runtime.
+
+C#'s generics are "true generics" (reified generics), preserving type information at runtime — but C# doesn't carry Java's historical baggage. This is a design trade-off between the two languages.
+
+## 8. Bridge Methods
+
+### 8.1 A subtle inheritance scenario
+
+Type erasure brings a polymorphism problem. Consider this code:
+
+```java
+class Node<T> {
+    T value;
+    void setValue(T value) { this.value = value; }
+}
+
+class StringNode extends Node<String> {
+    @Override
+    void setValue(String value) {   // Override the parent's setValue
+        System.out.println("Set: " + value);
+        super.setValue(value);
+    }
+}
+```
+
+After erasure, `Node`'s `setValue(T)` becomes `setValue(Object)`. But `StringNode`'s `setValue(String)` has a different signature — how is this an "override"?
+
+The compiler auto-generates a **bridge method** (Bridge Method) for `StringNode`:
+
+```java
+// Synthetic method generated by the compiler
+void setValue(Object value) {
+    setValue((String) value);   // Forwards to the real setValue(String)
+}
+```
+
+This bridge method's signature `setValue(Object)` matches the parent's erased signature, correctly implementing polymorphism. When you call `node.setValue("x")` (where `node` is declared as `Node` but is actually a `StringNode`), the JVM calls the bridge method, which forwards to `setValue(String)`.
+
+Bridge methods are generated silently by the compiler, and you usually don't need to care — but knowing they exist helps you understand some "weird" method signatures you'll see in reflection scenarios.
+
+## 9. The Limitations of Generics
+
+A summary of the limitations imposed by type erasure:
+
+| Limitation | Reason |
+| --- | --- |
+| Can't `new T()` | At runtime T is erased; the concrete type is unknown |
+| Can't `new T[]` | Arrays have runtime type checks, which conflict with erasure |
+| Can't `instanceof List＜String＞` | No generic information at runtime |
+| Primitive types can't be type arguments | After erasure they'd become Object, which can't hold primitives |
+| Static fields can't use the class's type parameters | Type parameters belong to instances; static members don't depend on instances |
+| Can't catch a generic exception class | Exception matching happens at runtime, but generics are erased at compile time |
+
+A common trick for working around these limits is to pass a `Class＜T＞` object and create instances via reflection:
+
+```java
+public static <T> T newInstance(Class<T> clazz) throws Exception {
+    return clazz.getDeclaredConstructor().newInstance();
+}
+
+String s = newInstance(String.class);
+```
+
+## 10. Hands-On: A Generic Cache＜K, V＞
+
+Below we'll implement a generic cache with a TTL (time-to-live), tying the chapter's ideas together.
+
+<CodeRunner code={`import java.util.HashMap;
+import java.util.Map;
+
+public class Main {
+    public static void main(String[] args) throws InterruptedException {
+        Cache<String, String> cache = new Cache<>(2000);   // TTL 2 seconds
+
+        // Put into cache
+        cache.put("greeting", "Hello, World!");
+        cache.put("name", "Java");
+
+        // Read immediately
+        System.out.println("greeting: " + cache.get("greeting"));
+        System.out.println("name: " + cache.get("name"));
+
+        // Wait 1.2 seconds, not yet expired
+        Thread.sleep(1200);
+        System.out.println("\\n--- 等待 1.2 秒后 ---");
+        System.out.println("greeting: " + cache.get("greeting"));
+
+        // Wait another 1.2 seconds, now expired
+        Thread.sleep(1200);
+        System.out.println("\\n--- 等待 2.4 秒后 ---");
+        System.out.println("greeting: " + cache.get("greeting"));   // null (expired)
+
+        System.out.println("\\n缓存大小: " + cache.size());
+
+        // Demonstrate generic methods
+        System.out.println("\\n--- 泛型方法演示 ---");
+        Integer num = Util.identity(100);
+        String str = Util.identity("泛型方法");
+        System.out.println("identity(100): " + num);
+        System.out.println("identity(str): " + str);
+
+        // Demonstrate PECS
+        System.out.println("\\n--- PECS 演示 ---");
+        java.util.List<Integer> ints = java.util.Arrays.asList(1, 2, 3);
+        java.util.List<Double> doubles = java.util.Arrays.asList(1.5, 2.5);
+        System.out.println("Integer 求和: " + sum(ints));
+        System.out.println("Double 求和: " + sum(doubles));
+    }
+
+    // ? extends Number: producer uses extends (read)
+    static double sum(java.util.List<? extends Number> list) {
+        double total = 0;
+        for (Number n : list) total += n.doubleValue();
+        return total;
+    }
+}
+
+// Generic cache class
+class Cache<K, V> {
+    private final Map<K, CacheEntry<V>> store = new HashMap<>();
+    private final long ttlMillis;
+
+    Cache(long ttlMillis) { this.ttlMillis = ttlMillis; }
+
+    void put(K key, V value) {
+        store.put(key, new CacheEntry<>(value, System.currentTimeMillis()));
+    }
+
+    V get(K key) {
+        CacheEntry<V> entry = store.get(key);
+        if (entry == null) return null;
+        if (System.currentTimeMillis() - entry.timestamp > ttlMillis) {
+            store.remove(key);   // lazy deletion
+            System.out.println("  (键 " + key + " 已过期，自动清除)");
+            return null;
+        }
+        return entry.value;
+    }
+
+    int size() { return store.size(); }
+
+    // Cache entry
+    private static class CacheEntry<V> {
+        final V value;
+        final long timestamp;
+        CacheEntry(V value, long timestamp) {
+            this.value = value;
+            this.timestamp = timestamp;
+        }
+    }
+}
+
+// Generic method utility class
+class Util {
+    static <T> T identity(T arg) { return arg; }
+}`} />
+
+This `Cache＜K, V＞` embodies the essence of generics:
+
+- The two type parameters `K` and `V` let the cache store any key-value pair — `Cache＜String, String＞`, `Cache＜Integer, User＞`, anything.
+- `CacheEntry＜V＞` is a static inner class with its own type parameter `V`, consistent with the outer `V`.
+- The `sum` method uses `? extends Number` to accept both `List＜Integer＞` and `List＜Double＞` — that's the extends side of PECS.
+- `identity` is a generic method, existing independently of any generic class.
+
+## 11. Chapter Summary
+
+| Topic | Key points |
+| --- | --- |
+| Motivation for generics | Type safety + elimination of casts |
+| Generic classes | `class Box＜T＞`, T is a type parameter |
+| Generic methods | `＜T＞ T method(T t)`, type parameter before the return type |
+| Generic interfaces | `interface Comparable＜T＞` |
+| Naming conventions | T=Type, E=Element, K=Key, V=Value, R=Result |
+| Unbounded wildcard `?` | Accepts any type, read-only |
+| Upper bound `? extends T` | T and subclasses, read-only (producer) |
+| Lower bound `? super T` | T and superclasses, write-only (consumer) |
+| PECS | Producer Extends, Consumer Super |
+| Type erasure | Generics exist only at compile time; at runtime erased to upper bound/Object |
+| Bridge methods | Generated by the compiler to keep polymorphism correct after erasure |
+| Limitations | Can't new T(), new T[], use primitives as arguments, or instanceof generics |
+
+## Conclusion: The End of Stage 3
+
+Generics are the "grand finale" of Java's core libraries — type parameterization makes code both generic and safe, and type erasure strikes a balance between compatibility and capability. Only by mastering generics can you read the source of the Collections Framework and write truly reusable utility classes.
+
+With this, the five chapters of Stage 3, "Java Core Libraries," are complete:
+
+- **Strings** — understood immutability and the string pool, made good use of StringBuilder and text blocks.
+- **Wrapper classes and math utilities** — opened the safe box of primitive types, rescued precision with BigDecimal.
+- **The Date and Time API** — bid farewell to the chaos of the legacy API and embraced the elegance of java.time.
+- **Exception handling** — learned to guard robustness with try/catch/finally and manage resources elegantly with try-with-resources.
+- **Generics** — mastered type parameters, wildcards, and PECS, and understood the cost of type erasure.
+
+These core libraries are the Java programmer's "daily toolbox" — you'll use them almost every day. Get them solid, and your Java foundation stands on firm ground.
+
+In the stages ahead, we'll enter broader territory — **the Collections Framework**, **IO and NIO**, **Lambda and Stream**, **concurrent programming**. The Java world is just beginning to show its most exciting parts.

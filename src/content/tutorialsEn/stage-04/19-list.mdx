@@ -1,0 +1,582 @@
+---
+title: "List"
+chapter: 19
+stage: "Stage 4"
+stageName: "Collections Framework"
+order: 2
+description: "An in-depth look at ArrayList's dynamic array internals and resizing mechanism, LinkedList's doubly-linked list structure, performance comparisons, CopyOnWriteArrayList, and a hand-written simplified ArrayList"
+pubDate: 2026-07-03
+tags: ["Java", "List", "ArrayList", "LinkedList", "CopyOnWriteArrayList", "动态数组", "双向链表"]
+---
+
+# List
+
+`List` is the branch of the collections family that most resembles an array—it is ordered, indexable, and allows duplicates. But it is far smarter than an array: its length grows on its own, and insertions and deletions come with ready-made methods. Among all `List` implementations, `ArrayList` and `LinkedList` are the two protagonists—one is like "an expandable drawer," the other like "beads strung on a thread," with very different personalities yet each excellent in its own way.
+
+In this chapter, we pop the hood on these two containers, see how they actually work on the inside, and build a simplified `ArrayList` with our own hands—because only by writing one yourself can you truly understand it.
+
+## 1. The List Interface
+
+`List<E>` extends `Collection<E>`, adding "index" capabilities on top of the general operations:
+
+```java
+public interface List<E> extends Collection<E> {
+    // Index-based access
+    E get(int index);
+    E set(int index, E element);
+    void add(int index, E element);     // insert at index
+    E remove(int index);                 // remove the element at index
+    int indexOf(Object o);               // first occurrence
+    int lastIndexOf(Object o);           // last occurrence
+    List<E> subList(int from, int to);   // sublist view
+    ListIterator<E> listIterator();      // bidirectional iterator
+}
+```
+
+The contract of `List`: **ordered, allows duplicates, indexable**. "Ordered" means elements are arranged in insertion order (not automatically sorted); "allows duplicates" means the same object can be added multiple times.
+
+## 2. ArrayList: A Dynamic Array
+
+### 2.1 An Array That Grows Itself
+
+The essence of `ArrayList` is "an array that resizes itself." Open the source code, and the core fields look like this:
+
+```java
+public class ArrayList<E> extends AbstractList<E>
+        implements List<E>, RandomAccess, Cloneable, java.io.Serializable {
+    // Java 8 and earlier
+    transient Object[] elementData;
+    private int size;
+    // ...
+}
+```
+
+That's right—just an `Object[]` array and a `size` counter. The "dynamic" part is simply that when the array fills up, it quietly swaps in a larger one.
+
+> 💡 **The RandomAccess marker interface**: `ArrayList` implements `RandomAccess`—an empty interface used purely as a "marker" indicating "I support random access (O(1))." `LinkedList` does not implement this interface. Some algorithms use it to choose a traversal strategy.
+
+### 2.2 Initial Capacity
+
+Many people assume `new ArrayList＜＞()` starts with 10 slots—historically this was true (Java 7 and earlier), but from Java 8 onward, to save memory, it was changed to **lazy initialization**:
+
+```java
+// Java 8+ ArrayList source
+private static final Object[] DEFAULTCAPACITY_EMPTY_ELEMENTDATA = {};
+transient Object[] elementData;
+
+public ArrayList() {
+    this.elementData = DEFAULTCAPACITY_EMPTY_ELEMENTDATA;   // an empty array!
+}
+```
+
+The first `add` triggers expansion to the default capacity of 10:
+
+```java
+public boolean add(E e) {
+    ensureCapacityInternal(size + 1);   // expand to 10 on first add
+    elementData[size++] = e;
+    return true;
+}
+
+private void ensureCapacityInternal(int minCapacity) {
+    if (elementData == DEFAULTCAPACITY_EMPTY_ELEMENTDATA) {
+        minCapacity = Math.max(10, minCapacity);   // default capacity 10
+    }
+    ensureExplicitCapacity(minCapacity);
+}
+```
+
+This "deferred initialization" avoids wasting 10 slots of memory on a large number of empty `ArrayList` instances—meaningful in memory-sensitive scenarios.
+
+### 2.3 Resizing: 1.5x
+
+When the array fills up, `ArrayList` resizes. What is the new capacity? The answer: **1.5 times the old capacity**.
+
+```java
+private void grow(int minCapacity) {
+    int oldCapacity = elementData.length;
+    int newCapacity = oldCapacity + (oldCapacity >> 1);   // 1.5x
+    if (newCapacity - minCapacity < 0)
+        newCapacity = minCapacity;
+    if (newCapacity - MAX_ARRAY_SIZE > 0)
+        newCapacity = hugeCapacity(minCapacity);
+    elementData = Arrays.copyOf(elementData, newCapacity);   // copy to new array
+}
+```
+
+`oldCapacity ＞＞ 1` is division by 2; adding it back to the original capacity gives 1.5x. Why 1.5 and not 2? It is a trade-off:
+
+- **Too large (e.g., 2x)**: more wasted space per resize, but fewer resizes.
+- **Too small (e.g., 1.25x)**: better space utilization, but frequent resizes and high copy overhead.
+- **1.5x**: the middle ground, and `oldCapacity ＞＞ 1` uses bit shifting, which is faster than division.
+
+After resizing, the old array is discarded, and elements are copied to the new array by `Arrays.copyOf`. This is the root cause of slow insertions/deletions in the middle of an `ArrayList`—all subsequent elements must be shifted.
+
+### 2.4 Specifying the Initial Capacity
+
+If you roughly know how many elements you will store, **specifying the capacity in advance** avoids multiple resizes:
+
+```java
+List<Integer> list = new ArrayList<>(1000);   // all at once
+```
+
+This advice is especially important when adding large numbers of elements in bulk. Otherwise, growing from 10 to 1000 requires going through 10→15→22→33→49→73→109→163→244→366→549→823→1234—many copy operations.
+
+### 2.5 The Cost of add / remove
+
+- **Tail add**: amortized O(1)—most of the time it's just `elementData[size++] = e`; occasionally a resize is O(n), but "amortized" over all operations it remains O(1).
+- **Middle add**: O(n)—all elements after the insertion point must shift right by one.
+- **Middle remove**: O(n)—all elements after the deletion point must shift left by one.
+
+```java
+List<Integer> list = new ArrayList<>();
+for (int i = 0; i < 100000; i++) list.add(i);   // O(1) amortized, fast
+
+list.add(0, 999);          // O(n), 100k elements all shift right, slow
+list.remove(0);            // O(n), same reason
+```
+
+That's why "inserting at the head of an ArrayList" is an anti-pattern—it makes every insertion O(n).
+
+## 3. LinkedList: A Doubly-Linked List
+
+### 3.1 Beads Strung on a Thread
+
+`LinkedList` takes a different approach—it does not use a contiguous array, but strings together "nodes," where each node records its "previous" and "next" neighbors:
+
+```java
+public class LinkedList<E> extends AbstractSequentialList<E>
+        implements List<E>, Deque<E>, Cloneable, java.io.Serializable {
+    transient int size = 0;
+    transient Node<E> first;   // head node
+    transient Node<E> last;    // tail node
+
+    private static class Node<E> {
+        E item;
+        Node<E> next;
+        Node<E> prev;
+
+        Node(Node<E> prev, E element, Node<E> next) {
+            this.item = element;
+            this.next = next;
+            this.prev = prev;
+        }
+    }
+}
+```
+
+Each `Node` holds three references: its own data `item`, its predecessor `prev`, and its successor `next`. The entire linked list is like a string of bracelets—each bead knows its left and right neighbors.
+
+Note that `LinkedList` also implements `Deque`—so it can be used as a List, a queue, or a stack. However, using it as a queue is generally not recommended (`ArrayDeque` is faster).
+
+### 3.2 Head and Tail Operations Are O(1)
+
+The linked list's strength is at the head and tail: insertions and deletions don't need to shift other elements, only adjusting the pointers of adjacent nodes.
+
+```java
+public void addFirst(E e) {
+    final Node<E> f = first;
+    final Node<E> newNode = new Node<>(null, e, f);
+    first = newNode;
+    if (f == null) last = newNode;   // empty list
+    else f.prev = newNode;
+    size++;
+}
+```
+
+`addFirst` only changes a few references—O(1). Likewise, `addLast`, `removeFirst`, and `removeLast` are all O(1).
+
+### 3.3 Random Access Is O(n)
+
+But `LinkedList`'s weakness is random access—`get(i)` has to count its way from the head (or tail):
+
+```java
+public E get(int index) {
+    checkElementIndex(index);
+    return node(index).item;
+}
+
+Node<E> node(int index) {
+    // binary search: from the front if closer to head, from the back if closer to tail
+    if (index < (size >> 1)) {
+        Node<E> x = first;
+        for (int i = 0; i < index; i++) x = x.next;
+        return x;
+    } else {
+        Node<E> x = last;
+        for (int i = size - 1; i > index; i--) x = x.prev;
+        return x;
+    }
+}
+```
+
+The source has a small optimization: if the index is in the first half, it searches from the front; if in the second half, from the back. But it is still O(n) on average—which is why `LinkedList` does not implement `RandomAccess`.
+
+`LinkedList`'s memory overhead is also greater than `ArrayList`'s—each node must store two extra references, `prev` and `next` (each occupying 4 or 8 bytes on a 64-bit JVM).
+
+## 4. ArrayList vs LinkedList: Performance Comparison
+
+| Operation | ArrayList | LinkedList |
+| --- | --- | --- |
+| `get(i)` random access | **O(1)** | O(n) |
+| `add(e)` tail add | **O(1) amortized** | O(1) |
+| `add(0, e)` head insert | O(n) | **O(1)** |
+| `add(i, e)` middle insert | O(n) | O(n) (finding position O(n), insert itself O(1)) |
+| `remove(i)` middle remove | O(n) | O(n) |
+| iterator `next()` | O(1) | O(1) |
+| Memory overhead | Small (one array) | Large (2 extra refs per node) |
+
+A common misconception: "LinkedList insertions and deletions are faster than ArrayList." **This is only true at the head/tail or when you already hold a node reference.** If you insert or delete by index (`add(i, e)`, `remove(i)`), LinkedList's position-finding step is O(n), so it's no faster than ArrayList.
+
+Here's a visual performance comparison:
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        final int N = 100_000;
+
+        // 1. 尾部添加对比
+        List<Integer> arrayList = new ArrayList<>();
+        List<Integer> linkedList = new LinkedList<>();
+
+        long t1 = System.currentTimeMillis();
+        for (int i = 0; i < N; i++) arrayList.add(i);
+        long t2 = System.currentTimeMillis();
+        for (int i = 0; i < N; i++) linkedList.add(i);
+        long t3 = System.currentTimeMillis();
+
+        System.out.println("=== 尾部添加 " + N + " 个元素 ===");
+        System.out.println("ArrayList:  " + (t2 - t1) + " ms");
+        System.out.println("LinkedList: " + (t3 - t2) + " ms");
+
+        // 2. 随机访问对比
+        t1 = System.currentTimeMillis();
+        for (int i = 0; i < 10000; i++) arrayList.get(i * 10);
+        t2 = System.currentTimeMillis();
+        for (int i = 0; i < 10000; i++) linkedList.get(i * 10);
+        t3 = System.currentTimeMillis();
+
+        System.out.println("\\n=== 随机访问 10000 次 ===");
+        System.out.println("ArrayList:  " + (t2 - t1) + " ms");
+        System.out.println("LinkedList: " + (t3 - t2) + " ms (慢得多)");
+
+        // 3. 头部插入对比（少量，避免 ArrayList 太慢）
+        List<Integer> al = new ArrayList<>();
+        List<Integer> ll = new LinkedList<>();
+        final int M = 50_000;
+
+        t1 = System.currentTimeMillis();
+        for (int i = 0; i < M; i++) al.add(0, i);
+        t2 = System.currentTimeMillis();
+        for (int i = 0; i < M; i++) ll.add(0, i);
+        t3 = System.currentTimeMillis();
+
+        System.out.println("\\n=== 头部插入 " + M + " 次 ===");
+        System.out.println("ArrayList:  " + (t2 - t1) + " ms (慢)");
+        System.out.println("LinkedList: " + (t3 - t2) + " ms (快)");
+
+        System.out.println("\\n结论：ArrayList 适合随机访问，LinkedList 适合头尾增删。");
+    }
+}`} />
+
+Run it and you will feel the difference—during random access, `LinkedList` is several orders of magnitude slower than `ArrayList`, while during head insertions, `ArrayList` is left in the dust by `LinkedList`. **There is no silver bullet; choosing the right scenario is key.**
+
+## 5. ListIterator: Bidirectional Iteration
+
+`List`'s exclusive `ListIterator` is an upgraded iterator—it can go backwards as well as forwards, and it can `set` and `add`:
+
+```java
+public interface ListIterator<E> extends Iterator<E> {
+    boolean hasPrevious();
+    E previous();
+    int nextIndex();
+    int previousIndex();
+    void set(E e);    // replace the last element returned by next/previous
+    void add(E e);    // insert at the current position
+}
+```
+
+```java
+List<String> list = new ArrayList<>(List.of("A", "B", "C"));
+ListIterator<String> it = list.listIterator();
+it.next();           // A
+it.next();           // B
+it.set("b");         // change B to b
+it.add("X");         // insert X after b
+// list is now [A, b, X, C]
+```
+
+`ListIterator` is ideal for scenarios where you need to "traverse and modify at the same time."
+
+## 6. CopyOnWriteArrayList: Copy-on-Write
+
+### 6.1 The Concurrency Weapon for Read-Heavy, Write-Light Workloads
+
+A regular `ArrayList` is not thread-safe—concurrent writes from multiple threads cause data corruption, and even iteration can throw `ConcurrentModificationException`. If you add `synchronized` to every method (like the old `Vector`), concurrent reads get blocked too, hurting performance.
+
+`CopyOnWriteArrayList` (copy-on-write list) takes a different path:
+
+- **Read**: completely lock-free, directly reads the internal array.
+- **Write**: first copies into a new array, modifies the new array, then replaces the old array with the new one.
+
+```java
+// Simplified principle
+public boolean add(E e) {
+    synchronized (lock) {
+        Object[] elements = getArray();
+        Object[] newElements = Arrays.copyOf(elements, elements.length + 1);
+        newElements[elements.length] = e;
+        setArray(newElements);
+        return true;
+    }
+}
+
+public E get(int index) {
+    return get(getArray(), index);   // lock-free read
+}
+```
+
+Reads always see "a snapshot at some moment," and writes never block reads—this is "read-write separation."
+
+### 6.2 Cost and Applicable Scenarios
+
+The cost is obvious:
+
+- **Writes are slow**: every write copies the entire array, O(n).
+- **Eventual consistency**: the iterator sees the snapshot at creation time and won't see subsequent modifications (fail-safe).
+- **Memory usage**: during a write, there are momentarily two arrays.
+
+So it is suited for **read-far-outnumbering-write** scenarios: listener lists, configuration caches, whitelists, and so on. If writes are also frequent, performance will be poor.
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+public class Main {
+    public static void main(String[] args) {
+        CopyOnWriteArrayList<String> list = new CopyOnWriteArrayList<>();
+        list.add("A");
+        list.add("B");
+        list.add("C");
+
+        // 1. 迭代时修改不会抛异常
+        Iterator<String> it = list.iterator();
+        list.add("D");        // 写时复制，不影响已创建的迭代器
+        System.out.println("迭代器看到的（快照）:");
+        while (it.hasNext()) {
+            System.out.println("  " + it.next());   // A, B, C（没有 D）
+        }
+        System.out.println("实际列表: " + list);     // [A, B, C, D]
+
+        // 2. 用 addIfAbsent 避免重复添加
+        list.addIfAbsent("A");
+        System.out.println("重复 add A 后: " + list);   // 没加进去
+
+        // 3. 适合监听器场景
+        System.out.println("\\n--- 监听器场景模拟 ---");
+        EventBus bus = new EventBus();
+        bus.subscribe(e -> System.out.println("  监听器1 收到: " + e));
+        bus.subscribe(e -> System.out.println("  监听器2 收到: " + e));
+        bus.publish("事件A");
+        bus.publish("事件B");
+    }
+}
+
+class EventBus {
+    private final CopyOnWriteArrayList<java.util.function.Consumer<String>> listeners =
+        new CopyOnWriteArrayList<>();
+
+    void subscribe(java.util.function.Consumer<String> listener) {
+        listeners.add(listener);
+    }
+
+    void publish(String event) {
+        // 读不加锁，遍历安全
+        for (var l : listeners) {
+            l.accept(event);
+        }
+    }
+}`} />
+
+## 7. Hands-On: Building a Simplified ArrayList
+
+Reading about it only goes so far. Let's implement a simplified `ArrayList` ourselves, writing out the resizing and index operations by hand:
+
+<CodeRunner code={`import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        MyArrayList<String> list = new MyArrayList<>();
+        list.add("A");
+        list.add("B");
+        list.add("C");
+        System.out.println("初始: " + list);
+        System.out.println("size: " + list.size());
+
+        list.add(1, "X");
+        System.out.println("在索引1插入X: " + list);
+
+        list.remove(2);
+        System.out.println("删除索引2: " + list);
+
+        list.set(0, "FIRST");
+        System.out.println("修改索引0: " + list);
+
+        System.out.println("get(1): " + list.get(1));
+        System.out.println("indexOf(FIRST): " + list.indexOf("FIRST"));
+
+        // 测试扩容
+        MyArrayList<Integer> nums = new MyArrayList<>();
+        for (int i = 0; i < 25; i++) nums.add(i);
+        System.out.println("\\n扩容测试: " + nums);
+        System.out.println("size: " + nums.size());
+
+        // 测试迭代
+        System.out.println("\\n--- 迭代 ---");
+        for (String s : list) {
+            System.out.println("  " + s);
+        }
+    }
+}
+
+class MyArrayList<E> implements Iterable<E> {
+    private Object[] elementData;
+    private int size;
+    private static final int DEFAULT_CAPACITY = 10;
+
+    public MyArrayList() {
+        this.elementData = new Object[DEFAULT_CAPACITY];
+    }
+
+    public MyArrayList(int initialCapacity) {
+        if (initialCapacity < 0) throw new IllegalArgumentException();
+        this.elementData = new Object[initialCapacity];
+    }
+
+    public int size() { return size; }
+
+    @SuppressWarnings("unchecked")
+    public E get(int index) {
+        checkIndex(index);
+        return (E) elementData[index];
+    }
+
+    public E set(int index, E element) {
+        checkIndex(index);
+        @SuppressWarnings("unchecked")
+        E old = (E) elementData[index];
+        elementData[index] = element;
+        return old;
+    }
+
+    public boolean add(E e) {
+        ensureCapacity(size + 1);
+        elementData[size++] = e;
+        return true;
+    }
+
+    public void add(int index, E element) {
+        checkIndexForAdd(index);
+        ensureCapacity(size + 1);
+        // 把 index 及之后的元素后移一位
+        System.arraycopy(elementData, index, elementData, index + 1, size - index);
+        elementData[index] = element;
+        size++;
+    }
+
+    @SuppressWarnings("unchecked")
+    public E remove(int index) {
+        checkIndex(index);
+        E old = (E) elementData[index];
+        // 把 index+1 及之后的元素前移一位
+        int numMoved = size - index - 1;
+        if (numMoved > 0) {
+            System.arraycopy(elementData, index + 1, elementData, index, numMoved);
+        }
+        elementData[--size] = null;   // 帮助 GC
+        return old;
+    }
+
+    public int indexOf(Object o) {
+        for (int i = 0; i < size; i++) {
+            if (Objects.equals(o, elementData[i])) return i;
+        }
+        return -1;
+    }
+
+    private void ensureCapacity(int minCapacity) {
+        if (minCapacity > elementData.length) {
+            // 1.5 倍扩容
+            int newCapacity = elementData.length + (elementData.length >> 1);
+            if (newCapacity < minCapacity) newCapacity = minCapacity;
+            elementData = Arrays.copyOf(elementData, newCapacity);
+        }
+    }
+
+    private void checkIndex(int index) {
+        if (index < 0 || index >= size)
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+    }
+
+    private void checkIndexForAdd(int index) {
+        if (index < 0 || index > size)
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+    }
+
+    @Override
+    public Iterator<E> iterator() {
+        return new Iterator<E>() {
+            private int cursor = 0;
+
+            @Override
+            public boolean hasNext() { return cursor < size; }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public E next() {
+                if (cursor >= size) throw new NoSuchElementException();
+                return (E) elementData[cursor++];
+            }
+        };
+    }
+
+    @Override
+    public String toString() {
+        if (size == 0) return "[]";
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < size; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(elementData[i]);
+        }
+        return sb.append("]").toString();
+    }
+}`} />
+
+This simplified version covers the core of `ArrayList`: the underlying array, 1.5x resizing, index checking, element shifting in `add`/`remove`, and the iterator implementation. The real `ArrayList` adds fail-fast, `subList`, serialization optimizations, and other details, but you've already grasped the skeleton.
+
+Note the `elementData[--size] = null;` in `remove`—this step is called "helping GC" (help the garbage collector). Although the reference is still in the array, setting it to `null` lets the GC reclaim that object. If you don't set it to null, even though that slot is no longer "logically in use," the array still holds the reference, and the object cannot be reclaimed—this is the classic "memory leak" trap.
+
+## 8. Chapter Summary
+
+| Topic | Key Points |
+| --- | --- |
+| List contract | Ordered, allows duplicates, indexable |
+| ArrayList essence | `Object[] elementData` + size |
+| Initial capacity | Java 8+ lazy init, first add expands to 10 |
+| Resizing | 1.5x, `oldCapacity ＞＞ 1` |
+| ArrayList strength | Random access O(1), compact memory |
+| ArrayList weakness | Head/middle add/remove O(n) |
+| LinkedList essence | Doubly-linked list, `Node{prev, item, next}` |
+| LinkedList strength | Head/tail add/remove O(1) |
+| LinkedList weakness | Random access O(n), large memory overhead |
+| Default choice | Use ArrayList 99% of the time |
+| ListIterator | Bidirectional iteration, supports set/add |
+| CopyOnWriteArrayList | Copy-on-write, lock-free reads, for read-heavy write-light |
+
+## Conclusion: The Right Container Halves the Effort
+
+`List` is the most frequently used collection in daily work, and `ArrayList` is practically the "default spokesperson" for `List`. Understanding its dynamic-array nature and 1.5x resizing lets you make the right choices in performance-sensitive scenarios—estimating capacity, avoiding head insertions, and using `addAll` for bulk operations.
+
+The "frequent head/tail operations" scenario where `LinkedList` shines is often stolen by `ArrayDeque` (which is faster and more memory-efficient). So in modern Java engineering, `LinkedList`'s appearances are increasingly rare—but the "linked list" concept it represents is foundational to data structures and worth understanding.
+
+In the next chapter, we look at `Set`—a container that allows no duplicates, hiding the exquisite designs of "hashing" and "red-black trees" behind it.

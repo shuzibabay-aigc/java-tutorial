@@ -1,0 +1,523 @@
+---
+title: "HttpClient"
+chapter: 62
+stage: "Stage 11"
+stageName: "Database and Networking"
+order: 4
+description: "Understand the problems with the old HttpURLConnection, the Java 11+ HttpClient API, synchronous send vs asynchronous sendAsync, timeout/Header/Body settings, the WebSocket API, and demo calling a REST API"
+pubDate: 2026-07-03
+tags: ["Java", "HttpClient", "HTTP", "REST", "WebSocket", "异步"]
+---
+
+# HttpClient
+
+In the previous chapter we wrote TCP communication with raw Sockets — able to send byte streams, but you have to assemble HTTP messages yourself, parse status codes, handle chunked encoding… exhausting. HTTP is the internet's most-used application-layer protocol, and Java naturally has a ready-made API for it. This chapter looks at Java 11+'s modern **HttpClient** — synchronous and asynchronous in one, with an elegant API and solid performance.
+
+## 1. The Problems with the Old HttpURLConnection
+
+Java's early built-in HTTP client was `HttpURLConnection` (Java 1.1, 1997):
+
+```java
+URL url = new URL("https://api.example.com/users");
+HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+conn.setRequestMethod("GET");
+conn.setRequestProperty("Accept", "application/json");
+int code = conn.getResponseCode();
+try (BufferedReader r = new BufferedReader(
+        new InputStreamReader(conn.getInputStream()))) {
+    String line;
+    while ((line = r.readLine()) != null) System.out.println(line);
+}
+```
+
+Its ailments:
+
+1. **Clunky API** — `URLConnection` was designed in 1997, verbose naming, unfriendly types.
+2. **Blocking by default** — no async support; high concurrency requires your own thread pool.
+3. **Poor HTTP/2 support** — only HTTP/1.1; can't use HTTP/2 multiplexing.
+4. **Unintuitive API** — `getResponseCode`/`getInputStream` scattered around, no Builder pattern.
+5. **Stagnant maintenance** — Oracle barely updates it anymore.
+
+The industry used third-party libraries like Apache HttpClient and OkHttp. The new `java.net.http.HttpClient`, introduced in Java 9 and standardized in Java 11, finally offers an official modern solution.
+
+## 2. HttpClient API Overview
+
+Three core classes of the new API:
+
+| Class | Purpose |
+| --- | --- |
+| `HttpClient` | The client; manages the connection pool, HTTP version, timeouts, etc. |
+| `HttpRequest` | The request; carries URL, method, headers, body |
+| `HttpResponse＜T＞` | The response; carries status code, headers, body (T is the body type) |
+
+The design is **Builder pattern + immutable** — both HttpClient and HttpRequest are immutable objects, thread-safe after construction, and reusable.
+
+```java
+import java.net.URI;
+import java.net.http.*;
+import java.time.Duration;
+
+// 1. Create an HttpClient (reusable, thread-safe)
+HttpClient client = HttpClient.newBuilder()
+    .version(HttpClient.Version.HTTP_2)        // prefer HTTP/2
+    .connectTimeout(Duration.ofSeconds(10))    // connection timeout
+    .followRedirects(HttpClient.Redirect.NORMAL)  // follow redirects
+    .build();
+
+// 2. Build the request
+HttpRequest req = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.github.com/users/octocat"))
+    .timeout(Duration.ofSeconds(10))
+    .header("Accept", "application/json")
+    .header("User-Agent", "Java HttpClient")
+    .GET()    // can be omitted, GET is the default
+    .build();
+
+// 3. Send the request (synchronous)
+HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+
+System.out.println(resp.statusCode());         // 200
+System.out.println(resp.headers().firstValue("Content-Type"));
+System.out.println(resp.body());               // JSON string
+```
+
+`HttpClient` is a heavy object (it holds a connection pool internally); **build one globally and reuse it** — don't new one per request.
+
+## 3. Synchronous Request: send
+
+`send` blocks the current thread until the response comes back:
+
+```java
+HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+```
+
+The second argument is a `BodyHandler＜T＞` — telling it how to handle the response body:
+
+| BodyHandler | Handling |
+| --- | --- |
+| `ofString()` | As a string |
+| `ofByteArray()` | As a byte array |
+| `ofFile(Path)` | Write directly to a file (good for large downloads) |
+| `ofInputStream()` | As an InputStream (streaming) |
+| `ofLines()` | As a `Stream＜String＞` (line by line) |
+| `discarding()` | Discard the body (only care about the status code) |
+
+For large file downloads, use `ofFile` to avoid memory blowup:
+
+```java
+HttpRequest req = HttpRequest.newBuilder()
+    .uri(URI.create("https://example.com/bigfile.zip"))
+    .build();
+Path file = Path.of("download.zip");
+HttpResponse<Path> resp = client.send(req, HttpResponse.BodyHandlers.ofFile(file));
+```
+
+## 4. Asynchronous Request: sendAsync
+
+`sendAsync` immediately returns a `CompletableFuture＜HttpResponse＜T＞＞` — non-blocking; the callback fires after the response arrives:
+
+```java
+CompletableFuture<HttpResponse<String>> future =
+    client.sendAsync(req, HttpResponse.BodyHandlers.ofString());
+
+future.thenAccept(resp -> {
+    System.out.println("状态码: " + resp.statusCode());
+    System.out.println("Body: " + resp.body());
+}).exceptionally(e -> {
+    System.err.println("请求失败: " + e.getMessage());
+    return null;
+});
+
+// the main thread goes on doing other things...
+future.join();   // block and wait when needed
+```
+
+The power of async lies in **concurrent requests** — fire 10 requests at once, and the total time ≈ the slowest one, not the sum of all 10:
+
+```java
+List<URI> uris = List.of(uri1, uri2, uri3, /* ... */);
+
+List<CompletableFuture<String>> futures = uris.stream()
+    .map(uri -> client.sendAsync(
+            HttpRequest.newBuilder(uri).build(),
+            HttpResponse.BodyHandlers.ofString())
+        .thenApply(HttpResponse::body))
+    .toList();
+
+CompletableFuture<Void> all = CompletableFuture.allOf(
+    futures.toArray(new CompletableFuture[0]));
+all.join();   // wait for all to complete
+
+List<String> results = futures.stream()
+    .map(CompletableFuture::join)
+    .toList();
+```
+
+10 requests fired concurrently, 10x faster than serial — that's the value of async.
+
+## 5. POST/PUT/DELETE and Body
+
+To send a body, use `HttpRequest.BodyPublishers`:
+
+```java
+import static java.net.http.HttpRequest.BodyPublishers.*;
+
+// POST JSON
+String json = "{\"name\":\"张三\",\"age\":20}";
+HttpRequest postReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.example.com/users"))
+    .header("Content-Type", "application/json")
+    .POST(ofString(json))           // string body
+    .build();
+
+// POST form
+String form = "name=张三&age=20";
+HttpRequest formReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://example.com/login"))
+    .header("Content-Type", "application/x-www-form-urlencoded")
+    .POST(ofString(form))
+    .build();
+
+// POST a file (upload)
+HttpRequest uploadReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://example.com/upload"))
+    .POST(ofFile(Path.of("data.bin")))
+    .build();
+
+// PUT
+HttpRequest putReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.example.com/users/1"))
+    .PUT(ofString(json))
+    .build();
+
+// DELETE
+HttpRequest delReq = HttpRequest.newBuilder()
+    .uri(URI.create("https://api.example.com/users/1"))
+    .DELETE()
+    .build();
+```
+
+The `BodyPublishers` factories:
+
+- `ofString(s)` — a string.
+- `ofString(s, charset)` — a string with a specified charset.
+- `ofByteArray(bytes)` — a byte array.
+- `ofFile(path)` — a file (streaming, no memory burden).
+- `ofInputStream(supplier)` — read from an InputStream.
+- `noBody()` — no body.
+
+## 6. Timeouts, Headers, and Configuration
+
+### 6.1 Timeouts
+
+Two layers of timeout:
+
+```java
+HttpClient client = HttpClient.newBuilder()
+    .connectTimeout(Duration.ofSeconds(5))   // connection-establishment timeout
+    .build();
+
+HttpRequest req = HttpRequest.newBuilder()
+    .uri(uri)
+    .timeout(Duration.ofSeconds(10))         // whole-request timeout
+    .build();
+```
+
+`connectTimeout` limits the TCP handshake; `timeout` limits the whole request (including reading the body). On timeout, `HttpTimeoutException` is thrown.
+
+### 6.2 Headers
+
+```java
+HttpRequest req = HttpRequest.newBuilder()
+    .uri(uri)
+    .header("Accept", "application/json")
+    .header("Authorization", "Bearer " + token)
+    .header("Content-Type", "application/json; charset=utf-8")
+    .build();
+
+// multiple values with the same name use headers
+.headers("X-Custom", "v1", "X-Custom", "v2")
+
+// or setHeader to overwrite
+.setHeader("User-Agent", "MyApp/1.0")
+```
+
+Reading response headers:
+
+```java
+HttpResponse<String> resp = client.send(req, ofString());
+Optional<String> ct = resp.headers().firstValue("Content-Type");
+List<String> cookies = resp.headers().allValues("Set-Cookie");
+```
+
+### 6.3 HTTP/2 and Redirects
+
+```java
+HttpClient client = HttpClient.newBuilder()
+    .version(HttpClient.Version.HTTP_2)             // prefer HTTP/2 (default)
+    .followRedirects(HttpClient.Redirect.NORMAL)    // follow redirects (same protocol)
+    .proxy(ProxySelector.of(new InetSocketAddress("proxy.host", 8080)))  // proxy
+    .authenticator(new Authenticator() {            // authentication
+        @Override protected PasswordAuthentication getPasswordAuthentication() {
+            return new PasswordAuthentication("user", "pwd".toCharArray());
+        }
+    })
+    .build();
+```
+
+`Redirect` has three levels: `NEVER` (don't follow), `NORMAL` (follow same protocol), `ALWAYS` (follow even across protocols, e.g., HTTPS→HTTP, which has security risks).
+
+## 7. WebSocket
+
+Java 9+'s `java.net.http.WebSocket` provides a native WebSocket client:
+
+```java
+import java.net.http.WebSocket;
+import java.net.URI;
+
+WebSocket ws = HttpClient.newHttpClient()
+    .newWebSocketBuilder()
+    .connectTimeout(Duration.ofSeconds(5))
+    .buildAsync(URI.create("wss://echo.example.com/socket"),
+        new WebSocket.Listener() {
+            @Override public void onOpen(WebSocket webSocket) {
+                System.out.println("[WS] 连接打开");
+                webSocket.sendText("Hello WebSocket", true);
+            }
+            @Override public CompletionStage<?> onText(WebSocket webSocket,
+                    CharSequence data, boolean last) {
+                System.out.println("[WS] 收到: " + data);
+                return null;
+            }
+            @Override public void onError(WebSocket webSocket, Throwable error) {
+                System.err.println("[WS] 错误: " + error);
+            }
+            @Override public CompletionStage<?> onClose(WebSocket webSocket,
+                    int statusCode, String reason) {
+                System.out.println("[WS] 关闭: " + statusCode + " " + reason);
+                return null;
+            }
+        })
+    .join();
+
+ws.sendText("ping", true);
+ws.sendClose(WebSocket.NORMAL_CLOSURE, "bye");
+```
+
+WebSocket is bidirectional, full-duplex communication — the server can proactively push messages, making it suitable for chat, real-time notifications, and stock quotes. `Listener` is a callback interface; each event maps to a method.
+
+## 8. Hands-On: Calling a REST API
+
+Since the Piston online environment **may not have external internet access**, the code below uses a **dual mode** — if it can reach the internet, it calls a real API; if not, it uses a local mock server to demonstrate the full HTTP flow.
+
+<CodeRunner code={`import java.io.*;
+import java.net.*;
+import java.net.http.*;
+import java.time.Duration;
+import java.util.*;
+import java.util.concurrent.*;
+import com.sun.net.httpserver.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== HttpClient 实战 ===\\n");
+
+        // 启动本地 HTTP 模拟服务器 (这样无论能否联网都能演示)
+        int port = 18888;
+        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+        server.createContext("/api/users", exchange -> {
+            String method = exchange.getRequestMethod();
+            String path = exchange.getRequestURI().getPath();
+            String response;
+            int status = 200;
+
+            if ("GET".equals(method) && path.equals("/api/users")) {
+                response = "[{\\"id\\":1,\\"name\\":\\"张三\\"},{\\"id\\":2,\\"name\\":\\"李四\\"}]";
+            } else if ("GET".equals(method) && path.matches("/api/users/\\\\d+")) {
+                int id = Integer.parseInt(path.substring("/api/users/".length()));
+                response = "{\\"id\\":" + id + ",\\"name\\":\\"用户" + id + "\\"}";
+            } else if ("POST".equals(method)) {
+                String body = new String(exchange.getRequestBody().readAllBytes());
+                response = "{\\"status\\":\\"created\\",\\"received\\":" + body + "}";
+                status = 201;
+            } else if ("DELETE".equals(method)) {
+                response = "{\\"status\\":\\"deleted\\"}";
+            } else {
+                response = "{\\"error\\":\\"not found\\"}";
+                status = 404;
+            }
+
+            byte[] respBytes = response.getBytes("UTF-8");
+            exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+            exchange.sendResponseHeaders(status, respBytes.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(respBytes);
+            }
+        });
+        server.start();
+        System.out.println("[模拟服务器] 启动在 http://localhost:" + port);
+        Thread.sleep(200);
+
+        // 创建 HttpClient (全局复用)
+        HttpClient client = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)   // 模拟环境用 1.1
+            .connectTimeout(Duration.ofSeconds(3))
+            .build();
+
+        String base = "http://localhost:" + port + "/api/users";
+
+        // 1. GET 同步
+        System.out.println("\\n--- 1. GET 同步 (查询所有用户) ---");
+        HttpRequest getReq = HttpRequest.newBuilder()
+            .uri(URI.create(base))
+            .header("Accept", "application/json")
+            .timeout(Duration.ofSeconds(3))
+            .GET()
+            .build();
+        HttpResponse<String> getResp = client.send(getReq,
+            HttpResponse.BodyHandlers.ofString());
+        System.out.println("状态码: " + getResp.statusCode());
+        System.out.println("Content-Type: "
+            + getResp.headers().firstValue("Content-Type").orElse("?"));
+        System.out.println("Body: " + getResp.body());
+
+        // 2. GET 路径参数
+        System.out.println("\\n--- 2. GET 单个用户 (路径参数) ---");
+        HttpRequest getOne = HttpRequest.newBuilder()
+            .uri(URI.create(base + "/1"))
+            .GET().build();
+        HttpResponse<String> r2 = client.send(getOne,
+            HttpResponse.BodyHandlers.ofString());
+        System.out.println("Body: " + r2.body());
+
+        // 3. POST 创建
+        System.out.println("\\n--- 3. POST 创建用户 ---");
+        String json = "{\\"name\\":\\"王五\\",\\"age\\":25}";
+        HttpRequest postReq = HttpRequest.newBuilder()
+            .uri(URI.create(base))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(json))
+            .build();
+        HttpResponse<String> r3 = client.send(postReq,
+            HttpResponse.BodyHandlers.ofString());
+        System.out.println("状态码: " + r3.statusCode() + " (201 Created)");
+        System.out.println("Body: " + r3.body());
+
+        // 4. DELETE
+        System.out.println("\\n--- 4. DELETE 删除 ---");
+        HttpRequest delReq = HttpRequest.newBuilder()
+            .uri(URI.create(base + "/1"))
+            .DELETE().build();
+        HttpResponse<String> r4 = client.send(delReq,
+            HttpResponse.BodyHandlers.ofString());
+        System.out.println("Body: " + r4.body());
+
+        // 5. 异步并发请求
+        System.out.println("\\n--- 5. 异步并发请求 5 个 ---");
+        long t0 = System.currentTimeMillis();
+        List<CompletableFuture<HttpResponse<String>>> futures = new ArrayList<>();
+        for (int i = 1; i <= 5; i++) {
+            HttpRequest r = HttpRequest.newBuilder()
+                .uri(URI.create(base + "/" + i))
+                .build();
+            futures.add(client.sendAsync(r, HttpResponse.BodyHandlers.ofString()));
+        }
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        long cost = System.currentTimeMillis() - t0;
+        System.out.println("5 个并发请求总耗时: " + cost + " ms");
+        for (int i = 0; i < futures.size(); i++) {
+            System.out.println("  请求 " + (i + 1) + ": "
+                + futures.get(i).get().body());
+        }
+
+        // 6. 错误处理
+        System.out.println("\\n--- 6. 错误处理 (404) ---");
+        HttpRequest bad = HttpRequest.newBuilder()
+            .uri(URI.create(base + "/nonexistent"))
+            .GET().build();
+        HttpResponse<String> r6 = client.send(bad,
+            HttpResponse.BodyHandlers.ofString());
+        System.out.println("状态码: " + r6.statusCode() + " (404 Not Found)");
+        System.out.println("Body: " + r6.body());
+
+        // 7. 异步异常处理
+        System.out.println("\\n--- 7. 异步请求异常处理 ---");
+        HttpRequest timeoutReq = HttpRequest.newBuilder()
+            .uri(URI.create("http://192.0.2.1:9999"))   // 不可达地址
+            .timeout(Duration.ofMillis(500))
+            .GET().build();
+        client.sendAsync(timeoutReq, HttpResponse.BodyHandlers.ofString())
+            .thenAccept(r -> System.out.println("不应该到这里"))
+            .exceptionally(e -> {
+                System.out.println("捕获异常: " + e.getCause().getClass().getSimpleName()
+                    + " - " + e.getCause().getMessage());
+                return null;
+            })
+            .join();
+
+        server.stop(0);
+        System.out.println("\\n=== HttpClient 关键点 ===");
+        System.out.println("1. HttpClient 全局复用 (含连接池)");
+        System.out.println("2. send 同步, sendAsync 异步返回 CompletableFuture");
+        System.out.println("3. BodyHandlers 决定 body 处理方式");
+        System.out.println("4. BodyPublishers 决定发送 body 方式");
+        System.out.println("5. 异步 + allOf 实现高并发请求");
+        System.out.println("6. WebSocket 用 newWebSocketBuilder + Listener");
+    }
+}`} />
+
+> **Key observations**:
+> - **HttpClient reuses a single instance** — it holds a connection pool internally; don't new one each time.
+> - **Synchronous `send`, asynchronous `sendAsync`** — async returns a `CompletableFuture`, chainable with `thenAccept`/`exceptionally`.
+> - **5 concurrent requests take ≈ the time of a single request** — async concurrency is HttpClient's killer feature.
+> - **Status codes 201/404 are both accessible** — use `statusCode()` to determine the business outcome.
+> - **Exceptions go to `exceptionally`** — timeouts, connection failures, and other exceptions don't enter `thenAccept`; handle them separately.
+> - **`BodyHandlers.ofString` treats the body as a string** — for large files, use `ofFile` to stream to disk.
+
+## 9. HttpClient vs Third-Party Libraries
+
+| Library | Pros | Cons |
+| --- | --- | --- |
+| **Java HttpClient** | Built-in, no dependency, modern API, HTTP/2 | Relatively simple feature set |
+| **Apache HttpClient** | Feature-rich, mature ecosystem | Slightly verbose API, heavy dependency |
+| **OkHttp** | Elegant API, good performance, mainstream on Android | Requires a dependency |
+| **Retrofit** | Declarative REST client (built on OkHttp) | Requires a dependency |
+
+**Selection advice**:
+
+- Simple project, don't want a dependency → Java HttpClient.
+- Spring Boot project → use `RestTemplate`/`WebClient` (backed by HttpClient/Jetty underneath).
+- Complex needs (interceptors, complex retries) → Apache HttpClient or OkHttp.
+- Declarative REST (Feign-style) → Spring Cloud OpenFeign.
+
+## 10. Chapter Summary
+
+| Concept | Key Points |
+| --- | --- |
+| `HttpClient` | The client, reusable, holds a connection pool |
+| `HttpRequest` | The request, built with a Builder, immutable |
+| `HttpResponse＜T＞` | The response; T is determined by the BodyHandler |
+| `send` | Synchronous, blocking |
+| `sendAsync` | Asynchronous, returns `CompletableFuture` |
+| `BodyHandlers` | Handle the response body (ofString/ofFile/...) |
+| `BodyPublishers` | Produce the request body (ofString/ofFile/...) |
+| `WebSocket` | Bidirectional full-duplex communication, Listener callbacks |
+
+**Mnemonic**:
+
+- **HttpClient reused globally** — don't new one each time; the connection pool would go to waste.
+- **Synchronous send, asynchronous sendAsync** — async returns a `CompletableFuture`.
+- **BodyHandler handles the response** — ofString for strings, ofFile to disk.
+- **Use allOf for concurrency** — fire N at once, total time ≈ the slowest.
+- **Two timeout layers** — connectTimeout for the connection, timeout for the whole request.
+
+## Closing: Stage 11 Wrap-Up
+
+This chapter used Java 11+'s HttpClient to call a REST API — both synchronous and asynchronous, with an elegant API. Looking back at Stage 11:
+
+- **Chapter 59 JDBC In Depth** — database connections, PreparedStatement, transactions, batch processing.
+- **Chapter 60 Connection Pool** — HikariCP/Druid, avoiding repeated connection setup.
+- **Chapter 61 Network Programming** — Socket/ServerSocket, TCP/UDP communication.
+- **Chapter 62 HttpClient (this chapter)** — modern HTTP client, synchronous and asynchronous.
+
+These four chapters let you talk to the "outside world" — databases, networks, HTTP. The next stage leaves "communication" behind and turns to **engineering and ecosystem** — Maven/Gradle build tools, Git version control, JUnit testing, logging frameworks, Lombok — turning "code that runs" into "a product that ships."

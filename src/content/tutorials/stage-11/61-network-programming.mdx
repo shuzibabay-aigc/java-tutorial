@@ -1,0 +1,456 @@
+---
+title: "网络编程"
+chapter: 61
+stage: "第十一阶段"
+stageName: "数据库与网络"
+order: 3
+description: "掌握网络基础（TCP/IP/UDP/端口）、InetAddress、Socket 与 ServerSocket 的 TCP 通信、DatagramSocket 的 UDP 通信，并实现多线程 Echo 服务器与客户端"
+pubDate: 2026-07-03
+tags: ["Java", "网络编程", "Socket", "TCP", "UDP", "ServerSocket"]
+---
+
+# 网络编程
+
+互联网的本质是什么？两台机器上的进程互相发字节流。这一章我们用 Java 的 **Socket API**——`java.net` 包——直接和 TCP/UDP 打交道。这是 HTTP、RPC、数据库连接、消息队列……所有"网络通信"的底层。
+
+为什么学这个？框架（Spring、Netty）把网络通信封装得很优雅，但出问题时——连接挂死、丢包、粘包、半连接——你得能钻到 Socket 层定位。理解 Socket，才算真正"懂网络"。
+
+## 一、网络基础
+
+### 1.1 TCP/IP vs UDP
+
+| 协议 | 特点 | 适用场景 |
+| --- | --- | --- |
+| **TCP** | 面向连接、可靠、有序、字节流 | HTTP、数据库、邮件 |
+| **UDP** | 无连接、不可靠、数据报、快 | DNS、视频流、游戏、心跳 |
+
+**TCP** 像打电话——先拨号建立连接（三次握手），然后双向通话，最后挂断（四次挥手）。中间丢了包会重传，保证对方收到。
+
+**UDP** 像寄明信片——写好地址投出去就不管了。可能丢、可能乱序、可能重复，但快——没有握手机制。
+
+为什么需要两种？可靠要付出代价：TCP 的握手、确认、重传都很费时。视频通话丢一两帧无所谓，但要低延迟——所以用 UDP。银行转账一字节都不能错——必须 TCP。
+
+### 1.2 IP 与端口
+
+- **IP 地址** —— 标识网络中的机器（如 `192.168.1.100`）。
+- **端口** —— 标识机器上的进程（0~65535）。
+
+一台机器只有一个 IP，但可能同时跑 HTTP 服务（80）、数据库（3306）、SSH（22）——靠端口区分。**IP 是地址，端口是门牌号**。
+
+- 端口 0~1023 是知名端口（well-known），需要管理员权限。
+- 1024~49151 是注册端口。
+- 49152~65535 是动态/临时端口。
+
+### 1.3 TCP 三次握手与四次挥手
+
+**建立连接（三次握手）**：
+
+```
+客户端                    服务端
+  | ---- SYN (seq=x) ----> |   1. 客户端发起
+  | <--- SYN+ACK (y, x+1)  |   2. 服务端回应
+  | ---- ACK (y+1) ------> |   3. 客户端确认
+  |     连接建立           |
+```
+
+**断开连接（四次挥手）**：
+
+```
+客户端                    服务端
+  | ---- FIN ---->         |   1. 客户端: 我没数据了
+  | <--- ACK ----          |   2. 服务端: 收到
+  | <--- FIN ----          |   3. 服务端: 我也没了
+  | ---- ACK ------>       |   4. 客户端: 收到, 关
+```
+
+为什么建立是 3 次断开是 4 次？建立连接时服务端的 SYN 和 ACK 可以合并；断开时服务端收到客户端 FIN 后，可能还有数据没发完，所以先 ACK，发完数据再 FIN——拆成两步。
+
+## 二、InetAddress：地址表示
+
+`InetAddress` 表示 IP 地址。常用子类 `Inet4Address`（IPv4）和 `Inet6Address`（IPv6）。
+
+```java
+// 通过主机名获取 (会做 DNS 查询)
+InetAddress addr = InetAddress.getByName("www.baidu.com");
+System.out.println(addr.getHostAddress());   // IP 地址
+
+// 本机
+InetAddress local = InetAddress.getLocalHost();
+System.out.println(local.getHostName());     // 主机名
+System.out.println(local.getHostAddress());  // IP
+
+// 通过主机名获取多个 (一个域名可能多个 IP)
+InetAddress[] all = InetAddress.getAllByName("www.baidu.com");
+```
+
+## 三、TCP 通信：Socket 与 ServerSocket
+
+Java 的 TCP 通信用两个类：
+
+- **`ServerSocket`** —— 服务端，监听端口，等待连接。
+- **`Socket`** —— 客户端，发起连接；服务端 accept 后也拿到一个 Socket。
+
+### 3.1 服务端
+
+```java
+try (ServerSocket server = new ServerSocket(8080)) {   // 监听 8080
+    System.out.println("服务端启动, 等待连接...");
+    while (true) {
+        Socket client = server.accept();    // 阻塞, 等连接
+        // 处理 client...
+    }
+}
+```
+
+`accept()` 是阻塞的——没有客户端连接时一直等。每来一个连接，返回一个 `Socket`，对应这个客户端的连接。
+
+### 3.2 客户端
+
+```java
+try (Socket socket = new Socket("127.0.0.1", 8080)) {   // 连接服务端
+    OutputStream out = socket.getOutputStream();
+    out.write("Hello".getBytes());
+
+    InputStream in = socket.getInputStream();
+    byte[] buf = new byte[1024];
+    int len = in.read(buf);
+    System.out.println("收到: " + new String(buf, 0, len));
+}
+```
+
+Socket 的本质：**两个流**——`getInputStream` 读对方发来的，`getOutputStream` 写给对方。网络通信就是流的读写。
+
+### 3.3 一次完整的 TCP 通信
+
+```java
+// === 服务端 ===
+try (ServerSocket server = new ServerSocket(8080);
+     Socket client = server.accept();
+     BufferedReader in = new BufferedReader(
+         new InputStreamReader(client.getInputStream()));
+     PrintWriter out = new PrintWriter(client.getOutputStream(), true)) {
+
+    String line;
+    while ((line = in.readLine()) != null) {   // 读一行
+        System.out.println("收到: " + line);
+        out.println("Echo: " + line);           // 回一行
+        if ("bye".equals(line)) break;
+    }
+}
+
+// === 客户端 ===
+try (Socket socket = new Socket("127.0.0.1", 8080);
+     BufferedReader in = new BufferedReader(
+         new InputStreamReader(socket.getInputStream()));
+     PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
+
+    out.println("Hello");
+    System.out.println("服务端回: " + in.readLine());
+    out.println("bye");
+}
+```
+
+`BufferedReader`/`PrintWriter` 把字节流包装成字符流，方便按行读写。`PrintWriter` 的 `true` 参数表示自动 flush——否则要手动 `flush()`。
+
+## 四、UDP 通信：DatagramSocket
+
+UDP 用 `DatagramSocket` 和 `DatagramPacket`——没有连接概念，每个包独立发送。
+
+```java
+// === UDP 服务端 ===
+try (DatagramSocket socket = new DatagramSocket(9090)) {
+    byte[] buf = new byte[1024];
+    DatagramPacket packet = new DatagramPacket(buf, buf.length);
+    socket.receive(packet);    // 阻塞, 等数据报
+    String msg = new String(packet.getData(), 0, packet.getLength());
+    System.out.println("收到: " + msg + " from " + packet.getAddress());
+}
+
+// === UDP 客户端 ===
+try (DatagramSocket socket = new DatagramSocket()) {
+    byte[] data = "Hello UDP".getBytes();
+    DatagramPacket packet = new DatagramPacket(
+        data, data.length, InetAddress.getByName("127.0.0.1"), 9090);
+    socket.send(packet);
+}
+```
+
+UDP 的特点：
+
+- **无连接**——`send` 前不需要握手，发出去就不管了。
+- **数据报边界保留**——发一个包，对方 `receive` 一次收到完整包（不像 TCP 是字节流，会粘包）。
+- **可能丢包**——网络拥塞时路由器会丢 UDP 包，应用层不感知。
+
+## 五、实战：多线程 Echo 服务器
+
+真实服务端要同时处理多个客户端——单线程的 `accept` + `read` 会阻塞，一个慢客户端拖死所有人。解法是**每个客户端开一个线程**。
+
+下面代码在同一进程里启动服务端和多个客户端，演示多线程 TCP 通信。Piston 环境能跑——所有通信都在 `127.0.0.1` 本地回环。
+
+<CodeRunner code={`import java.io.*;
+import java.net.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 多线程 Echo 服务器演示 ===\\n");
+
+        // 1. 启动 Echo 服务器 (独立线程)
+        int port = 18080;
+        ExecutorService serverExec = Executors.newSingleThreadExecutor();
+        serverExec.submit(() -> {
+            try (ServerSocket server = new ServerSocket(port)) {
+                System.out.println("[服务器] 启动在端口 " + port);
+                ExecutorService clientPool = Executors.newFixedThreadPool(4);
+
+                // 接受若干连接 (用超时避免无限阻塞)
+                server.setSoTimeout(3000);
+                int handled = 0;
+                while (handled < 5) {
+                    try {
+                        Socket client = server.accept();
+                        clientPool.submit(() -> handleClient(client, handled + 1));
+                        handled++;
+                    } catch (SocketTimeoutException e) {
+                        if (handled >= 3) break;   // 至少处理 3 个再退
+                    }
+                }
+                Thread.sleep(1000);   // 等任务完成
+                clientPool.shutdown();
+                System.out.println("[服务器] 关闭");
+            } catch (Exception e) {
+                System.out.println("[服务器] 异常: " + e);
+            }
+        });
+
+        // 等服务器就绪
+        Thread.sleep(300);
+
+        // 2. 启动 3 个客户端
+        System.out.println("\\n--- 启动 3 个客户端 ---");
+        List<Future<String>> results = new ArrayList<>();
+        ExecutorService clientExec = Executors.newFixedThreadPool(3);
+        String[] messages = {"Hello from A", "Greetings from B", "Salute from C"};
+        for (int i = 0; i < 3; i++) {
+            final String msg = messages[i];
+            final int idx = i + 1;
+            results.add(clientExec.submit(() -> echoClient(port, msg, idx)));
+        }
+
+        for (Future<String> f : results) {
+            System.out.println(f.get());
+        }
+        clientExec.shutdown();
+        serverExec.shutdown();
+
+        // 3. 演示 InetAddress
+        System.out.println("\\n--- InetAddress ---");
+        InetAddress local = InetAddress.getLocalHost();
+        System.out.println("本机: " + local.getHostAddress() + " / " + local.getHostName());
+        InetAddress loopback = InetAddress.getByName("127.0.0.1");
+        System.out.println("回环: " + loopback + ", isLoopback=" + loopback.isLoopbackAddress());
+
+        // 4. UDP 演示
+        System.out.println("\\n--- UDP Echo ---");
+        udpDemo();
+
+        System.out.println("\\n=== 网络编程关键点 ===");
+        System.out.println("1. Socket = 两条流 (InputStream/OutputStream)");
+        System.out.println("2. accept() 阻塞 -> 用线程池处理多客户端");
+        System.out.println("3. readLine() 阻塞 -> 注意超时设置");
+        System.out.println("4. UDP 用 DatagramSocket/DatagramPacket, 无连接");
+        System.out.println("5. 真实生产用 Netty, 不要裸 Socket");
+    }
+
+    // 处理单个客户端
+    static void handleClient(Socket client, int id) {
+        String name = "客户端#" + id;
+        try (Socket c = client;
+             BufferedReader in = new BufferedReader(
+                 new InputStreamReader(c.getInputStream()));
+             PrintWriter out = new PrintWriter(c.getOutputStream(), true)) {
+
+            System.out.println("[服务器] " + name + " 连接来自 " + c.getRemoteSocketAddress());
+            String line;
+            while ((line = in.readLine()) != null) {
+                System.out.println("  [服务器] 收到 " + name + ": " + line);
+                out.println("ECHO<" + name + ">: " + line);   // 回显
+                if (line.equals("bye")) break;
+            }
+            System.out.println("[服务器] " + name + " 断开");
+        } catch (IOException e) {
+            System.out.println("[服务器] " + name + " 异常: " + e.getMessage());
+        }
+    }
+
+    // 客户端发消息并收响应
+    static String echoClient(int port, String msg, int id) throws Exception {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", port), 1000);
+            socket.setSoTimeout(2000);
+            BufferedReader in = new BufferedReader(
+                new InputStreamReader(socket.getInputStream()));
+            PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+
+            out.println(msg);
+            String resp = in.readLine();
+            out.println("bye");
+            return "[客户端#" + id + "] 发=\"" + msg + "\" 收=\"" + resp + "\"";
+        }
+    }
+
+    // UDP 简单演示
+    static void udpDemo() throws Exception {
+        int port = 19090;
+        // 服务端先就绪
+        Thread server = new Thread(() -> {
+            try (DatagramSocket sock = new DatagramSocket(port)) {
+                sock.setSoTimeout(2000);
+                byte[] buf = new byte[256];
+                DatagramPacket packet = new DatagramPacket(buf, buf.length);
+                sock.receive(packet);
+                String msg = new String(packet.getData(), 0, packet.getLength());
+                System.out.println("  [UDP 服务端] 收到: " + msg
+                    + " 来自 " + packet.getAddress() + ":" + packet.getPort());
+
+                // 回送
+                String reply = "UDP-ACK: " + msg;
+                byte[] data = reply.getBytes();
+                sock.send(new DatagramPacket(data, data.length,
+                    packet.getAddress(), packet.getPort()));
+            } catch (Exception e) {
+                System.out.println("  [UDP 服务端] " + e.getMessage());
+            }
+        });
+        server.start();
+        Thread.sleep(200);
+
+        // 客户端发
+        try (DatagramSocket sock = new DatagramSocket()) {
+            sock.setSoTimeout(2000);
+            String msg = "Ping over UDP";
+            byte[] data = msg.getBytes();
+            sock.send(new DatagramPacket(data, data.length,
+                InetAddress.getByName("127.0.0.1"), port));
+
+            byte[] buf = new byte[256];
+            DatagramPacket reply = new DatagramPacket(buf, buf.length);
+            sock.receive(reply);
+            System.out.println("  [UDP 客户端] 收到: "
+                + new String(reply.getData(), 0, reply.getLength()));
+        }
+        server.join();
+    }
+}`} />
+
+> **观察重点**：
+> - **3 个客户端同时连接，服务器用线程池并行处理**——单线程下慢客户端会阻塞快客户端。
+> - **`accept()` 阻塞**——没连接时一直等，所以服务端要单独跑线程。
+> - **`setSoTimeout` 防止永久阻塞**——读数据设超时，避免恶意客户端不发数据拖死服务。
+> - **TCP 用 `BufferedReader.readLine()` 按行读**——这是简单的"应用层协议"（行分隔）。
+> - **UDP 用 `DatagramPacket` 发/收**——无连接，发出去就不管了。
+
+## 六、网络编程的常见陷阱
+
+### 6.1 粘包/拆包
+
+TCP 是**字节流**协议——没有"消息边界"。发 10 次 `"abc"`，对方可能一次收到 `"abcabcabc..."`，也可能收到 30 个 1 字节。这就是粘包/拆包。
+
+解决：自定义应用层协议——
+
+- **固定长度** —— 每条消息固定 N 字节，不够补齐。
+- **分隔符** —— 用 `\n` 或特殊字符分隔（上面 Echo 就用了）。
+- **长度前缀** —— 先发 4 字节长度，再发数据（最常用）。
+
+```java
+// 长度前缀协议
+DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+byte[] data = msg.getBytes(StandardCharsets.UTF_8);
+out.writeInt(data.length);   // 4 字节长度
+out.write(data);             // 数据
+```
+
+### 6.2 资源泄漏
+
+Socket 不关 = 文件描述符泄漏。Linux 单进程默认 1024 个 fd，泄漏多了 `Too many open files`。永远 `try-with-resources`。
+
+### 6.3 阻塞与超时
+
+`accept`/`read` 默认无限阻塞。生产环境必须设超时：
+
+```java
+server.setSoTimeout(30_000);     // accept 超时
+socket.setSoTimeout(10_000);     // read 超时
+socket.connect(addr, 3000);      // connect 超时
+```
+
+### 6.4 字符编码
+
+`new String(bytes)` 用默认编码——不同机器可能不同！永远显式指定：
+
+```java
+new String(data, StandardCharsets.UTF_8);
+"hello".getBytes(StandardCharsets.UTF_8);
+```
+
+## 七、从 Socket 到 Netty
+
+裸 Socket API 写小demo还行，写生产级服务太累——粘包、超时、连接管理、心跳、半关闭……全要自己处理。生产环境几乎都用 **Netty**——基于 NIO 的异步事件驱动网络框架：
+
+```java
+// Netty 服务端 (示意, 需引入 netty 依赖)
+EventLoopGroup boss = new NioEventLoopGroup(1);
+EventLoopGroup worker = new NioEventLoopGroup();
+try {
+    ServerBootstrap b = new ServerBootstrap();
+    b.group(boss, worker)
+     .channel(NioServerSocketChannel.class)
+     .childHandler(new ChannelInitializer<SocketChannel>() {
+         @Override
+         protected void initChannel(SocketChannel ch) {
+             ch.pipeline().addLast(new StringDecoder(), new StringEncoder());
+             ch.pipeline().addLast(new SimpleChannelInboundHandler<String>() {
+                 @Override
+                 protected void channelRead0(ChannelHandlerContext ctx, String msg) {
+                     ctx.writeAndFlush("Echo: " + msg);
+                 }
+             });
+         }
+     });
+    ChannelFuture f = b.bind(8080).sync();
+    f.channel().closeFuture().sync();
+} finally {
+    boss.shutdownGracefully();
+    worker.shutdownGracefully();
+}
+```
+
+Netty 把"事件循环 + Channel pipeline + Codec"封装好，几行代码就能写高并发服务。Dubbo、gRPC、Spring WebFlux 全靠它。但理解了 Socket 才能看懂 Netty 在做什么。
+
+## 八、本章小结
+
+| 概念 | 核心要点 |
+| --- | --- |
+| TCP | 可靠字节流，三次握手建立 |
+| UDP | 不可靠数据报，无连接 |
+| `InetAddress` | 表示 IP 地址 |
+| `ServerSocket` | 服务端监听端口 |
+| `Socket` | 客户端连接 / 服务端 accept 后的套接字 |
+| `accept()` | 阻塞等连接 |
+| `getInputStream`/`getOutputStream` | Socket 的两条流 |
+| `DatagramSocket`/`DatagramPacket` | UDP 通信 |
+| 多客户端 | 每个连接一线程（线程池） |
+
+**记忆口诀**：
+
+- **TCP 三次握手，UDP 一发就完**——可靠性 vs 速度。
+- **Socket = 两条流**——InputStream 读，OutputStream 写。
+- **`accept()` 阻塞**——多客户端用线程池。
+- **TCP 粘包**——字节流没边界，要自定义协议。
+- **永远设超时**——`setSoTimeout` 防永久阻塞。
+- **生产用 Netty**——别裸 Socket。
+
+## 结语：从 Socket 到 HTTP
+
+这一章我们用 Socket 写了 Echo 服务器——这是网络通信的最底层。下一章我们看 Java 11+ 内置的 **HttpClient**——基于 HTTP 协议的高级封装，让你能方便地调用 REST API、抓取网页、做爬虫。

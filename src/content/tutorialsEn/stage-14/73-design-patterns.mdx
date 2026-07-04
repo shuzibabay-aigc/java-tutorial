@@ -1,0 +1,651 @@
+---
+title: "Design Patterns"
+chapter: 73
+stage: "Stage 14"
+stageName: "Advanced Topics and Distributed Systems"
+order: 1
+description: "Master the six design principles (SOLID + Law of Demeter), the three categories of design patterns (creational/structural/behavioral), design pattern examples from the Java standard library, and refactor code with the Strategy + Factory patterns"
+pubDate: 2026-07-03
+tags: ["Java", "Design Patterns", "SOLID", "Strategy Pattern", "Factory Pattern", "GoF"]
+---
+
+# Design Patterns
+
+Welcome to Stage 14 — **Advanced Topics and Distributed Systems**. In previous stages we covered language mechanics, engineering practices, and web frameworks. This stage raises the bar — design patterns, data structures and algorithms, Redis, message queues, microservices, and Docker — taking you from "knows how to use frameworks" to "can design architectures." First stop: **Design Patterns**.
+
+A design pattern is a distillation of hard-won experience — what the "standard answer" looks like when facing a specific problem. The 23 patterns cataloged by the GoF (Gang of Four) are the classics. In this chapter we'll examine the six design principles, the three pattern categories, and concrete examples living inside the Java standard library.
+
+## I. The Six Design Principles
+
+The bedrock of design patterns is **design principles** — follow the principles and good code follows; patterns are merely principles applied in concrete form.
+
+### 1.1 The SOLID Five
+
+| Principle | Full Name | Meaning |
+| --- | --- | --- |
+| **S** — Single Responsibility | Single Responsibility | A class has only one reason to change |
+| **O** — Open-Closed | Open-Closed | Open for extension, closed for modification |
+| **L** — Liskov Substitution | Liskov Substitution | Subtypes must be substitutable for their base types |
+| **I** — Interface Segregation | Interface Segregation | Keep interfaces small and focused; no fat interfaces |
+| **D** — Dependency Inversion | Dependency Inversion | Depend on abstractions, not concretions |
+
+**Single Responsibility (SRP)** — one class, one job. `UserService` shouldn't handle both authentication and sending emails — split it into `UserService` and `EmailService`.
+
+**Open-Closed Principle (OCP)** — add new features without touching old code. The Strategy pattern is a perfect example: adding a new strategy means adding a new class, not modifying `Context`.
+
+**Liskov Substitution (LSP)** — a subclass must not violate its parent's contract. If the parent's `add(a, b)` returns `a+b` and a subclass overrides it to return `a-b`, LSP is broken — anywhere the parent is expected, swapping in the child will misbehave.
+
+**Interface Segregation (ISP)** — keep interfaces small. If a `UserService` interface bundles both read and write methods, a read-only client is forced to depend on writes it doesn't need — split it into `UserReader` and `UserWriter`.
+
+**Dependency Inversion (DIP)** — high-level modules should not depend on low-level modules; both should depend on abstractions. `UserService` (high level) should not depend directly on `UserRepositoryImpl` (low level), but on the `UserRepository` interface — this is the very idea behind Spring IoC.
+
+### 1.2 The Law of Demeter (LoD)
+
+**The Law of Demeter** — the principle of least knowledge. An object should talk only to its "friends," not to "strangers."
+
+```java
+// Violates LoD: talking to a stranger's stranger
+order.getCustomer().getAddress().getCity();
+
+// Follows LoD: ask a direct friend for help
+order.getCustomerCity();
+```
+
+Don't dig deep into objects you barely know — only call methods on your direct dependencies. This keeps coupling low.
+
+## II. Creational Patterns
+
+Creational patterns are about "how to create objects" — decoupling creation from usage.
+
+### 2.1 Singleton
+
+Guarantees a class has exactly one instance. In the Java standard library, `Runtime.getRuntime()` is a singleton.
+
+```java
+// Enum singleton (best practice: reflection-safe and serialization-safe)
+public enum Singleton {
+    INSTANCE;
+    public void doSomething() { ... }
+}
+
+// Double-checked locking (the classic form)
+public class Singleton {
+    private static volatile Singleton instance;
+    private Singleton() {}
+    public static Singleton getInstance() {
+        if (instance == null) {
+            synchronized (Singleton.class) {
+                if (instance == null) {
+                    instance = new Singleton();
+                }
+            }
+        }
+        return instance;
+    }
+}
+```
+
+`volatile` is mandatory — it prevents instruction reordering from leaking a half-initialized object.
+
+### 2.2 Factory Method
+
+Defines an interface for creating objects but lets subclasses decide which class to instantiate.
+
+```java
+interface Product { void use(); }
+class ProductA implements Product { public void use() { System.out.println("用 A"); } }
+class ProductB implements Product { public void use() { System.out.println("用 B"); } }
+
+abstract class Factory {
+    abstract Product create();
+}
+class FactoryA extends Factory { Product create() { return new ProductA(); } }
+class FactoryB extends Factory { Product create() { return new ProductB(); } }
+
+// Usage
+Factory f = new FactoryA();
+Product p = f.create();   // ProductA
+```
+
+Spring's `BeanFactory` is the factory pattern in action — `getBean(name)` returns a bean instance.
+
+### 2.3 Builder
+
+Separates the construction of a complex object from its representation — building it step by step.
+
+```java
+public class User {
+    private final String name;
+    private final int age;
+    private final String email;
+    private final String address;
+
+    private User(Builder b) {
+        this.name = b.name; this.age = b.age;
+        this.email = b.email; this.address = b.address;
+    }
+
+    public static class Builder {
+        private String name; private int age;
+        private String email; private String address;
+
+        public Builder name(String n) { this.name = n; return this; }
+        public Builder age(int a) { this.age = a; return this; }
+        public Builder email(String e) { this.email = e; return this; }
+        public Builder address(String a) { this.address = a; return this; }
+        public User build() { return new User(this); }
+    }
+}
+
+// Usage
+User u = new User.Builder()
+    .name("张三").age(20).email("a@b.com").build();
+```
+
+Lombok's `@Builder` generates all of this for you. `StringBuilder` is also a Builder pattern.
+
+### 2.4 Prototype
+
+Creates new objects by cloning an existing one — implement the `Cloneable` interface.
+
+```java
+public class Prototype implements Cloneable {
+    private String data;
+    public Prototype clone() {
+        try { return (Prototype) super.clone(); }
+        catch (CloneNotSupportedException e) { throw new RuntimeException(e); }
+    }
+}
+```
+
+`Object.clone()` performs a shallow copy — primitives and references are copied, but the objects those references point to are not. Deep copies require recursive cloning or serialization.
+
+## III. Structural Patterns
+
+Structural patterns are about "how classes and objects are composed" — adapting, decorating, proxying.
+
+### 3.1 Adapter
+
+Lets classes with incompatible interfaces work together — converts one interface into another.
+
+```java
+// Old interface
+interface OldPrinter { void printOld(String s); }
+class OldPrinterImpl implements OldPrinter {
+    public void printOld(String s) { System.out.println("旧打印: " + s); }
+}
+
+// New interface
+interface NewPrinter { void print(String s); }
+
+// Adapter: wraps the old interface as the new one
+class PrinterAdapter implements NewPrinter {
+    private OldPrinter old;
+    public PrinterAdapter(OldPrinter old) { this.old = old; }
+    public void print(String s) { old.printOld(s); }
+}
+```
+
+JDK's `InputStreamReader` is an adapter — it adapts an `InputStream` (byte stream) into a `Reader` (character stream).
+
+### 3.2 Decorator
+
+Dynamically adds behavior to an object — more flexible than inheritance.
+
+```java
+interface Coffee { double cost(); }
+class SimpleCoffee implements Coffee {
+    public double cost() { return 10; }
+}
+
+// Decorator: add milk
+class MilkDecorator implements Coffee {
+    private Coffee coffee;
+    public MilkDecorator(Coffee c) { this.coffee = c; }
+    public double cost() { return coffee.cost() + 2; }
+}
+// Decorator: add sugar
+class SugarDecorator implements Coffee {
+    private Coffee coffee;
+    public SugarDecorator(Coffee c) { this.coffee = c; }
+    public double cost() { return coffee.cost() + 1; }
+}
+
+// Usage
+Coffee c = new SugarDecorator(new MilkDecorator(new SimpleCoffee()));
+c.cost();   // 10 + 2 + 1 = 13
+```
+
+JDK's `BufferedReader` and `DataInputStream` are decorators — they add buffering and typed read/write on top of `InputStream`.
+
+### 3.3 Proxy
+
+Wraps an object with a proxy to control access. The dynamic proxies from Stage 10 are an application of this.
+
+```java
+interface Service { void execute(); }
+class RealService implements Service {
+    public void execute() { System.out.println("执行"); }
+}
+class ProxyService implements Service {
+    private RealService real;
+    public void execute() {
+        if (real == null) real = new RealService();
+        System.out.println("[前置]");
+        real.execute();
+        System.out.println("[后置]");
+    }
+}
+```
+
+### 3.4 Facade
+
+Gives a complex subsystem a single unified entry point — simplifying the call.
+
+```java
+class CPU { void start() { System.out.println("CPU 启动"); } }
+class Memory { void load() { System.out.println("内存加载"); } }
+class Disk { void read() { System.out.println("硬盘读取"); } }
+
+class ComputerFacade {
+    private CPU cpu = new CPU();
+    private Memory memory = new Memory();
+    private Disk disk = new Disk();
+
+    public void start() {
+        cpu.start();
+        memory.load();
+        disk.read();
+        System.out.println("电脑启动完成");
+    }
+}
+
+// Usage
+new ComputerFacade().start();   // Done in one line, no need to care about internals
+```
+
+Spring's `JdbcTemplate` is a Facade — it distills JDBC's complex operations down to a handful of methods like `query` and `update`.
+
+### 3.5 Composite
+
+A tree structure — treats individual objects and compositions uniformly.
+
+```java
+interface Component { void display(); }
+class Leaf implements Component {
+    private String name;
+    public Leaf(String n) { name = n; }
+    public void display() { System.out.println("叶子: " + name); }
+}
+class Composite implements Component {
+    private List<Component> children = new ArrayList<>();
+    private String name;
+    public Composite(String n) { name = n; }
+    public void add(Component c) { children.add(c); }
+    public void display() {
+        System.out.println("分支: " + name);
+        for (Component c : children) c.display();
+    }
+}
+```
+
+Swing's `Container`/`Component` is the Composite pattern — a container can hold both components and other containers.
+
+## IV. Behavioral Patterns
+
+Behavioral patterns are about "how objects communicate and how responsibilities are assigned."
+
+### 4.1 Strategy
+
+Defines a family of algorithms, encapsulates them, and makes them interchangeable — to avoid a thicket of if-else.
+
+```java
+interface PayStrategy { void pay(double amount); }
+class WechatPay implements PayStrategy {
+    public void pay(double a) { System.out.println("微信支付 " + a); }
+}
+class AliPay implements PayStrategy {
+    public void pay(double a) { System.out.println("支付宝 " + a); }
+}
+
+class PayContext {
+    private PayStrategy strategy;
+    public PayContext(PayStrategy s) { this.strategy = s; }
+    public void checkout(double amount) { strategy.pay(amount); }
+}
+
+// Usage
+new PayContext(new WechatPay()).checkout(99.5);
+new PayContext(new AliPay()).checkout(99.5);
+```
+
+Adding a new payment method means adding a new `PayStrategy` implementation — `PayContext` stays untouched. That is the Open-Closed Principle in action.
+
+### 4.2 Observer
+
+A one-to-many dependency — when one object changes state, all its dependents are notified.
+
+```java
+interface Observer { void update(String event); }
+class EmailNotifier implements Observer {
+    public void update(String e) { System.out.println("邮件通知: " + e); }
+}
+class SmsNotifier implements Observer {
+    public void update(String e) { System.out.println("短信通知: " + e); }
+}
+
+class Subject {
+    private List<Observer> observers = new ArrayList<>();
+    public void subscribe(Observer o) { observers.add(o); }
+    public void notifyAll(String event) {
+        for (Observer o : observers) o.update(event);
+    }
+}
+```
+
+Spring's `ApplicationEvent`/`ApplicationListener` is the Observer pattern.
+
+### 4.3 Template Method
+
+Defines the skeleton of an algorithm, letting subclasses override specific steps.
+
+```java
+abstract class Game {
+    public final void play() {   // Template method, skeleton is fixed
+        init();
+        start();
+        end();
+    }
+    protected abstract void init();
+    protected abstract void start();
+    protected void end() { System.out.println("游戏结束"); }
+}
+class Chess extends Game {
+    protected void init() { System.out.println("摆棋盘"); }
+    protected void start() { System.out.println("下棋"); }
+}
+```
+
+`AbstractList`'s `indexOf` is a template method — it calls the `size()`/`get()` that subclasses implement.
+
+### 4.4 Chain of Responsibility
+
+A request travels along a chain; each handler decides to handle it or pass it to the next.
+
+```java
+abstract class Handler {
+    protected Handler next;
+    public Handler setNext(Handler n) { this.next = n; return n; }
+    public abstract void handle(String request);
+}
+class AuthHandler extends Handler {
+    public void handle(String r) {
+        if (r.contains("auth")) System.out.println("认证通过");
+        else if (next != null) next.handle(r);
+    }
+}
+class LogHandler extends Handler {
+    public void handle(String r) {
+        System.out.println("记录日志: " + r);
+        if (next != null) next.handle(r);
+    }
+}
+
+// Usage
+Handler chain = new AuthHandler();
+chain.setNext(new LogHandler());
+chain.handle("auth");
+```
+
+Spring's `FilterChain` and `Interceptor` chains are both Chain of Responsibility.
+
+### 4.5 State
+
+When an object's state changes, its behavior changes too — encapsulate each state as a class.
+
+```java
+interface State { void handle(); }
+class IdleState implements State { public void handle() { System.out.println("空闲"); } }
+class BusyState implements State { public void handle() { System.out.println("忙"); } }
+
+class Worker {
+    private State state;
+    public void setState(State s) { this.state = s; }
+    public void work() { state.handle(); }
+}
+```
+
+## V. Design Patterns in the Java Standard Library
+
+| Pattern | JDK Example |
+| --- | --- |
+| Singleton | `Runtime.getRuntime()`, `System` |
+| Factory Method | `Calendar.getInstance()`, `List.of()` |
+| Abstract Factory | `DocumentBuilderFactory` |
+| Builder | `StringBuilder`, `Locale.Builder` |
+| Prototype | `Object.clone()` |
+| Adapter | `InputStreamReader`, `Arrays.asList()` |
+| Decorator | `BufferedReader`, `DataInputStream` |
+| Proxy | `Proxy`, `MethodInterceptor` |
+| Facade | `JdbcTemplate`, `Files` |
+| Composite | `Container`/`Component` (Swing) |
+| Strategy | `Comparator`, `FileFilter` |
+| Observer | `PropertyChangeListener` |
+| Template Method | `AbstractList`, `HttpServlet` |
+| Chain of Responsibility | `FilterChain` |
+| State | `Thread.State` (partially) |
+| Iterator | `Iterator`, `Iterable` |
+
+Design patterns were never "invented" — they are "summaries" of excellent code. The JDK is full of them.
+
+## VI. Hands-on: Refactoring if-else with Strategy + Factory
+
+<CodeRunner code={`import java.util.*;
+import java.util.function.*;
+
+// === 重构前: 一堆 if-else ===
+class BadOrderService {
+    public void pay(String type, double amount) {
+        if ("wechat".equals(type)) {
+            System.out.println("微信支付 " + amount);
+        } else if ("alipay".equals(type)) {
+            System.out.println("支付宝支付 " + amount);
+        } else if ("bank".equals(type)) {
+            System.out.println("银行卡支付 " + amount);
+        } else if ("apple".equals(type)) {
+            System.out.println("Apple Pay " + amount);
+        } else {
+            throw new IllegalArgumentException("不支持的支付: " + type);
+        }
+        // 加新支付方式要改这个方法, 违反开闭原则
+    }
+}
+
+// === 重构后: 策略模式 + 工厂模式 ===
+
+// 策略接口
+interface PayStrategy {
+    String type();
+    void pay(double amount);
+}
+
+// 具体策略
+class WechatPay implements PayStrategy {
+    public String type() { return "wechat"; }
+    public void pay(double a) { System.out.println("微信支付 " + a); }
+}
+class AliPay implements PayStrategy {
+    public String type() { return "alipay"; }
+    public void pay(double a) { System.out.println("支付宝支付 " + a); }
+}
+class BankPay implements PayStrategy {
+    public String type() { return "bank"; }
+    public void pay(double a) { System.out.println("银行卡支付 " + a); }
+}
+class ApplePay implements PayStrategy {
+    public String type() { return "apple"; }
+    public void pay(double a) { System.out.println("Apple Pay " + a); }
+}
+
+// 工厂: 注册 + 查找 (像 Spring 的 IoC 容器)
+class PayStrategyFactory {
+    private static final Map<String, PayStrategy> STRATEGIES = new HashMap<>();
+
+    // 静态注册 (生产环境可由 Spring 自动扫描注入)
+    static {
+        register(new WechatPay());
+        register(new AliPay());
+        register(new BankPay());
+        register(new ApplePay());
+    }
+
+    public static void register(PayStrategy s) {
+        STRATEGIES.put(s.type(), s);
+    }
+
+    public static PayStrategy get(String type) {
+        PayStrategy s = STRATEGIES.get(type);
+        if (s == null) throw new IllegalArgumentException("不支持的支付: " + type);
+        return s;
+    }
+}
+
+// 业务服务: 不关心具体支付方式
+class GoodOrderService {
+    public void pay(String type, double amount) {
+        PayStrategy strategy = PayStrategyFactory.get(type);
+        strategy.pay(amount);
+        // 加新支付方式只需 register, 不改这个方法!
+    }
+}
+
+// === 装饰器模式演示 ===
+interface Coffee { double cost(); String desc(); }
+class SimpleCoffee implements Coffee {
+    public double cost() { return 10; }
+    public String desc() { return "咖啡"; }
+}
+abstract class CoffeeDecorator implements Coffee {
+    protected Coffee inner;
+    public CoffeeDecorator(Coffee c) { this.inner = c; }
+}
+class Milk extends CoffeeDecorator {
+    public Milk(Coffee c) { super(c); }
+    public double cost() { return inner.cost() + 2; }
+    public String desc() { return inner.desc() + " +奶"; }
+}
+class Sugar extends CoffeeDecorator {
+    public Sugar(Coffee c) { super(c); }
+    public double cost() { return inner.cost() + 1; }
+    public String desc() { return inner.desc() + " +糖"; }
+}
+
+// === 观察者模式演示 ===
+interface OrderObserver { void onOrderCreated(String orderId, double amount); }
+class EmailNotifier implements OrderObserver {
+    public void onOrderCreated(String id, double a) {
+        System.out.println("[邮件] 订单 " + id + " 金额 " + a);
+    }
+}
+class InventoryDeductor implements OrderObserver {
+    public void onOrderCreated(String id, double a) {
+        System.out.println("[库存] 扣减, 订单 " + id);
+    }
+}
+class PointsEarner implements OrderObserver {
+    public void onOrderCreated(String id, double a) {
+        System.out.println("[积分] 加 " + (int) a + " 积分");
+    }
+}
+class OrderService {
+    private final List<OrderObserver> observers = new ArrayList<>();
+    public void subscribe(OrderObserver o) { observers.add(o); }
+    public void createOrder(String id, double amount) {
+        System.out.println("创建订单 " + id);
+        for (OrderObserver o : observers) o.onOrderCreated(id, amount);
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== 设计模式实战 ===\\n");
+
+        // 1. 策略 + 工厂: 重构 if-else
+        System.out.println("--- 1. 策略 + 工厂重构 if-else ---");
+        System.out.println("[重构前]:");
+        new BadOrderService().pay("wechat", 99.5);
+
+        System.out.println("\\n[重构后]:");
+        GoodOrderService service = new GoodOrderService();
+        service.pay("wechat", 99.5);
+        service.pay("alipay", 88.0);
+        service.pay("apple", 199.9);
+
+        // 加新支付方式: 只需注册, 不改业务代码
+        PayStrategyFactory.register(new PayStrategy() {
+            public String type() { return "crypto"; }
+            public void pay(double a) { System.out.println("加密货币支付 " + a); }
+        });
+        System.out.println("\\n[动态加新支付方式 crypto]:");
+        service.pay("crypto", 0.5);
+        System.out.println("(没改 GoodOrderService, 符合开闭原则)");
+
+        // 2. 装饰器: 自由组合
+        System.out.println("\\n--- 2. 装饰器模式 ---");
+        Coffee c1 = new SimpleCoffee();
+        System.out.println(c1.desc() + " = " + c1.cost());
+
+        Coffee c2 = new Milk(new SimpleCoffee());
+        System.out.println(c2.desc() + " = " + c2.cost());
+
+        Coffee c3 = new Sugar(new Milk(new SimpleCoffee()));
+        System.out.println(c3.desc() + " = " + c3.cost());
+
+        Coffee c4 = new Sugar(new Sugar(new Milk(new SimpleCoffee())));
+        System.out.println(c4.desc() + " = " + c4.cost());
+
+        // 3. 观察者: 解耦事件
+        System.out.println("\\n--- 3. 观察者模式 ---");
+        OrderService os = new OrderService();
+        os.subscribe(new EmailNotifier());
+        os.subscribe(new InventoryDeductor());
+        os.subscribe(new PointsEarner());
+        System.out.println("下单 ORD-001 金额 99.5:");
+        os.createOrder("ORD-001", 99.5);
+
+        System.out.println("\\n=== 设计模式原则 ===");
+        System.out.println("SOLID: 单一职责/开闭/里氏替换/接口隔离/依赖倒置");
+        System.out.println("迪米特法则: 最少知识, 只跟朋友说话");
+        System.out.println("创建型: 单例/工厂/建造者/原型");
+        System.out.println("结构型: 适配器/装饰器/代理/外观/组合");
+        System.out.println("行为型: 策略/观察者/模板方法/责任链/状态");
+        System.out.println("\\n关键: 模式是手段不是目的, 别为模式而模式");
+    }
+}`} />
+
+> **What to watch for**:
+> - **Strategy + Factory eliminate if-else** — adding a new payment method only requires registration; the business code stays untouched. That's the Open-Closed Principle.
+> - **Decorators compose freely** — `Sugar(Milk(Coffee))` equals "coffee with milk and sugar."
+> - **Observer decouples via events** — placing an order notifies three observers (email, inventory, points) without any of them affecting the others.
+
+## VII. Chapter Summary
+
+| Category | Patterns |
+| --- | --- |
+| 6 Principles | SRP / OCP / LSP / ISP / DIP / LoD |
+| Creational | Singleton / Factory / Builder / Prototype |
+| Structural | Adapter / Decorator / Proxy / Facade / Composite |
+| Behavioral | Strategy / Observer / Template Method / Chain of Responsibility / State |
+
+**Memory hooks**:
+
+- **SOLID five** — Single, Open, Liskov, Interface, Dependency.
+- **Strategy kills if-else** — one class per branch, the factory looks them up.
+- **Decorator beats inheritance** — composition over inheritance.
+- **Observer is one-to-many** — events decouple.
+- **Template Method sets the skeleton** — subclasses fill in the details.
+- **Chain of Responsibility links them up** — a request walks through node by node.
+
+## Conclusion: Patterns Are a Means, Not an End
+
+Design patterns are crystallized experience — but don't abuse them. Forcing a strategy pattern onto a three-line if-else is over-engineering. The essence of a pattern is "solving a specific problem" — reach for a pattern when you meet the problem; don't go hunting for problems to fit your patterns. Next chapter brings something even more hardcore — **Data Structures and Algorithms**.

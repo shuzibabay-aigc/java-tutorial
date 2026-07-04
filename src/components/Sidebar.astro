@@ -1,0 +1,39 @@
+---
+import { type Lang, tutorialStructure, homePath, tutorialPath, getUiStrings } from '../i18n/ui';
+
+const { currentSlug, lang = 'zh' as Lang } = Astro.props;
+const ui = getUiStrings(lang);
+
+// 根据语言选择标题字段
+const stageLabel = lang === 'zh' ? 'stageZh' : 'stageEn';
+const stageNameLabel = lang === 'zh' ? 'stageNameZh' : 'stageNameEn';
+const titleLabel = lang === 'zh' ? 'titleZh' : 'titleEn';
+---
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <a href={homePath(lang)} class="sidebar-logo">
+      <span class="coffee">☕</span>
+      <span>{ui.siteTitle}</span>
+    </a>
+    <div class="sidebar-subtitle">{ui.siteSubtitle}</div>
+  </div>
+  <nav class="sidebar-nav">
+    {tutorialStructure.map((stage) => (
+      <div class="stage-group">
+        <div class="stage-title">{stage[stageLabel]} · {stage[stageNameLabel]}</div>
+        {stage.chapters.map((ch) => (
+          <a
+            href={tutorialPath(ch.slug, lang)}
+            class:list={["nav-item", { active: currentSlug === ch.slug }]}
+          >
+            <span class="chapter-num">{String(ch.num).padStart(2, '0')}</span>
+            {ch[titleLabel]}
+          </a>
+        ))}
+      </div>
+    ))}
+  </nav>
+</aside>
+
+<div class="sidebar-overlay" id="sidebar-overlay"></div>

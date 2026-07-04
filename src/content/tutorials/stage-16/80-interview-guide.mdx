@@ -1,0 +1,478 @@
+---
+title: "Java 面试题精讲"
+chapter: 80
+stage: "第十六阶段"
+stageName: "面试与进阶"
+order: 1
+description: "精选 Java 高频面试题，覆盖基础（equals/hashCode/String）、集合（HashMap/ConcurrentHashMap）、并发（volatile/synchronized/线程池/AQS）、JVM（GC/内存模型）、Spring 框架，每题给出合格答法与加分点"
+pubDate: 2026-07-03
+tags: ["Java", "面试题", "HashMap", "并发", "JVM", "Spring", "GC", "AQS"]
+---
+
+# Java 面试题精讲
+
+面试是一场特殊的对话——它不考你最会的，而考你**理解有多深**。"会背"和"会答"差一个层次：背是复述定义，答是讲清原理、权衡、场景。面试官想听的是后者。
+
+这一章我们把前面 79 章的知识浓缩成高频面试题。每题给出"合格答法"（80 分）和"加分点"（95 分）。不是让你死记答案，而是教你怎么把零散知识串成有逻辑的表达。
+
+## 一、Java 基础
+
+### Q1：equals 和 hashCode 的关系？
+
+**合格答法**：两个对象 `equals` 相等，`hashCode` 必须相等；`hashCode` 相等，`equals` 不一定相等。重写 `equals` 必须重写 `hashCode`。
+
+**加分点**：
+- **为什么**——HashMap 用 hashCode 定位桶，用 equals 判断是否同一 key。如果两个 equals 相等的对象 hashCode 不同，会被分到不同桶，HashMap 里就出现"重复"key。
+- **hashCode 合同**——同一对象多次调用必须返回同一值；equals 相等→hashCode 相等；equals 不等→hashCode 尽量不等（散列均匀）。
+- **Objects.hash** 工具方法——`return Objects.hash(field1, field2);` 比手写散列函数安全。
+
+```java
+// 反例: 只重写 equals 不重写 hashCode
+Person p1 = new Person("Tom");
+Person p2 = new Person("Tom");
+p1.equals(p2);   // true
+Set<Person> set = new HashSet<>();
+set.add(p1);
+set.contains(p2);   // false! 因为 hashCode 不同, 找不到桶
+```
+
+### Q2：String 为什么不可变？
+
+**合格答法**：String 用 final 修饰类，用 final 修饰内部的 char[]（Java 9+ 是 byte[]），不可修改。
+
+**加分点**：
+- **好处 1——安全性**：String 常作参数（文件路径、SQL、URL），可变会被恶意篡改。
+- **好处 2——线程安全**：不可变天然线程安全，无需同步。
+- **好处 3——字符串常量池**：不可变才能安全共享，`"a" == "a"` 才成立。
+- **好处 4——hashCode 缓存**：不可变所以 hashCode 算一次缓存即可。
+- **StringBuilder 场景**——大量拼接用 StringBuilder，避免每次创建新 String。
+
+### Q3：== 和 equals 的区别？
+
+**合格答法**：`==` 比较引用地址（基本类型比较值）；`equals` 默认也是比地址（Object 的实现），但很多类（String/Integer）重写了 equals 比较内容。
+
+**加分点**：
+- **Integer 缓存**——`Integer a = 127; Integer b = 127; a == b` 为 true（缓存 -128~127）；`128` 就 false。
+- **String 常量池**——`String a = "ab"; String b = "ab"; a == b` 为 true（常量池）；`new String("ab") == new String("ab")` 为 false（堆里两个对象）。
+
+## 二、集合
+
+### Q4：HashMap 的底层原理？
+
+**合格答法**：HashMap 是数组 + 链表/红黑树。put 时用 hash 定位桶，桶里是链表，链表长度 ≥8 且数组长度 ≥64 时转红黑树。
+
+**加分点**：
+- **hash 计算**——`(h = key.hashCode()) ^ (h ＞＞＞ 16)`，高 16 位异或低 16 位，让 hash 更散。
+- **容量始终 2 的幂**——`hash & (n-1)` 等价于 `hash % n` 但更快。
+- **扩容**——负载因子 0.75，超过就扩容两倍，重新分配所有元素。
+- **线程不安全**——多线程 put 可能数据丢失；JDK 7 头插法会成环导致死循环，JDK 8 改尾插法但仍不安全。
+- **替代品**——`ConcurrentHashMap`（线程安全）。
+
+### Q5：ConcurrentHashMap 怎么保证线程安全？
+
+**合格答法**：JDK 7 用分段锁（Segment），JDK 8 改用 CAS + synchronized 锁单桶。
+
+**加分点**：
+- **JDK 7 分段锁**——把整个 map 拆成 16 个 Segment，每个 Segment 一把锁，并发度 16。
+- **JDK 8 优化**——锁粒度细化到桶（Node），用 CAS 插入空桶，synchronized 锁非空桶头节点。
+- **size 计算**——用 baseCount + CounterCell[] 累加，减少竞争。
+- **为什么不用 ReentrantLock**——synchronized 在 JDK 6 后优化（偏向锁/轻量级锁），性能足够，且内存占用更少。
+
+### Q6：ArrayList vs LinkedList？
+
+**合格答法**：ArrayList 是动态数组，随机访问 O(1)，增删尾部 O(1) 但中间增删 O(n)；LinkedList 是双向链表，随机访问 O(n)，头尾增删 O(1)。
+
+**加分点**：
+- **实际场景**——大多数场景用 ArrayList，CPU 缓存友好（连续内存），LinkedList 节点分散反而慢。
+- **LinkedList 的坑**——`linkedList.get(i)` 是 O(n)，因为它要从头遍历。
+- **增删真相**——ArrayList 中间增删要移动元素，但 memcpy 很快；LinkedList 增删要 new Node，可能更慢。
+
+## 三、并发
+
+### Q7：volatile 的作用？
+
+**合格答法**：volatile 保证可见性和有序性（禁止指令重排），不保证原子性。
+
+**加分点**：
+- **可见性原理**——写 volatile 变量时刷新到主内存，读时从主内存加载（不用 CPU 缓存）。底层用内存屏障。
+- **有序性**——禁止编译器/CPU 重排，happens-before 规则保证 volatile 写先于后续 volatile 读。
+- **不保证原子性**——`volatile int i; i++` 仍是 read-modify-write 三步，非原子。要用 `AtomicInteger` 或 `synchronized`。
+- **经典应用**——双检锁单例的 `instance` 必须 volatile，防止"构造未完成就发布"。
+
+```java
+// 双检锁单例
+class Singleton {
+    private static volatile Singleton instance;   // volatile 必须!
+    public static Singleton getInstance() {
+        if (instance == null) {
+            synchronized (Singleton.class) {
+                if (instance == null) instance = new Singleton();
+            }
+        }
+        return instance;
+    }
+}
+```
+
+### Q8：synchronized 和 ReentrantLock 的区别？
+
+**合格答法**：synchronized 是关键字，JVM 层面；ReentrantLock 是类，API 层面。ReentrantLock 功能更丰富——可中断、可超时、可公平、多条件变量。
+
+**加分点**：
+- **synchronized 优化**——JDK 6 引入偏向锁、轻量级锁、重量级锁，性能不再差。
+- **锁升级**——无锁 → 偏向锁 → 轻量级锁（自旋）→ 重量级锁（OS 互斥量），不可降级。
+- **ReentrantLock 注意**——必须 `finally { lock.unlock(); }`，否则死锁。synchronized 异常自动释放。
+- **公平锁**——`new ReentrantLock(true)` 按 FIFO 获取锁，吞吐量略低但避免饥饿。
+- **Condition**——ReentrantLock 的 `newCondition()` 比 synchronized 的 wait/notify 更灵活，能多条件队列。
+
+### Q9：线程池怎么配置？
+
+**合格答法**：用 `ThreadPoolExecutor`，核心线程数、最大线程数、队列、拒绝策略四个核心参数。
+
+**加分点**：
+- **线程数公式**——CPU 密集型：N+1；IO 密集型：2N 或 N×(1+等待时间/计算时间)。N 是 CPU 核数。
+- **队列选择**——有界队列（ArrayBlockingQueue）防 OOM；无界队列（LinkedBlockingQueue）可能堆积爆内存。
+- **拒绝策略**——AbortPolicy（抛异常，默认）/ CallerRunsPolicy（调用者执行，背压）/ DiscardPolicy（丢弃）/ DiscardOldestPolicy（丢最老）。
+- **不要用 Executors**——`newFixedThreadPool` 用无界队列可能 OOM；`newCachedThreadPool` 最大线程 Integer.MAX_VALUE 可能创建大量线程。阿里规约要求用 `ThreadPoolExecutor` 显式构造。
+- **submit vs execute**——execute 无返回值，submit 返回 Future，能拿到异常。
+
+### Q10：CAS 是什么？有什么问题？
+
+**合格答法**：CAS（Compare And Swap）比较并交换——三个操作数：内存值 V、期望值 E、新值 N。若 V==E，把 V 改成 N，否则不动。原子操作，硬件支持的指令（cmpxchg）。
+
+**加分点**：
+- **ABA 问题**——值从 A→B→A，CAS 以为没变。解法：版本号（AtomicStampedReference）。
+- **自旋开销**——CAS 失败会循环重试，竞争激烈时浪费 CPU。JDK 8 的 LongAdder 用分段累加减少竞争。
+- **AQS 用 CAS**——AbstractQueuedSynchronizer 是锁/同步器的基础，用 CAS 修改 state 变量。
+- **乐观锁思想**——CAS 是乐观锁（认为没冲突，失败重试），synchronized 是悲观锁（先锁再说）。
+
+## 四、JVM
+
+### Q11：JVM 内存结构？
+
+**合格答法**：堆、方法区（元空间）、虚拟机栈、本地方法栈、程序计数器。堆和方法区线程共享，其他线程私有。
+
+**加分点**：
+- **堆分代**——新生代（Eden + 2 Survivor）+ 老年代。对象先在 Eden，Minor GC 后存活进 Survivor，多次存活进老年代。
+- **方法区演进**——JDK 7 前叫永久代（PermGen，JVM 内存），JDK 8 改元空间（Metaspace，直接内存），避免 OOM。
+- **栈帧**——每个方法调用一个栈帧，含局部变量表、操作数栈、动态链接、返回地址。栈溢出（StackOverflowError）通常是递归太深。
+- **对象内存布局**——对象头（Mark Word + Klass Pointer）+ 实例数据 + 对齐填充。64 位 JVM 默认 8 字节对齐。
+
+### Q12：GC 算法和垃圾收集器？
+
+**合格答法**：判断对象死亡用可达性分析（GC Roots）。算法有标记-清除、标记-复制、标记-整理。收集器有 Serial、Parallel、CMS、G1、ZGC。
+
+**加分点**：
+- **GC Roots**——虚拟机栈局部变量、方法区静态变量、常量、本地方法栈 JNI 引用、活跃线程。
+- **分代收集**——新生代用复制算法（Survivor 复制），老年代用标记-清除/整理。
+- **CMS**——老年代收集器，并发标记+并发清除，低停顿但有碎片。JDK 9 起废弃。
+- **G1**——把堆分成 Region，预测停顿时间，JDK 9 起默认。
+- **ZGC/Shenandoah**——JDK 11+，着色指针+读屏障，停顿 ＜ 10ms，适合大堆。
+- **调优核心**——避免 Full GC，关注吞吐量 vs 停顿时间的权衡。
+
+### Q13：类加载过程和双亲委派？
+
+**合格答法**：类加载分加载、验证、准备、解析、初始化五步。双亲委派——子加载器先委托父加载器加载。
+
+**加分点**：
+- **加载器层次**——启动类加载器（rt.jar）→ 扩展类加载器（ext）→ 应用类加载器（classpath）→ 自定义。
+- **双亲委派目的**——安全，防止核心类被篡改（自定义 `java.lang.String` 会被启动类加载器加载到真正的 String）。
+- **打破双亲委派**——SPI（JDBC DriverManager 用线程上下文类加载器）、Tomcat（每个 webapp 独立 ClassLoader，隔离应用）、OSGi。
+- **初始化时机**——new、反射、子类初始化触发父类、main 类。`Class.forName` 会初始化，`ClassLoader.loadClass` 不会。
+
+## 五、Spring 框架
+
+### Q14：Spring IoC 的理解？
+
+**合格答法**：IoC（Inversion of Control）控制反转——对象的创建和依赖由容器管理，而非对象自己 new。DI（依赖注入）是 IoC 的实现方式。
+
+**加分点**：
+- **好处**——解耦（依赖接口不依赖实现）、易测试（mock 接口）、生命周期统一管理。
+- **三种注入**——构造器注入（推荐，不可变）、setter 注入、字段注入（@Autowired，不推荐，难测试）。
+- **循环依赖**——Spring 用三级缓存（singletonObjects、earlySingletonObjects、singletonFactories）解决单例 setter 注入的循环依赖。构造器注入的循环依赖无解。
+- **@ComponentScan**——扫描 @Component/@Service/@Repository/@Controller 注解的类，注册成 Bean。
+
+### Q15：Spring AOP 的实现原理？
+
+**合格答法**：AOP（面向切面编程）用动态代理在方法前后插入横切逻辑（日志、事务、权限）。接口用 JDK 动态代理，类用 CGLIB 字节码生成。
+
+**加分点**：
+- **JDK 动态代理**——`Proxy.newProxyInstance`，基于接口，生成实现接口的代理类。
+- **CGLIB**——继承目标类生成子类，override 方法。final 类/方法不能代理。
+- **Spring 选择**——有接口默认 JDK 代理（Spring Boot 2.x 起默认 CGLIB）；`@EnableAspectJAutoLog(proxyTargetClass=true)` 强制 CGLIB。
+- **AOP 术语**——切面（Aspect）、切点（Pointcut）、通知（Advice：Before/After/Around）、织入（Weaving）。
+- **事务失效**——同类内部方法调用不走代理（this.method() 不是代理对象）；非 public 方法；异常被 catch 不抛出。
+
+### Q16：Spring Boot 自动配置原理？
+
+**合格答法**：`@SpringBootApplication` 包含 `@EnableAutoConfiguration`，扫描 META-INF/spring.factories（Spring Boot 2.7+ 改 META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports）里的配置类，按条件（@Conditional）生效。
+
+**加分点**：
+- **@ConditionalOnClass**——classpath 有指定类才生效。
+- **@ConditionalOnMissingBean**——容器没该 Bean 才生效，让用户能覆盖默认。
+- **starter 机制**——引入 `spring-boot-starter-redis` 就自动配置 RedisTemplate，零配置。
+- **启动流程**——`SpringApplication.run` → 创建 ApplicationContext → 加载自动配置 → refresh → 启动 Tomcat。
+
+## 六、数据库与缓存
+
+### Q17：MySQL 事务隔离级别？
+
+**合格答法**：四个级别——读未提交、读已提交、可重复读（MySQL 默认）、串行化。解决脏读、不可重复读、幻读。
+
+**加分点**：
+- **MVCC**——多版本并发控制，每行有隐藏版本号，事务看到的是快照。RC 每次读生成新快照，RR 整个事务用同一快照。
+- **MySQL RR 防幻读**——靠间隙锁（gap lock），锁定范围不让插入。
+- **锁分类**——行锁、间隙锁、临键锁（next-key，行锁+间隙锁）。`SELECT ... FOR UPDATE` 加临键锁。
+
+### Q18：Redis 持久化？
+
+**合格答法**：RDB 快照、AOF 日志。RDB 体积小恢复快但可能丢数据；AOF 数据全但慢。
+
+**加分点**：
+- **混合持久化**（4.0+）——AOF 文件前半 RDB 二进制 + 后半增量命令。
+- **fork 子进程**——RDB/AOF rewrite 都 fork 子进程，利用 COW（copy-on-write）不阻塞主进程。
+- **AOF 重写**——AOF 文件越来越大，重写把多条命令合并成一条等价命令。
+
+## 七、设计模式
+
+### Q19：单例模式的实现？
+
+**合格答法**：饿汉式（类加载即创建）、懒汉式（双重检查锁）、静态内部类、枚举。
+
+**加分点**：
+- **枚举最优**——`enum Singleton { INSTANCE; }`，天然防反射攻击、防反序列化破坏，代码最简。
+- **双检锁要点**——`instance` 必须 volatile，防止指令重排导致"未初始化完成的对象"被发布。
+- **静态内部类**——`private static class Holder { static final Singleton INSTANCE = new Singleton(); }`，利用类加载机制保证线程安全，懒加载。
+
+### Q20：策略模式怎么消除 if-else？
+
+**合格答法**：把每个分支抽成策略类（实现同一接口），用 Map 注册，运行时按 key 取策略执行。
+
+**加分点**：
+- **配合工厂**——策略 + 工厂模式，工厂负责创建/获取策略。
+- **Spring 集成**——策略类加 @Component，注入 `Map＜String, Strategy＞`，Spring 自动按 bean 名注入。
+- **开闭原则**——加新策略只加类，不改原有代码。
+
+```java
+// 消除 if-else
+interface PayStrategy { void pay(double amount); }
+@Component("alipay") class AlipayStrategy implements PayStrategy { ... }
+@Component("wechat") class WechatStrategy implements PayStrategy { ... }
+
+@Service
+class PayService {
+    @Autowired Map<String, PayStrategy> strategies;  // Spring 自动注入
+    public void pay(String type, double amount) {
+        strategies.get(type).pay(amount);   // 无 if-else
+    }
+}
+```
+
+## 八、实战：面试题代码演示
+
+下面用一段代码演示几个高频面试题的"代码级"答案——equals/hashCode、HashMap 原理、volatile 可见性、双检锁单例、策略模式消除 if-else。
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        System.out.println("=== 面试题代码演示 ===\\n");
+
+        // 1. equals/hashCode 关系
+        System.out.println("--- 1. equals 与 hashCode ---");
+        Person p1 = new Person("Tom", 20);
+        Person p2 = new Person("Tom", 20);
+        System.out.println("p1.equals(p2): " + p1.equals(p2));   // true
+        System.out.println("p1.hashCode == p2.hashCode: " + (p1.hashCode() == p2.hashCode()));
+        Set<Person> set = new HashSet<>();
+        set.add(p1);
+        System.out.println("set.contains(p2): " + set.contains(p2));   // true (hashCode 一致)
+
+        // 2. Integer 缓存
+        System.out.println("\\n--- 2. Integer 缓存 (-128~127) ---");
+        Integer a = 127, b = 127;
+        Integer c = 128, d = 128;
+        System.out.println("127 == 127: " + (a == b));   // true (缓存)
+        System.out.println("128 == 128: " + (c == d));   // false (超出缓存)
+
+        // 3. HashMap 原理
+        System.out.println("\\n--- 3. HashMap 桶分布 ---");
+        Map<String, Integer> map = new HashMap<>(16);
+        String[] keys = {"apple", "banana", "cherry", "date", "elderberry"};
+        for (String k : keys) {
+            int hash = k.hashCode() ^ (k.hashCode() >>> 16);
+            int bucket = hash & 15;   // n-1 = 15
+            map.put(k, k.length());
+            System.out.printf("  %-12s hash=%-10d 桶=%d%n", k, hash, bucket);
+        }
+
+        // 4. volatile 可见性
+        System.out.println("\\n--- 4. volatile 可见性 ---");
+        VolatileDemo.demo();
+
+        // 5. 双检锁单例
+        System.out.println("\\n--- 5. 双检锁单例 ---");
+        Singleton s1 = Singleton.getInstance();
+        Singleton s2 = Singleton.getInstance();
+        System.out.println("s1 == s2: " + (s1 == s2));   // true
+
+        // 6. CAS 演示 (AtomicInteger)
+        System.out.println("\\n--- 6. CAS (AtomicInteger) ---");
+        AtomicInteger counter = new AtomicInteger(0);
+        Thread[] threads = new Thread[10];
+        for (int i = 0; i < 10; i++) {
+            threads[i] = new Thread(() -> {
+                for (int j = 0; j < 1000; j++) counter.incrementAndGet();
+            });
+            threads[i].start();
+        }
+        for (Thread t : threads) t.join();
+        System.out.println("10 线程各 +1000: " + counter.get() + " (CAS 保证原子)");
+
+        // 7. 策略模式消除 if-else
+        System.out.println("\\n--- 7. 策略模式 ---");
+        Map<String, DiscountStrategy> strategies = new HashMap<>();
+        strategies.put("normal", amount -> amount);
+        strategies.put("vip", amount -> amount * 0.8);
+        strategies.put("svip", amount -> amount * 0.6);
+        double price = 100.0;
+        for (String type : new String[]{"normal", "vip", "svip"}) {
+            System.out.println("  " + type + " 用户 100 元 -> " + strategies.get(type).discount(price) + " 元");
+        }
+
+        // 8. 线程池
+        System.out.println("\\n--- 8. 线程池 ---");
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+            2, 4, 30, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(10),
+            Executors.defaultThreadFactory(),
+            new ThreadPoolExecutor.CallerRunsPolicy()
+        );
+        List<Future<Integer>> futures = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            final int x = i;
+            futures.add(pool.submit(() -> {
+                Thread.sleep(100);
+                return x * x;
+            }));
+        }
+        System.out.println("  5 个任务结果:");
+        for (Future<Integer> f : futures) System.out.println("    " + f.get());
+        pool.shutdown();
+        System.out.println("  池状态: 活跃=" + pool.getActiveCount() + " 完成=" + pool.getCompletedTaskCount());
+    }
+}
+
+// equals/hashCode 正确实现
+class Person {
+    String name;
+    int age;
+    Person(String name, int age) { this.name = name; this.age = age; }
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Person)) return false;
+        Person p = (Person) o;
+        return age == p.age && Objects.equals(name, p.name);
+    }
+    public int hashCode() { return Objects.hash(name, age); }
+}
+
+// volatile 可见性演示
+class VolatileDemo {
+    static volatile boolean stopped = false;
+    static void demo() throws InterruptedException {
+        Thread t = new Thread(() -> {
+            long count = 0;
+            while (!stopped) count++;   // 没 volatile 会一直循环
+            System.out.println("  子线程收到停止信号, count=" + count);
+        });
+        t.start();
+        Thread.sleep(50);
+        stopped = true;   // 主线程改 volatile, 子线程立即可见
+        t.join();
+        System.out.println("  volatile 保证可见性: 子线程正确停止");
+    }
+}
+
+// 双检锁单例
+class Singleton {
+    private static volatile Singleton instance;
+    private Singleton() { System.out.println("  Singleton 构造 (只调一次)"); }
+    public static Singleton getInstance() {
+        if (instance == null) {
+            synchronized (Singleton.class) {
+                if (instance == null) instance = new Singleton();
+            }
+        }
+        return instance;
+    }
+}
+
+// 策略接口
+interface DiscountStrategy {
+    double discount(double amount);
+}`} />
+
+> **观察重点**：Person 重写了 equals 和 hashCode，HashSet 才能正确识别"相等"对象；Integer 127 是缓存对象所以 `==` 为 true，128 则不是；volatile 让子线程能立即看到主线程的修改，否则可能死循环；AtomicInteger 用 CAS 保证 10000 次自增结果正确；策略模式用 Map 消除了 if-else。
+
+## 九、面试软技能
+
+技术答得好不够，**表达**也很重要。
+
+### 9.1 答题结构——STAR
+
+- **S**ituation——背景（"在我之前的项目里..."）
+- **T**ask——任务（"我负责..."）
+- **A**ction——行动（"我用 X 技术做了 Y，因为..."）
+- **R**esult——结果（"性能提升 N 倍，QPS 从 X 到 Y"）
+
+不要只讲技术，要讲**为什么这么选、解决了什么问题、效果如何**。
+
+### 9.2 不会答怎么办
+
+- **不要瞎编**——面试官一深挖就穿帮。
+- **承认不会，但要展示思考**——"这块没深入研究过，但我猜测是 XX 原因，因为 YY..."
+- **迁移知识**——"我没用过 Kafka，但 RabbitMQ 我熟，应该是类似机制..."
+
+### 9.3 反问环节
+
+面试结束会问"你有什么问题？"——这是加分机会：
+- "团队技术栈和未来方向？"
+- "我入职后会接手什么项目？"
+- "团队的 code review 流程？"
+- 不要问"工资多少、加不加班"（HR 环节再问）。
+
+## 十、本章小结
+
+| 模块 | 高频考点 |
+| --- | --- |
+| 基础 | equals/hashCode、String 不可变、Integer 缓存 |
+| 集合 | HashMap 原理、ConcurrentHashMap、ArrayList vs LinkedList |
+| 并发 | volatile、synchronized 升级、线程池配置、CAS/AQS |
+| JVM | 内存结构、GC 算法/收集器、类加载/双亲委派 |
+| Spring | IoC 三级缓存、AOP 动态代理、Boot 自动配置 |
+| 数据库 | 事务隔离、MVCC、索引 |
+| 设计模式 | 单例四写法、策略消除 if-else |
+
+## 记忆口诀
+
+- **equals/hashCode**——相等必须 hash 相等，重写 equals 必重 hashCode。
+- **HashMap**——数组+链表+红黑树，2 的幂，0.75 扩容。
+- **volatile 三性**——可见、有序、不原子。
+- **线程池四参数**——核心、最大、队列、拒绝。
+- **Spring AOP**——接口 JDK 代理，类 CGLIB 代理。
+- **类加载**——加载验证准备解析初始化，双亲委派保安全。
+
+## 结语——也是全系列的结语
+
+恭喜你走到了这里。80 章内容，从一杯咖啡的故事开始，到面试题精讲结束。我们走过了 Java 的语法、面向对象、集合、并发、IO、JVM、反射、网络、Spring 全家桶、微服务、Docker、设计模式、算法……
+
+这些知识不是孤岛——它们是一张网。HashMap 用到位运算，Stream 用泛型，Spring 用反射和动态代理，线程池用阻塞队列，JVM GC 用可达性分析……每一章都在为后面的章节铺垫。
+
+但知识终究是**死的**，让知识活起来的是**实践**。去做项目，去读源码，去踩坑，去填坑。这个系列给了你地图，路要自己走。
+
+祝你在这条 Java 之路上，越走越远，越走越深。
+
+让我们再端起那杯 Java——敬这三十年，敬每一个写代码的人，敬未来。

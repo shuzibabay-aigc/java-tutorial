@@ -1,0 +1,595 @@
+---
+title: "Hands-On: Todo CLI"
+chapter: 79
+stage: "Stage 15"
+stageName: "Comprehensive Project"
+order: 1
+description: "Build a complete Todo CLI tool from scratch in Java, applying collections, IO, Stream, date-time, the command pattern, and exception handling — master the full flow from design to implementation"
+pubDate: 2026-07-03
+tags: ["Java", "CLI", "项目实战", "命令模式", "Stream", "IO", "Todo"]
+---
+
+# Hands-On: Todo CLI
+
+You've learned so much — collections, IO, concurrency, reflection, Stream, date-time — but knowledge right now is a string of scattered pearls; you need a thread to string them into a necklace. That thread is **a real project**.
+
+In this stage we'll build a **Todo CLI (Command Line Interface)** — typing commands in the terminal to manage your todos, just like `git`. It's not large, but it has everything: command parsing, data persistence, priority sorting, tag filtering, and Stream-based statistics. We'll put every piece of core Java we've learned to work and see how they cooperate.
+
+## 1. Requirements Analysis
+
+The CLI we're building supports these commands:
+
+```
+todo add "买菜" -p high -t 生活 -t 周末     # 添加待办 (优先级 + 标签)
+todo list [--all] [--tag 生活] [--priority high]  # 列出待办
+todo done <id>                              # 标记完成
+todo delete <id>                            # 删除
+todo edit <id> -t "新内容"                  # 编辑
+todo clear --done                           # 清除已完成
+todo stats                                  # 统计
+```
+
+Feature requirements:
+- **Create, Read, Update, Delete** — basic CRUD.
+- **Priority** — high / medium / low, which affects ordering.
+- **Tags** — a todo can have multiple tags, and you can filter by tag.
+- **Persistence** — save to a file so nothing is lost on restart.
+- **Statistics** — use Stream to compute completion rate, group by tag, and more.
+
+## 2. Architecture Design
+
+A good project starts with design. We'll use two patterns to keep the code clean:
+
+### 2.1 Command Pattern
+
+Each command is an object with an `execute` method. The main program parses the input and dispatches to the matching command. Adding a new command doesn't require touching the main flow — that's the open-closed principle at work.
+
+```
+输入 "add 买菜 -p high"
+  ↓
+解析: command=add, args=[买菜], options={p: high}
+  ↓
+分发: CommandRegistry.get("add").execute(args, options)
+  ↓
+AddCommand 执行: 创建 Todo, 存入 Repository
+```
+
+### 2.2 Repository Pattern
+
+Data access is encapsulated in `TodoRepository` — the business logic doesn't care where data lives (memory / file / database); it just calls `repository.save(todo)`. Swap the storage and you only change the Repository; the business layer stays put.
+
+```
+Command → Repository → Storage (文件/内存)
+```
+
+### 2.3 Overall Class Diagram
+
+```
+Main (入口)
+ ├ CommandLineParser (解析命令行)
+ ├ CommandRegistry (命令注册表)
+ │   ├ AddCommand
+ │   ├ ListCommand
+ │   ├ DoneCommand
+ │   ├ DeleteCommand
+ │   ├ EditCommand
+ │   ├ ClearCommand
+ │   └ StatsCommand
+ └ TodoRepository (数据访问)
+     ├ Todo (实体)
+     └ TodoStorage (文件持久化)
+```
+
+## 3. Core Entity Design
+
+### 3.1 The Todo Entity
+
+```java
+public class Todo {
+    private Long id;
+    private String title;
+    private Priority priority;       // HIGH / MEDIUM / LOW
+    private Set<String> tags;
+    private boolean done;
+    private LocalDateTime createdAt;
+    private LocalDateTime completedAt;
+
+    // 枚举优先级, 自带排序权重
+    public enum Priority {
+        HIGH(1), MEDIUM(2), LOW(3);
+        public final int weight;
+        Priority(int w) { this.weight = w; }
+    }
+}
+```
+
+Using an enum for priority is safer than a string — the compiler catches typos for you. The `weight` field drives sorting.
+
+### 3.2 Command-Line Parsing
+
+A command line has three kinds of parts:
+- **Command name** — `add`/`list`/`done`...
+- **Positional arguments** — `"买菜"`, `＜id＞`.
+- **Options** — `-p high`, `-t 生活` (short options).
+
+```java
+class CommandLine {
+    String command;
+    List<String> args = new ArrayList<>();
+    Map<String, List<String>> options = new HashMap<>();
+}
+```
+
+## 4. Command Implementation Walkthrough
+
+### 4.1 AddCommand
+
+Parse the `title` and the options `-p` (priority) and `-t` (tag, can repeat), build a `Todo` object, and save it to the Repository.
+
+```java
+public void execute(CommandLine cli) {
+    String title = String.join(" ", cli.args);
+    Todo todo = new Todo(title);
+    if (cli.options.containsKey("p")) {
+        todo.setPriority(Priority.valueOf(cli.options.get("p").get(0).toUpperCase()));
+    }
+    if (cli.options.containsKey("t")) {
+        todo.setTags(new HashSet<>(cli.options.get("t")));
+    }
+    repository.save(todo);
+    System.out.println("已添加: " + todo);
+}
+```
+
+### 4.2 ListCommand
+
+Fetch all todos and sort by priority then creation time. Supports the filter options `--all` (include completed), `--tag`, and `--priority`.
+
+```java
+public void execute(CommandLine cli) {
+    Stream<Todo> stream = repository.findAll().stream();
+    if (!cli.options.containsKey("all")) {
+        stream = stream.filter(t -> !t.isDone());   // 默认只显示未完成
+    }
+    if (cli.options.containsKey("tag")) {
+        String tag = cli.options.get("tag").get(0);
+        stream = stream.filter(t -> t.getTags().contains(tag));
+    }
+    // 按优先级 + 创建时间排序
+    List<Todo> list = stream
+        .sorted(Comparator.comparingInt((Todo t) -> t.getPriority().weight)
+                          .thenComparing(Todo::getCreatedAt))
+        .collect(Collectors.toList());
+    // 打印表格
+    printTable(list);
+}
+```
+
+The Stream API shines here — filter, sort, and collect, all in one fluent chain.
+
+### 4.3 StatsCommand
+
+Use Stream to compute statistics — totals, completed count, completion rate, group by priority, group by tag.
+
+```java
+public void execute(CommandLine cli) {
+    List<Todo> all = repository.findAll();
+    long total = all.size();
+    long done = all.stream().filter(Todo::isDone).count();
+    double rate = total == 0 ? 0 : (double) done / total * 100;
+
+    System.out.printf("总数: %d, 完成: %d, 完成率: %.1f%%%n", total, done, rate);
+
+    // 按优先级分组统计
+    Map<Priority, Long> byPriority = all.stream()
+        .collect(Collectors.groupingBy(Todo::getPriority, Collectors.counting()));
+    System.out.println("按优先级: " + byPriority);
+
+    // 按标签分组 (flatMap 展开)
+    Map<String, Long> byTag = all.stream()
+        .flatMap(t -> t.getTags().stream())
+        .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()));
+    System.out.println("按标签: " + byTag);
+}
+```
+
+`flatMap` "flattens" each todo's tag set into a single stream — it's the Stream tool of choice for nested structures.
+
+## 5. Persistence Design
+
+The `TodoRepository` interface isn't bound to any specific storage. We'll implement a `FileTodoRepository` that saves to a file. But the Piston online environment restricts file paths, so we also implement an `InMemoryTodoRepository` to keep things runnable.
+
+```java
+interface TodoRepository {
+    Todo save(Todo todo);
+    Optional<Todo> findById(Long id);
+    List<Todo> findAll();
+    void deleteById(Long id);
+    void update(Todo todo);
+}
+
+// 文件实现: 每行一个 Todo, 格式 id|title|priority|done|tags|createdAt
+class FileTodoRepository implements TodoRepository {
+    private final Path file;
+    public FileTodoRepository(Path file) { this.file = file; }
+
+    public List<Todo> findAll() {
+        if (!Files.exists(file)) return new ArrayList<>();
+        return Files.lines(file)
+            .map(this::parseLine)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toList());
+    }
+    // save / delete / update 类似, 全量重写文件
+}
+```
+
+A real project would use a database (SQLite/H2); here a file-based approach is enough and simple.
+
+## 6. Complete Runnable Code
+
+Below is a complete, runnable Todo CLI. Because the Piston environment has no real terminal interaction, we simulate a sequence of commands to demonstrate every feature — it's as if the user input were hardcoded into the main method and the program "talks to itself."
+
+<CodeRunner code={`import java.util.*;
+import java.util.function.*;
+import java.util.stream.*;
+
+// ============ 实体 ============
+class Todo {
+    public enum Priority {
+        HIGH(1), MEDIUM(2), LOW(3);
+        public final int weight;
+        Priority(int w) { this.weight = w; }
+    }
+
+    private long id;
+    private String title;
+    private Priority priority = Priority.MEDIUM;
+    private Set<String> tags = new LinkedHashSet<>();
+    private boolean done = false;
+    private String createdAt;
+
+    public Todo(long id, String title) {
+        this.id = id;
+        this.title = title;
+        this.createdAt = java.time.LocalDateTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"));
+    }
+
+    // getters / setters
+    public long getId() { return id; }
+    public String getTitle() { return title; }
+    public void setTitle(String t) { this.title = t; }
+    public Priority getPriority() { return priority; }
+    public void setPriority(Priority p) { this.priority = p; }
+    public Set<String> getTags() { return tags; }
+    public void setTags(Set<String> t) { this.tags = t; }
+    public void addTag(String t) { tags.add(t); }
+    public boolean isDone() { return done; }
+    public void setDone(boolean d) { this.done = d; }
+    public String getCreatedAt() { return createdAt; }
+
+    public String toString() {
+        String status = done ? "[✓]" : "[ ]";
+        String tagStr = tags.isEmpty() ? "" : " #" + String.join(" #", tags);
+        return String.format("%s %d %-6s %s%s", status, id, "[" + priority + "]", title, tagStr);
+    }
+}
+
+// ============ 命令行解析 ============
+class CommandLine {
+    String command;
+    List<String> args = new ArrayList<>();
+    Map<String, List<String>> options = new LinkedHashMap<>();
+
+    static CommandLine parse(String input) {
+        CommandLine cli = new CommandLine();
+        // 简化: 按空格分, 但引号内的内容算一个参数
+        List<String> tokens = tokenize(input);
+        if (tokens.isEmpty()) return cli;
+        cli.command = tokens.get(0);
+        for (int i = 1; i < tokens.size(); i++) {
+            String t = tokens.get(i);
+            if (t.startsWith("--")) {
+                String key = t.substring(2);
+                cli.options.computeIfAbsent(key, k -> new ArrayList<>());
+                if (i + 1 < tokens.size() && !tokens.get(i + 1).startsWith("-")) {
+                    cli.options.get(key).add(tokens.get(++i));
+                }
+            } else if (t.startsWith("-")) {
+                String key = t.substring(1);
+                cli.options.computeIfAbsent(key, k -> new ArrayList<>());
+                if (i + 1 < tokens.size() && !tokens.get(i + 1).startsWith("-")) {
+                    cli.options.get(key).add(tokens.get(++i));
+                }
+            } else {
+                cli.args.add(t);
+            }
+        }
+        return cli;
+    }
+
+    private static List<String> tokenize(String input) {
+        List<String> tokens = new ArrayList<>();
+        StringBuilder sb = new StringBuilder();
+        boolean inQuote = false;
+        for (char c : input.toCharArray()) {
+            if (c == '"') { inQuote = !inQuote; continue; }
+            if (c == ' ' && !inQuote) {
+                if (sb.length() > 0) { tokens.add(sb.toString()); sb.setLength(0); }
+            } else { sb.append(c); }
+        }
+        if (sb.length() > 0) tokens.add(sb.toString());
+        return tokens;
+    }
+}
+
+// ============ 仓储 ============
+class TodoRepository {
+    private final List<Todo> todos = new ArrayList<>();
+    private long nextId = 1;
+
+    public Todo save(String title, Todo.Priority priority, Set<String> tags) {
+        Todo t = new Todo(nextId++, title);
+        t.setPriority(priority);
+        if (tags != null) t.setTags(new LinkedHashSet<>(tags));
+        todos.add(t);
+        return t;
+    }
+
+    public List<Todo> findAll() { return new ArrayList<>(todos); }
+
+    public Optional<Todo> findById(long id) {
+        return todos.stream().filter(t -> t.getId() == id).findFirst();
+    }
+
+    public boolean deleteById(long id) {
+        return todos.removeIf(t -> t.getId() == id);
+    }
+
+    public void clearDone() { todos.removeIf(Todo::isDone); }
+}
+
+// ============ 命令分发 ============
+class TodoApp {
+    private final TodoRepository repo = new TodoRepository();
+    private final Scanner sc = new Scanner(System.in);
+
+    public void run(String input) {
+        CommandLine cli = CommandLine.parse(input);
+        if (cli.command == null || cli.command.isEmpty()) return;
+        switch (cli.command) {
+            case "add": doAdd(cli); break;
+            case "list": case "ls": doList(cli); break;
+            case "done": doDone(cli); break;
+            case "delete": case "rm": doDelete(cli); break;
+            case "edit": doEdit(cli); break;
+            case "clear": doClear(cli); break;
+            case "stats": doStats(cli); break;
+            case "help": doHelp(); break;
+            default: System.out.println("未知命令: " + cli.command + " (输入 help 查看)");
+        }
+    }
+
+    private void doAdd(CommandLine cli) {
+        String title = String.join(" ", cli.args);
+        if (title.isEmpty()) { System.out.println("用法: add <内容> [-p high|medium|low] [-t 标签]"); return; }
+        Todo.Priority p = Todo.Priority.MEDIUM;
+        if (cli.options.containsKey("p")) {
+            try { p = Todo.Priority.valueOf(cli.options.get("p").get(0).toUpperCase()); }
+            catch (Exception e) { System.out.println("无效优先级, 用 high/medium/low"); return; }
+        }
+        Set<String> tags = new LinkedHashSet<>(cli.options.getOrDefault("t", Collections.emptyList()));
+        Todo t = repo.save(title, p, tags);
+        System.out.println("✓ 已添加 #" + t.getId() + ": " + t.getTitle());
+    }
+
+    private void doList(CommandLine cli) {
+        Stream<Todo> stream = repo.findAll().stream();
+        boolean showAll = cli.options.containsKey("all");
+        if (!showAll) stream = stream.filter(t -> !t.isDone());
+        if (cli.options.containsKey("tag")) {
+            String tag = cli.options.get("tag").get(0);
+            stream = stream.filter(t -> t.getTags().contains(tag));
+        }
+        if (cli.options.containsKey("p") || cli.options.containsKey("priority")) {
+            String pStr = cli.options.getOrDefault("p", cli.options.get("priority")).get(0);
+            Todo.Priority p = Todo.Priority.valueOf(pStr.toUpperCase());
+            stream = stream.filter(t -> t.getPriority() == p);
+        }
+        List<Todo> list = stream
+            .sorted(Comparator.comparingInt((Todo t) -> t.getPriority().weight)
+                              .thenComparing(Todo::getId))
+            .collect(Collectors.toList());
+        if (list.isEmpty()) { System.out.println("(没有待办事项)"); return; }
+        System.out.println("─── 待办列表 ───");
+        list.forEach(System.out::println);
+        System.out.println("─── 共 " + list.size() + " 项 ───");
+    }
+
+    private void doDone(CommandLine cli) {
+        if (cli.args.isEmpty()) { System.out.println("用法: done <id>"); return; }
+        long id = Long.parseLong(cli.args.get(0));
+        Optional<Todo> opt = repo.findById(id);
+        if (opt.isPresent()) {
+            opt.get().setDone(true);
+            System.out.println("✓ 完成: " + opt.get().getTitle());
+        } else { System.out.println("未找到 #" + id); }
+    }
+
+    private void doDelete(CommandLine cli) {
+        if (cli.args.isEmpty()) { System.out.println("用法: delete <id>"); return; }
+        long id = Long.parseLong(cli.args.get(0));
+        if (repo.deleteById(id)) System.out.println("✓ 删除 #" + id);
+        else System.out.println("未找到 #" + id);
+    }
+
+    private void doEdit(CommandLine cli) {
+        if (cli.args.isEmpty()) { System.out.println("用法: edit <id> -t 新内容"); return; }
+        long id = Long.parseLong(cli.args.get(0));
+        Optional<Todo> opt = repo.findById(id);
+        if (!opt.isPresent()) { System.out.println("未找到 #" + id); return; }
+        Todo t = opt.get();
+        if (cli.options.containsKey("t")) t.setTitle(cli.options.get("t").get(0));
+        if (cli.options.containsKey("p")) {
+            t.setPriority(Todo.Priority.valueOf(cli.options.get("p").get(0).toUpperCase()));
+        }
+        System.out.println("✓ 已修改: " + t);
+    }
+
+    private void doClear(CommandLine cli) {
+        if (cli.options.containsKey("done")) {
+            int before = repo.findAll().size();
+            repo.clearDone();
+            int after = repo.findAll().size();
+            System.out.println("✓ 清除 " + (before - after) + " 项已完成");
+        } else { System.out.println("用法: clear --done"); }
+    }
+
+    private void doStats(CommandLine cli) {
+        List<Todo> all = repo.findAll();
+        if (all.isEmpty()) { System.out.println("暂无数据"); return; }
+        long total = all.size();
+        long done = all.stream().filter(Todo::isDone).count();
+        double rate = (double) done / total * 100;
+        System.out.println("═══ 统计 ═══");
+        System.out.printf("总数: %d | 完成: %d | 待办: %d | 完成率: %.1f%%%n",
+            total, done, total - done, rate);
+        // 按优先级
+        Map<Todo.Priority, Long> byP = all.stream()
+            .collect(Collectors.groupingBy(Todo::getPriority,
+                () -> new EnumMap<>(Todo.Priority.class), Collectors.counting()));
+        System.out.println("按优先级: " + byP);
+        // 按标签 (flatMap)
+        Map<String, Long> byTag = all.stream()
+            .flatMap(t -> t.getTags().stream())
+            .collect(Collectors.groupingBy(Function.identity(),
+                TreeMap::new, Collectors.counting()));
+        System.out.println("按标签: " + byTag);
+        // 优先级完成情况
+        Map<Todo.Priority, Double> completion = all.stream()
+            .collect(Collectors.groupingBy(Todo::getPriority,
+                Collectors.averagingDouble(t -> t.isDone() ? 100 : 0)));
+        System.out.println("各优先级完成率: " + completion);
+    }
+
+    private void doHelp() {
+        System.out.println("═══ Todo CLI 命令 ═══");
+        System.out.println("  add <内容> [-p high|medium|low] [-t 标签]  添加待办");
+        System.out.println("  list [--all] [--tag 标签] [--p 优先级]     列出待办");
+        System.out.println("  done <id>                                  标记完成");
+        System.out.println("  delete <id>                                删除");
+        System.out.println("  edit <id> -t 新内容 [-p 优先级]            编辑");
+        System.out.println("  clear --done                               清除已完成");
+        System.out.println("  stats                                      统计");
+        System.out.println("  help                                       帮助");
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("╔══════════════════════════════════╗");
+        System.out.println("║     Todo CLI - 待办事项管理      ║");
+        System.out.println("╚══════════════════════════════════╝\\n");
+
+        TodoApp app = new TodoApp();
+
+        // 模拟用户输入 (Piston 无交互, 用硬编码演示)
+        String[] commands = {
+            "help",
+            "add 写技术博客 -p high -t 工作 -t 写作",
+            "add 买菜 -p high -t 生活",
+            "add 看电影 -p low -t 娱乐 -t 周末",
+            "add 读《Java 编程思想》 -p medium -t 学习",
+            "add 整理书架 -p low -t 生活",
+            "add 准备周会 PPT -p high -t 工作",
+            "list",
+            "list --all --tag 生活",
+            "done 2",
+            "done 6",
+            "edit 3 -t 看电影放松 -p medium",
+            "list --all",
+            "stats",
+            "clear --done",
+            "list --all",
+            "stats"
+        };
+
+        for (String cmd : commands) {
+            System.out.println("\\n$ todo " + cmd);
+            try {
+                app.run(cmd);
+            } catch (Exception e) {
+                System.out.println("错误: " + e.getMessage());
+            }
+        }
+
+        System.out.println("\\n═══ 演示结束 ═══");
+    }
+}`} />
+
+> **Key observations**: `CommandLine.parse` handles quotes and options; `doList` chains Stream filter + sort; `doStats` uses `flatMap` to unfold tags and `groupingBy` for grouped counts; `EnumMap` is used for an efficient enum-keyed map; command dispatch is a `switch`, so adding a new command only touches one place.
+
+## 7. Knowledge Recap
+
+This project puts a lot of what you've learned to work:
+
+| Concept | Where it's used |
+| --- | --- |
+| Collections (List/Set/Map) | Todo storage, tag sets, command arguments |
+| Stream API | Filtering, sorting, grouped statistics |
+| Enums | Priority definition |
+| Exceptions | Command parsing, ID lookup |
+| Date-Time | Recording creation time |
+| Generics | Optional\＜Todo\＞ |
+| Optional | Return value of findById |
+| Repository Pattern | TodoRepository isolates storage |
+| Command Pattern | One method per command |
+| Lambda | Stream's filter/map/collect |
+| Method References | `Todo::isDone`, `System.out::println` |
+| Comparable/Comparator | Sort by priority + ID |
+
+## 8. Extension Ideas
+
+This CLI can grow in many directions:
+
+1. **File persistence** — implement `FileTodoRepository`, one Todo per line, read with `Files.lines`.
+2. **JSON storage** — serialize to JSON with Jackson/Gson for better readability.
+3. **Multi-user** — add a `User` entity, with an independent Todo list per user.
+4. **Reminders** — add a `dueDate` field and use a `ScheduledExecutorService` to check for overdue items.
+5. **Web UI** — swap the Repository for a database, add a Spring Boot Controller layer, and turn it into a web app.
+6. **Import/Export** — support exporting to CSV/Markdown.
+7. **Undo/Redo** — implement `undo`/`redo` with the command pattern plus a history stack.
+8. **Easter eggs** — use ANSI color codes to colorize terminal output (e.g., high-priority in red).
+
+```java
+// ANSI 颜色示例
+String RED = "\\u001B[31m";
+String RESET = "\\u001B[0m";
+System.out.println(RED + "[高优先级]" + RESET + " 紧急任务");
+```
+
+## 9. Chapter Summary
+
+| Stage | Key Points |
+| --- | --- |
+| Requirements analysis | Define feature boundaries and user scenarios |
+| Architecture design | Command pattern for dispatch, repository pattern to isolate storage |
+| Entity design | Todo + Priority enum + tag set |
+| Command parsing | Quote handling, option extraction |
+| Stream in action | filter to filter, sorted to sort, groupingBy to group |
+| Extensibility | Add a command in one place; swap storage in the Repository |
+
+## Mnemonic
+
+- **Project in three steps** — requirements set the boundary, design sets the skeleton, implementation fills in the flesh.
+- **Command pattern** — one handler per command, dispatch via switch.
+- **Repository pattern** — business calls the interface, storage is swappable.
+- **Stream's three moves** — filter to pick, sorted to order, collect to gather.
+- **Priority sorting** — enum carries a weight, Comparator chains the compare.
+
+## Closing
+
+This Todo CLI isn't big — a little over three hundred lines — but it strings Java's core knowledge into a single thread. Collections are the skeleton, Stream the muscle, exceptions the immune system, enums the joints. After a project like this, you'll find your understanding of Java shifts from "knowing these APIs" to "using these APIs to solve problems."
+
+The next stage is the final chapter — **Java Interview Questions In Depth**. We'll distill the knowledge from every previous chapter into high-frequency interview questions, each with a clear bar for "what counts as a passing answer." Carrying the experience from this project into those questions, you'll find many of them are no longer rote memorization — they're things you've written with your own hands and seen with your own eyes.

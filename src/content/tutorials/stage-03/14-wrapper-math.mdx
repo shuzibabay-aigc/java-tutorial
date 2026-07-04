@@ -1,0 +1,444 @@
+---
+title: "包装类与数学工具"
+chapter: 14
+stage: "第三阶段"
+stageName: "Java 核心类库"
+order: 2
+description: "掌握 8 种包装类与自动装箱拆箱、Integer 缓存池陷阱、Math 工具类，以及 BigInteger 与 BigDecimal 的精确计算"
+pubDate: 2026-07-03
+tags: ["Java", "包装类", "Integer", "Math", "BigDecimal", "BigInteger"]
+---
+
+# 包装类与数学工具
+
+Java 是一门"两栖"语言——它既有 `int`、`double` 这样的**基本类型**（Primitive Type），又有 `Integer`、`Double` 这样的**引用类型**（Reference Type）。基本类型轻快高效，却像个"裸奔的数字"，无法参与面向对象的世界：你不能把 `int` 塞进 `List` 里，不能对 `double` 调用方法，更不能让 `boolean` 当作 `Object` 传递。
+
+**包装类**（Wrapper Class）就是基本类型的"保险箱"——它把裸露的数字封装成对象，让基本类型也能享受面向对象的待遇。而当我们需要更精密的数学计算时，`Math` 类提供基础工具，`BigInteger` 与 `BigDecimal` 则提供"无限精度"的兜底方案。
+
+本章，我们打开这组保险箱，看清数字在 Java 中如何被安全地搬运与计算。
+
+## 一、八种包装类
+
+### 1.1 基本类型与包装类的对应
+
+Java 有 8 种基本类型，对应 8 种包装类，全部位于 `java.lang` 包：
+
+| 基本类型 | 包装类 | 父类 |
+| --- | --- | --- |
+| `byte` | `Byte` | Number |
+| `short` | `Short` | Number |
+| `int` | `Integer` | Number |
+| `long` | `Long` | Number |
+| `float` | `Float` | Number |
+| `double` | `Double` | Number |
+| `char` | `Character` | Object |
+| `boolean` | `Boolean` | Object |
+
+注意两个"特例"：`int` 的包装类叫 `Integer`（不是 `Int`），`char` 的包装类叫 `Character`（不是 `Char`）。前六个数值类型都继承自 `Number` 类，而 `Character` 和 `Boolean` 直接继承 `Object`。
+
+### 1.2 为什么需要包装类
+
+- **泛型与集合**：Java 泛型只能接受对象类型，`List<int>` 不合法，必须写 `List<Integer>`。
+- **API 设计**：许多框架（如反射、序列化）需要 `Object`，基本类型无法直接传递。
+- **null 表示"缺失"**：基本类型有默认值（`int` 默认 0），无法表达"没有值"。包装类可以是 `null`，这在数据库映射中至关重要——`null` 表示"未知"，`0` 表示"确实是零"。
+- **实用方法**：包装类自带 `parseInt`、`toString`、`compareTo` 等方法。
+
+## 二、自动装箱与拆箱
+
+### 2.1 装箱与拆箱
+
+**装箱**（Boxing）是把基本类型转成包装类；**拆箱**（Unboxing）是反过来。
+
+```java
+// 手动装箱（Java 5 之前的写法）
+Integer a = Integer.valueOf(42);
+// 手动拆箱
+int b = a.intValue();
+```
+
+从 Java 5 起，编译器提供了**自动装箱/拆箱**（Autoboxing/Unboxing）的语法糖——你直接写，编译器替你插入 `valueOf` 和 `xxxValue`：
+
+```java
+Integer a = 42;      // 自动装箱 → Integer.valueOf(42)
+int b = a;           // 自动拆箱 → a.intValue()
+
+// 在集合中尤其常见
+List<Integer> nums = new ArrayList<>();
+nums.add(1);         // 自动装箱
+nums.add(2);
+int first = nums.get(0);   // 自动拆箱
+```
+
+### 2.2 语法糖的"陷阱"
+
+自动装箱看起来美好，但它是编译期魔法，运行时该创建对象还是创建对象。看这个看似无害的例子：
+
+```java
+Integer sum = 0;
+for (int i = 0; i < 1000; i++) {
+    sum += i;   // 等价于 sum = Integer.valueOf(sum.intValue() + i)
+}
+```
+
+每次 `sum += i` 都会**拆箱再装箱**——循环 1000 次就创建了约 1000 个 Integer 对象（部分命中缓存，下文详述）。在性能敏感的代码里，应改用 `int` 累加，最后再装箱。
+
+更要命的是**空指针**：
+
+```java
+Integer x = null;
+int y = x;   // NullPointerException！自动拆箱调用了 null.intValue()
+```
+
+包装类为 `null` 时拆箱，就会炸。这是 Java 程序员常踩的坑。
+
+## 三、Integer 缓存池陷阱
+
+### 3.1 一个反直觉的现象
+
+```java
+Integer a = 127;
+Integer b = 127;
+System.out.println(a == b);   // true
+
+Integer c = 128;
+Integer d = 128;
+System.out.println(c == d);   // false！
+```
+
+同样的代码，127 相等，128 不等——这不是 bug，而是 **Integer 缓存池**（Integer Cache）的"功劳"。
+
+### 3.2 缓存池的真相
+
+`Integer.valueOf(int)` 在数值介于 **-128 到 127** 时，返回的是缓存数组中的**同一个对象**：
+
+```java
+// Integer.valueOf 的简化逻辑
+public static Integer valueOf(int i) {
+    if (i >= IntegerCache.low && i <= IntegerCache.high)
+        return IntegerCache.cache[i + (-IntegerCache.low)];
+    return new Integer(i);
+}
+```
+
+所以 `Integer a = 127` 触发自动装箱，调用 `valueOf(127)`，返回缓存对象；而 `128` 超出范围，`new` 了一个新对象，`==` 自然不相等。
+
+> 📍 缓存范围可通过 JVM 参数 `-XX:AutoBoxCacheMax=1000` 调整上限（下限固定 -128）。但实际开发中很少有人改。
+>
+> 除了 Integer，`Byte`、`Short`、`Long` 也有缓存（Byte 全缓存 -128~127，Short/Long 缓存 -128~127）；`Character` 缓存 0~127；`Boolean` 缓存 `TRUE` 和 `FALSE` 两个常量。
+
+### 3.3 正确的比较方式
+
+**永远用 `equals` 比较包装类的值**，不要用 `==`：
+
+```java
+Integer a = 128;
+Integer b = 128;
+System.out.println(a.equals(b));   // true，永远可靠
+```
+
+`==` 比较的是引用，`equals` 比较的是值。这是写 Java 时的铁律。
+
+## 四、包装类常用方法
+
+包装类提供了基本类型与字符串之间的转换桥梁。
+
+### 4.1 字符串与数值互转
+
+```java
+// 字符串 → 数值
+int i = Integer.parseInt("42");
+double d = Double.parseDouble("3.14");
+boolean flag = Boolean.parseBoolean("true");
+
+// 字符串 → 包装类
+Integer obj = Integer.valueOf("42");
+
+// 数值 → 字符串
+String s1 = Integer.toString(42);
+String s2 = String.valueOf(42);     // 也可以
+String s3 = 42 + "";                // 最简陋但常用
+```
+
+### 4.2 进制转换
+
+`Integer` 提供了进制转换的便捷方法：
+
+```java
+System.out.println(Integer.toBinaryString(255));   // 11111111
+System.out.println(Integer.toOctalString(255));    // 377
+System.out.println(Integer.toHexString(255));      // ff
+
+// 从指定进制解析
+System.out.println(Integer.parseInt("ff", 16));    // 255
+System.out.println(Integer.parseInt("1010", 2));   // 10
+```
+
+### 4.3 Comparable 与 compareTo
+
+所有数值包装类都实现了 `Comparable`，可以用 `compareTo` 比较：
+
+```java
+Integer a = 10;
+Integer b = 20;
+System.out.println(a.compareTo(b));   // 负数（a < b）
+System.out.println(b.compareTo(a));   // 正数（b > a）
+System.out.println(a.compareTo(10));  // 0（相等）
+```
+
+`compareTo` 返回值：负数表示"小于"，0 表示"等于"，正数表示"大于"。
+
+## 五、Math 类
+
+`java.lang.Math` 是一个工具类（构造方法 private，全是 static 方法），提供基础数学运算。
+
+### 5.1 常用方法一览
+
+| 方法 | 作用 | 示例 |
+| --- | --- | --- |
+| `abs(x)` | 绝对值 | `Math.abs(-5)` → 5 |
+| `max(a, b)` | 最大值 | `Math.max(3, 7)` → 7 |
+| `min(a, b)` | 最小值 | `Math.min(3, 7)` → 3 |
+| `round(x)` | 四舍五入 | `Math.round(2.5)` → 3 |
+| `ceil(x)` | 向上取整 | `Math.ceil(2.1)` → 3.0 |
+| `floor(x)` | 向下取整 | `Math.floor(2.9)` → 2.0 |
+| `pow(a, b)` | 幂运算 | `Math.pow(2, 10)` → 1024.0 |
+| `sqrt(x)` | 平方根 | `Math.sqrt(16)` → 4.0 |
+| `random()` | [0,1) 随机数 | `Math.random()` → 0.37... |
+| `signum(x)` | 符号 | `Math.signum(-3)` → -1.0 |
+
+### 5.2 取整的区别
+
+`round`、`ceil`、`floor` 容易混淆：
+
+```java
+// round：四舍五入，返回 long/int（向正无穷方向取整）
+Math.round(2.4);    // 2
+Math.round(2.5);    // 3
+Math.round(-2.5);   // -2（注意！向正无穷，-2 > -2.5）
+Math.round(-2.6);   // -3
+
+// ceil：天花板，向上取整，返回 double
+Math.ceil(2.1);     // 3.0
+Math.ceil(-2.1);    // -2.0
+
+// floor：地板，向下取整，返回 double
+Math.floor(2.9);    // 2.0
+Math.floor(-2.1);   // -3.0
+```
+
+> ⚠️ `Math.round(-2.5)` 的结果是 `-2` 而非 `-3`——因为 round 是"四舍六入五向正无穷"，遇到 .5 时朝正方向取整。这个细节在面试和金融计算中常被考到。
+
+### 5.3 常量
+
+```java
+System.out.println(Math.PI);    // 3.141592653589793
+System.out.println(Math.E);     // 2.718281828459045
+```
+
+## 六、BigInteger 与 BigDecimal
+
+### 6.1 double 的精度灾难
+
+先看一个经典的"灵异事件"：
+
+```java
+System.out.println(0.1 + 0.2);   // 0.30000000000000004
+```
+
+`0.1 + 0.2` 居然不等于 `0.3`！这是因为 `double` 采用 IEEE 754 浮点数表示，`0.1` 在二进制中是无限循环小数，无法精确存储。这种误差在科学计算中或许无伤大雅，但在**金融计算**中是致命的——少一分钱都是事故。
+
+### 6.2 BigInteger：任意精度整数
+
+`BigInteger`（`java.math`）可以表示任意大小的整数，没有 `long` 的 64 位上限：
+
+```java
+import java.math.BigInteger;
+
+BigInteger big = new BigInteger("999999999999999999999999999999");
+BigInteger result = big.multiply(BigInteger.TEN);
+System.out.println(result);
+// 9999999999999999999999999999990
+```
+
+`BigInteger` 是不可变对象，运算返回新对象。它支持四则运算、模运算、素数判断、位运算等：
+
+```java
+BigInteger a = new BigInteger("123456789");
+BigInteger b = new BigInteger("987654321");
+
+a.add(b);          // 加
+a.subtract(b);     // 减
+a.multiply(b);     // 乘
+a.divide(b);       // 除
+a.mod(b);          // 取模
+a.gcd(b);          // 最大公约数
+a.isProbablePrime(100);   // 可能是素数？
+```
+
+> 注意：`BigInteger` 不能用 `+`、`-`、`*` 运算符——Java 不支持运算符重载，必须用方法调用。
+
+### 6.3 BigDecimal：任意精度小数
+
+`BigDecimal` 是金融计算的"守护神"。它用**未缩放的整数 + 标度（scale）**来表示小数，避免了浮点数的精度问题。
+
+**关键原则：务必用 String 构造！**
+
+```java
+// ❌ 错误：用 double 构造，精度问题依旧
+BigDecimal bad = new BigDecimal(0.1);
+System.out.println(bad);
+// 0.1000000000000000055511151231257827021181583404541015625
+
+// ✅ 正确：用 String 构造
+BigDecimal good = new BigDecimal("0.1");
+System.out.println(good);   // 0.1
+```
+
+`new BigDecimal(double)` 会把 double 的**不精确值**原封不动地转成 BigDecimal——精度问题被"如实记录"了，而不是被修正。所以必须传字符串，或者用 `BigDecimal.valueOf(double)`（它内部先调 `Double.toString`）。
+
+### 6.4 四则运算与舍入
+
+```java
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+
+BigDecimal a = new BigDecimal("10");
+BigDecimal b = new BigDecimal("3");
+
+a.add(b);                          // 13
+a.subtract(b);                     // 7
+a.multiply(b);                     // 30
+a.divide(b, 2, RoundingMode.HALF_UP);   // 3.33（保留2位，四舍五入）
+```
+
+**除法必须指定舍入模式**，否则遇到无限循环小数（如 10/3）会抛 `ArithmeticException`。
+
+### 6.5 setScale 与 RoundingMode
+
+`setScale` 用于设置小数位数：
+
+```java
+BigDecimal price = new BigDecimal("19.999");
+// 保留 2 位小数，四舍五入
+BigDecimal rounded = price.setScale(2, RoundingMode.HALF_UP);
+System.out.println(rounded);   // 20.00
+```
+
+常用 `RoundingMode`：
+
+| 模式 | 含义 |
+| --- | --- |
+| `HALF_UP` | 四舍五入（最常用） |
+| `HALF_EVEN` | 银行家舍入（五取偶，金融标准） |
+| `UP` | 远离零舍入 |
+| `DOWN` | 向零舍入（截断） |
+| `CEILING` | 向正无穷舍入 |
+| `FLOOR` | 向负无穷舍入 |
+
+> 💡 **银行家舍入**（`HALF_EVEN`）：当末位是 5 时，向最近的**偶数**靠拢。`2.5` → 2，`3.5` → 4。统计学上它比"四舍五入"更公平——大量数据求和时不会系统性偏大。
+
+### 6.6 比较的坑
+
+`BigDecimal` 的 `equals` 会比较**标度**（小数位数），而 `compareTo` 只比较数值大小：
+
+```java
+BigDecimal x = new BigDecimal("1.0");
+BigDecimal y = new BigDecimal("1.00");
+
+System.out.println(x.equals(y));     // false！标度不同
+System.out.println(x.compareTo(y));  // 0（数值相等）
+```
+
+**比较 BigDecimal 永远用 `compareTo`**，这是又一个铁律。
+
+## 七、实战：金融计算演示
+
+下面用一个完整的例子演示 `double` 的精度问题，以及 `BigDecimal` 如何拯救它。
+
+<CodeRunner code={`import java.math.BigDecimal;
+import java.math.RoundingMode;
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== 场景：购物车累加 0.1 元商品 10 次 ===\\n");
+
+        // ❌ 用 double 累加：精度丢失
+        double doubleTotal = 0.0;
+        for (int i = 0; i < 10; i++) {
+            doubleTotal += 0.1;
+        }
+        System.out.println("double 累加结果: " + doubleTotal);
+        System.out.println("等于 1.0 吗? " + (doubleTotal == 1.0));
+        // 输出 0.9999999999999999，不等于 1.0！
+
+        System.out.println();
+
+        // ✅ 用 BigDecimal 累加：精确
+        BigDecimal bdTotal = BigDecimal.ZERO;
+        BigDecimal item = new BigDecimal("0.1");
+        for (int i = 0; i < 10; i++) {
+            bdTotal = bdTotal.add(item);
+        }
+        System.out.println("BigDecimal 累加结果: " + bdTotal);
+        System.out.println("compareTo 1.0 结果: "
+            + bdTotal.compareTo(new BigDecimal("1.0")));   // 0 表示相等
+
+        System.out.println();
+        System.out.println("=== 场景：商品折扣计算 ===\\n");
+
+        BigDecimal price = new BigDecimal("199.99");
+        BigDecimal discount = new BigDecimal("0.85");   // 八五折
+        BigDecimal finalPrice = price.multiply(discount)
+                                     .setScale(2, RoundingMode.HALF_UP);
+        System.out.println("原价: " + price);
+        System.out.println("折扣: " + discount);
+        System.out.println("折后价: " + finalPrice);
+
+        System.out.println();
+        System.out.println("=== 场景：三人平分 100 元 ===\\n");
+
+        BigDecimal total = new BigDecimal("100");
+        BigDecimal people = new BigDecimal("3");
+        BigDecimal each = total.divide(people, 2, RoundingMode.HALF_UP);
+        System.out.println("每人分得: " + each);
+        System.out.println("三人合计: " + each.multiply(people));
+        System.out.println("差额(分摊): " + total.subtract(each.multiply(people)));
+
+        System.out.println();
+        System.out.println("=== 场景：Integer 缓存池陷阱 ===\\n");
+
+        Integer a = 127, b = 127;
+        Integer c = 128, d = 128;
+        System.out.println("127 == 127: " + (a == b));        // true（缓存）
+        System.out.println("128 == 128: " + (c == d));        // false（超出缓存）
+        System.out.println("128 equals 128: " + c.equals(d)); // true（值相等）
+
+        System.out.println();
+        System.out.println("=== 场景：Math 取整对比 ===\\n");
+        System.out.println("round(2.5)  = " + Math.round(2.5));    // 3
+        System.out.println("round(-2.5) = " + Math.round(-2.5));   // -2
+        System.out.println("ceil(2.1)   = " + Math.ceil(2.1));     // 3.0
+        System.out.println("floor(2.9)  = " + Math.floor(2.9));    // 2.0
+    }
+}`} />
+
+## 八、本章小结
+
+| 主题 | 要点 |
+| --- | --- |
+| 8 种包装类 | Byte/Short/Integer/Long/Float/Double/Character/Boolean |
+| 装箱/拆箱 | 编译器语法糖，自动插入 valueOf / xxxValue |
+| 缓存池 | Integer 缓存 -128~127，Byte/Short/Long/Character 也有 |
+| 比较铁律 | 包装类用 equals，BigDecimal 用 compareTo |
+| Math | abs/max/min/round/ceil/floor/pow/sqrt/random |
+| round 细节 | 遇 .5 向正无穷取整，round(-2.5) = -2 |
+| BigInteger | 任意精度整数，不可变，用方法运算 |
+| BigDecimal | 任意精度小数，务必用 String 构造 |
+| 舍入模式 | HALF_UP 四舍五入，HALF_EVEN 银行家舍入 |
+| 除法 | BigDecimal 除法必须指定舍入模式，否则可能抛异常 |
+
+## 结语
+
+数字是编程的基石，而 Java 用"基本类型 + 包装类"的双轨设计，兼顾了效率与面向对象的优雅。记住几个关键点：**自动装箱拆箱不是免费的**（注意性能与 NPE）、**包装类比较用 equals**、**金融计算用 BigDecimal 且用 String 构造**——这些细节，往往是代码从"能跑"到"靠谱"的分水岭。
+
+下一章，我们将面对 Java 中另一个曾让无数程序员头疼的领域——**日期时间**。你会看到旧 API 的混乱，也会领略 `java.time` 新 API 的优雅。

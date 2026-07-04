@@ -1,0 +1,507 @@
+---
+title: "Message Queues"
+chapter: 76
+stage: "Stage 14"
+stageName: "Advanced Topics and Distributed Systems"
+order: 4
+description: "Master the three roles of a message queue (async/decoupling/peak shaving), RabbitMQ's Exchange model, Kafka's partitioned-log model, message reliability guarantees (publisher confirms/consumer ACK/dead-letter queue), and Spring Boot integration"
+pubDate: 2026-07-03
+tags: ["Java", "Message Queue", "RabbitMQ", "Kafka", "AMQP", "Peak Shaving", "Dead Letter Queue"]
+---
+
+# Message Queues
+
+Picture a packed bubble-tea shop. If every customer orders, the staff immediately makes the drink, and immediately calls the number when it's done — customers crowd the counter and staff scramble. A smart owner puts a **number-tag rack** at the front: customers order, take a number, and step aside; staff make drinks in order and call numbers — everyone runs at their own pace, nobody blocks anyone.
+
+That "number-tag rack" is a **message queue (MQ)**. It's a middleman — producers drop messages in and leave; consumers pick them up at their own pace. Simple as can be, yet it solves three headaches that plague systems: async, decoupling, and peak shaving.
+
+This chapter looks at why message queues matter so much, what the two mainstream options — RabbitMQ and Kafka — look like, and how Java interacts with them.
+
+## I. Why You Need a Message Queue
+
+### 1.1 The Three Roles
+
+**Async** — When a user registers, you need to send a welcome email, an SMS, and grant bonus points. If you call all of these synchronously, the user waits for everything to finish before getting a response. With a message queue, the main flow just drops a "registration successful" message into the queue and returns; the email/SMS/points services each consume at their own pace — the user feels it's blazing fast.
+
+**Decoupling** — After an order is placed, the order service has to notify inventory, shipping, and points services. If it calls them directly, the order service depends on three services, and if any one is down, the order fails. With a message queue, the order just publishes a message — who consumes it, how, and when is none of the order's business. The order is **decoupled** from its downstream services.
+
+**Peak shaving** — A flash sale generates 100,000 requests in an instant, more than the database can bear. Requests first go into the message queue, and consumers process them at a rate the database can handle — the peak gets "shaved off" by the queue.
+
+### 1.2 The Cost
+
+A message queue is no free lunch:
+- **Higher complexity** — one more component, one more failure mode.
+- **Added latency** — async means nothing is immediately visible; the user must wait for the consumer to finish.
+- **Consistency issues** — messages can be lost, duplicated, or arrive out of order, all of which need dedicated handling.
+
+## II. RabbitMQ: The Nimble Postman
+
+RabbitMQ is a message broker written in Erlang, based on the **AMQP** (Advanced Message Queuing Protocol). Its model is like a postal system — the sender doesn't know who the recipient is; they just drop a letter in a mailbox (Exchange), and the post office routes it by rules (Binding) into mailboxes (Queue), from which recipients pick up their mail.
+
+### 2.1 Core Concepts
+
+```
+Producer → Exchange ──(binding)──→ Queue → Consumer
+```
+
+- **Producer** — the one sending messages.
+- **Exchange** — the "sorting center" for messages, routing them to one or more queues by rules.
+- **Queue** — where messages are stored, FIFO.
+- **Binding** — the association rule between an Exchange and a Queue.
+- **Consumer** — the one picking up messages.
+
+### 2.2 The Four Exchange Types
+
+| Type | Routing Rule | Scenario |
+| --- | --- | --- |
+| **Direct** | Exact match on routing key | Point-to-point, directed |
+| **Fanout** | Broadcast to all bound queues | Mass distribution |
+| **Topic** | Pattern match on routing key (wildcards) | Subscribe to a subset |
+| **Headers** | Match on headers (no routing key) | Complex conditions |
+
+**Direct** example — the routing key is `order.create`; only queues bound with `order.create` receive it.
+
+**Fanout** example — broadcasting logs; every log queue receives the same message.
+
+**Topic** example — the routing key is `order.create.paid`; the binding pattern `order.create.*` matches, and so does `order.#` (`*` matches one segment, `#` matches multiple segments).
+
+### 2.3 Java Client Example
+
+```java
+// Producer
+ConnectionFactory factory = new ConnectionFactory();
+factory.setHost("localhost");
+try (Connection conn = factory.newConnection();
+     Channel channel = conn.createChannel()) {
+    // Declare the queue
+    channel.queueDeclare("hello", false, false, false, null);
+    // Publish a message
+    String message = "Hello RabbitMQ!";
+    channel.basicPublish("", "hello", null, message.getBytes());
+}
+
+// Consumer
+ConnectionFactory factory = new ConnectionFactory();
+factory.setHost("localhost");
+Connection conn = factory.newConnection();
+Channel channel = conn.createChannel();
+channel.queueDeclare("hello", false, false, false, null);
+DeliverCallback callback = (consumerTag, delivery) -> {
+    String message = new String(delivery.getBody(), "UTF-8");
+    System.out.println("收到: " + message);
+};
+channel.basicConsume("hello", true, callback, consumerTag -> {});
+```
+
+### 2.4 Spring Boot Integration
+
+Spring Boot wraps RabbitMQ into something remarkably concise — consume with annotations, send with `RabbitTemplate`:
+
+```java
+// Producer
+@Service
+public class OrderService {
+    @Autowired
+    private RabbitTemplate rabbit;
+
+    public void createOrder(Order order) {
+        rabbit.convertAndSend("order.exchange", "order.create", order);
+    }
+}
+
+// Consumer
+@Component
+public class OrderConsumer {
+    @RabbitListener(bindings = @QueueBinding(
+        value = @Queue("order.queue"),
+        exchange = @Exchange("order.exchange"),
+        key = "order.create"
+    ))
+    public void handle(Order order) {
+        System.out.println("处理订单: " + order.getId());
+    }
+}
+```
+
+## III. Kafka: The Log Giant
+
+Kafka was open-sourced by LinkedIn and is written in Scala. Its design philosophy is entirely different from RabbitMQ's — RabbitMQ is a post office; Kafka is a **log**. Messages are appended in order to an immutable log, and each consumer keeps track of "where it has read to" (the offset).
+
+### 3.1 Core Concepts
+
+- **Topic** — the message category, similar to a RabbitMQ routing key.
+- **Partition** — a Topic is split into multiple partitions spread across brokers; this is the key to Kafka's horizontal scalability.
+- **Offset** — the consumer's position within a partition, managed by the consumer itself.
+- **Consumer Group** — consumers in the same group share consumption of a Topic; each partition is consumed by exactly one consumer in the group.
+- **Broker** — a single server node in a Kafka cluster.
+
+```
+Topic: order-events (3 partitions)
+  Partition 0: [msg0, msg1, msg4, msg7, ...]
+  Partition 1: [msg2, msg3, msg5, msg8, ...]
+  Partition 2: [msg6, msg9, msg10, ...]
+```
+
+### 3.2 Kafka vs RabbitMQ
+
+| Dimension | RabbitMQ | Kafka |
+| --- | --- | --- |
+| Model | Queue (push/pull) | Partitioned log (pull) |
+| Message retention | Deleted after consumption | Retained by time/size |
+| Throughput | Tens of thousands QPS | Millions of QPS |
+| Latency | Microseconds | Milliseconds |
+| Ordering | In-queue order | In-partition order |
+| Use cases | Business messages, task dispatch | Logs, stream processing, event sourcing |
+
+In short — **RabbitMQ fits business messages** (orders, notifications, tasks), **Kafka fits big-data streams** (logs, monitoring, user behavior).
+
+### 3.3 Java Client Example
+
+```java
+// Producer
+Properties props = new Properties();
+props.put("bootstrap.servers", "localhost:9092");
+props.put("key.serializer", "StringSerializer");
+props.put("value.serializer", "StringSerializer");
+KafkaProducer<String, String> producer = new KafkaProducer<>(props);
+producer.send(new ProducerRecord<>("order-events", "order-1", "created"));
+producer.close();
+
+// Consumer
+Properties props = new Properties();
+props.put("bootstrap.servers", "localhost:9092");
+props.put("group.id", "order-group");
+props.put("key.deserializer", "StringDeserializer");
+props.put("value.deserializer", "StringDeserializer");
+KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
+consumer.subscribe(Collections.singletonList("order-events"));
+while (true) {
+    ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+    for (ConsumerRecord<String, String> r : records) {
+        System.out.println("收到: " + r.value());
+    }
+}
+```
+
+### 3.4 Spring Boot Integration
+
+```java
+// Producer
+@Service
+public class EventPublisher {
+    @Autowired
+    private KafkaTemplate<String, String> kafka;
+
+    public void publish(String event) {
+        kafka.send("order-events", event);
+    }
+}
+
+// Consumer
+@Component
+public class EventConsumer {
+    @KafkaListener(topics = "order-events", groupId = "order-group")
+    public void handle(String event) {
+        System.out.println("消费: " + event);
+    }
+}
+```
+
+## IV. Message Reliability: No Loss, No Duplication, No Reordering
+
+The three great challenges of message queues — **message loss, message duplication, and out-of-order messages**.
+
+### 4.1 Publisher Confirms: No Loss
+
+When a producer sends a message, how does it know the broker received it?
+- **RabbitMQ** — enable publisher confirms; the broker sends back an ack once it receives the message.
+- **Kafka** — configure `acks=all`; a send counts as successful only when all replicas confirm.
+
+```java
+// Kafka producer config
+props.put("acks", "all");              // All replicas confirm
+props.put("retries", Integer.MAX_VALUE); // Retry on failure
+props.put("enable.idempotence", "true"); // Idempotent production
+```
+
+### 4.2 Consumer Acknowledgement: Confirm After Processing
+
+A consumer picks up a message and crashes halfway through — is the message considered consumed?
+- **RabbitMQ** — manual ACK; tell the broker "I'm done" only after processing succeeds. With auto-ACK, the message is acknowledged the moment it's delivered, so a processing failure loses the message.
+- **Kafka** — manually commit the offset; `consumer.commitSync()` after processing.
+
+```java
+// RabbitMQ manual ACK
+channel.basicConsume("queue", false, (tag, delivery) -> {
+    try {
+        process(delivery);          // Process the business logic
+        channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);  // Acknowledge
+    } catch (Exception e) {
+        channel.basicNack(delivery.getEnvelope().getDeliveryTag(), false, true); // Requeue
+    }
+}, tag -> {});
+```
+
+### 4.3 Dead-Letter Queue: Handling Failed Messages
+
+Messages that fail consumption, expire, or overflow a queue are sent to a **dead-letter queue (DLQ)**. The DLQ can be consumed by another consumer for alerting, retry, or manual handling.
+
+```java
+// RabbitMQ DLQ: specify x-dead-letter-exchange when binding
+Map<String, Object> args = new HashMap<>();
+args.put("x-dead-letter-exchange", "dlx.exchange");
+channel.queueDeclare("main.queue", false, false, false, args);
+```
+
+### 4.4 Idempotency: Don't Process the Same Message Twice
+
+Network hiccups cause duplicate delivery — if the same order message is consumed twice, inventory gets deducted twice. Disaster. **Idempotent** — running the same operation multiple times yields the same result.
+
+Common approaches:
+- **Business unique key** — before consuming, check "has this message been processed?" If yes, skip it.
+- **Database unique constraint** — use the message ID as a unique key; duplicate inserts fail.
+- **Redis deduplication** — `SETNX msgId 1`; if it already exists, skip.
+
+```java
+@Transactional
+public void consume(OrderMessage msg) {
+    if (redis.setNx("msg:" + msg.getId(), "1", 86400)) {
+        // First time processing
+        orderService.process(msg);
+    } else {
+        log.info("消息 {} 已处理, 跳过", msg.getId());
+    }
+}
+```
+
+### 4.5 Ordering: In-Partition Order
+
+Kafka guarantees **ordering within a partition** — messages with the same key go to the same partition and are consumed in offset order. Across partitions, no guarantee.
+
+RabbitMQ queues are FIFO — naturally ordered. But with multiple consumers sharing a queue, processing speeds differ and the final order may get scrambled — use a single consumer or an ordering lock.
+
+## V. Other Common Message Queues
+
+- **RocketMQ** — open-sourced by Alibaba, written in Java, strong transaction-message support, widely used in domestic e-commerce.
+- **ActiveMQ** — the veteran, a JMS spec implementation, gradually being replaced.
+- **Pulsar** — open-sourced by Yahoo, compute-storage separation, a cloud-native newcomer.
+
+## VI. Hands-on: Simulating a Message Queue with Java SE
+
+The Piston online environment can't run RabbitMQ/Kafka servers. We'll use Java SE's `BlockingQueue` to simulate a mini message queue — supporting topic subscription, multiple consumers, message acknowledgement, and dead-letter handling — to demonstrate the core mechanics of a message queue.
+
+<CodeRunner code={`import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+// 一个迷你消息队列: 用 BlockingQueue 模拟
+class MiniMQ {
+    // 队列存储: topic -> 队列
+    private final Map<String, BlockingQueue<Message>> queues = new ConcurrentHashMap<>();
+    // 死信队列
+    private final BlockingQueue<Message> dlq = new LinkedBlockingQueue<>();
+    // 已处理消息 ID (幂等去重)
+    private final Set<String> processedIds = ConcurrentHashMap.newKeySet();
+    // 消息计数
+    private final AtomicInteger totalProduced = new AtomicInteger(0);
+    private final AtomicInteger totalConsumed = new AtomicInteger(0);
+    private final AtomicInteger totalFailed = new AtomicInteger(0);
+
+    static class Message {
+        final String id;
+        final String topic;
+        final String body;
+        final long timestamp;
+        int retryCount = 0;
+        Message(String id, String topic, String body) {
+            this.id = id; this.topic = topic; this.body = body;
+            this.timestamp = System.currentTimeMillis();
+        }
+        public String toString() {
+            return "[id=" + id + ", topic=" + topic + ", body=" + body + "]";
+        }
+    }
+
+    // 声明队列
+    public void declareTopic(String topic) {
+        queues.put(topic, new LinkedBlockingQueue<>(100));
+    }
+
+    // 生产消息
+    public boolean produce(String topic, String id, String body) {
+        BlockingQueue<Message> q = queues.get(topic);
+        if (q == null) throw new RuntimeException("topic 不存在: " + topic);
+        boolean ok = q.offer(new Message(id, topic, body));
+        if (ok) totalProduced.incrementAndGet();
+        return ok;
+    }
+
+    // 消费消息 (手动 ACK)
+    public interface Handler {
+        // 返回 true 表示处理成功, false 表示失败 (进死信)
+        boolean handle(Message msg) throws Exception;
+    }
+
+    public void consume(String topic, Handler handler, String consumerName) {
+        BlockingQueue<Message> q = queues.get(topic);
+        if (q == null) return;
+        Message msg = q.poll();
+        if (msg == null) return;
+
+        // 幂等检查
+        if (processedIds.contains(msg.id)) {
+            System.out.println(consumerName + ": 消息 " + msg.id + " 已处理, 跳过");
+            return;
+        }
+
+        try {
+            boolean success = handler.handle(msg);
+            if (success) {
+                processedIds.add(msg.id);
+                totalConsumed.incrementAndGet();
+                System.out.println(consumerName + " ACK: " + msg);
+            } else {
+                throw new RuntimeException("handler 返回 false");
+            }
+        } catch (Exception e) {
+            totalFailed.incrementAndGet();
+            msg.retryCount++;
+            if (msg.retryCount >= 3) {
+                dlq.offer(msg);
+                System.out.println(consumerName + " NACK (重试 " + msg.retryCount + " 次, 进死信): " + msg);
+            } else {
+                q.offer(msg);  // 重新入队
+                System.out.println(consumerName + " NACK (重试 " + msg.retryCount + "): " + msg);
+            }
+        }
+    }
+
+    public void stats() {
+        System.out.println("--- 统计 ---");
+        System.out.println("  生产总数: " + totalProduced.get());
+        System.out.println("  消费成功: " + totalConsumed.get());
+        System.out.println("  消费失败: " + totalFailed.get());
+        System.out.println("  死信队列: " + dlq.size() + " 条");
+    }
+
+    public BlockingQueue<Message> getDlq() { return dlq; }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("=== 消息队列模拟 (MiniMQ) ===\\n");
+        MiniMQ mq = new MiniMQ();
+        mq.declareTopic("orders");
+        mq.declareTopic("notifications");
+
+        System.out.println("--- 1. 生产消息 ---");
+        mq.produce("orders", "msg-1", "订单 #1001 已创建");
+        mq.produce("orders", "msg-2", "订单 #1002 已创建");
+        mq.produce("orders", "msg-3", "订单 #1003 已创建");
+        mq.produce("notifications", "n-1", "欢迎注册!");
+        System.out.println("已生产 4 条消息 (3 条 orders, 1 条 notifications)\\n");
+
+        System.out.println("--- 2. 正常消费 ---");
+        // 消费 orders: 模拟业务处理
+        mq.consume("orders", msg -> {
+            System.out.println("  处理订单: " + msg.body);
+            return true;
+        }, "OrderConsumer-1");
+        mq.consume("orders", msg -> {
+            System.out.println("  处理订单: " + msg.body);
+            return true;
+        }, "OrderConsumer-2");
+
+        System.out.println("\\n--- 3. 消费失败 + 重试 + 死信 ---");
+        // msg-3 模拟总是失败
+        for (int i = 0; i < 4; i++) {
+            mq.consume("orders", msg -> {
+                System.out.println("  处理订单 (将失败): " + msg.body);
+                throw new RuntimeException("数据库连接失败");
+            }, "OrderConsumer-3");
+        }
+
+        System.out.println("\\n--- 4. 幂等性 (重复消费) ---");
+        // 再生产一条 msg-1 (同 ID), 应该被跳过
+        mq.produce("orders", "msg-1", "订单 #1001 已创建 (重复)");
+        mq.consume("orders", msg -> {
+            System.out.println("  处理订单: " + msg.body);
+            return true;
+        }, "OrderConsumer-1");
+
+        System.out.println("\\n--- 5. 多 Topic 消费 ---");
+        mq.consume("notifications", msg -> {
+            System.out.println("  发送通知: " + msg.body);
+            return true;
+        }, "NotificationConsumer");
+
+        System.out.println("\\n--- 6. 死信队列处理 ---");
+        System.out.println("死信队列中的消息:");
+        MiniMQ.Message dlqMsg;
+        while ((dlqMsg = mq.getDlq().poll()) != null) {
+            System.out.println("  - " + dlqMsg + " (重试 " + dlqMsg.retryCount + " 次)");
+        }
+
+        System.out.println();
+        mq.stats();
+
+        System.out.println("\\n--- 7. 削峰演示 ---");
+        // 瞬时生产 20 条, 但消费者一次只处理 2 条
+        System.out.println("模拟秒杀: 瞬时生产 20 条, 消费者慢速处理");
+        for (int i = 0; i < 20; i++) {
+            mq.produce("orders", "spike-" + i, "秒杀订单 #" + i);
+        }
+        System.out.println("队列堆积: " + 20 + " 条");
+        int processed = 0;
+        for (int i = 0; i < 3; i++) {  // 消费者只能处理 3 条
+            mq.consume("orders", msg -> {
+                System.out.println("  慢慢处理: " + msg.body);
+                return true;
+            }, "SpikeConsumer");
+            processed++;
+        }
+        System.out.println("本次只处理了 " + processed + " 条, 剩余在队列等下次处理 (削峰)");
+    }
+}`} />
+
+> **What to watch for**: when a consumer fails, it retries; after 3 failures the message lands in the dead-letter queue; messages with the same ID are deduplicated by the idempotency check and never processed twice; in the peak-shaving scenario, the producer dumps 20 messages at once but the consumer plods at its own pace — the queue absorbs the spike.
+
+## VII. Message Queue Trade-offs
+
+When choosing an MQ, consider:
+
+| Need | Recommendation |
+| --- | --- |
+| Business messages, task dispatch, delay queues | RabbitMQ |
+| High-throughput logs, stream processing, event sourcing | Kafka |
+| Transactional messages, e-commerce orders | RocketMQ |
+| Simple internal async | Redis Stream / Java BlockingQueue |
+
+Don't use an MQ just to use one — for simple internal async, a `BlockingQueue` is plenty. Introducing an MQ means taking on an operational burden.
+
+## VIII. Chapter Summary
+
+| Topic | Key Point |
+| --- | --- |
+| Three roles | Async, decoupling, peak shaving |
+| RabbitMQ model | Exchange → Binding → Queue |
+| Four Exchange types | Direct (point-to-point) / Fanout (broadcast) / Topic (wildcard) / Headers |
+| Kafka model | Topic → Partition → Offset |
+| Kafka vs RabbitMQ | RabbitMQ for business messages, Kafka for big-data streams |
+| Reliability | Publisher confirm + consumer manual ACK + dead-letter queue |
+| Idempotency | Business unique key / database unique constraint / Redis SETNX |
+| Ordering | Kafka in-partition order, RabbitMQ in-queue order |
+
+## Memory Hooks
+
+- **Three roles** — async, decoupling, peak shaving.
+- **RabbitMQ four routes** — Direct, Fanout, Topic, Headers.
+- **Kafka trio** — Topic, Partition, Offset.
+- **Reliability three moves** — publisher confirm, consumer ACK, dead-letter safety net.
+- **Idempotency three ways** — unique key, unique constraint, SETNX dedup.
+
+## Conclusion
+
+Message queues move a system from "synchronous and tightly coupled" to "asynchronous and loosely coupled" — producers and consumers each run at their own pace, with the queue as the bridge that ferries messages between them. They buy throughput and resilience at the cost of latency, complexity, and consistency trade-offs.
+
+Next chapter we look at **microservices** — when a monolith grows too big to maintain, how do you split it into independent services, each deploying and evolving on its own? Spring Cloud, Nacos, Gateway, and Sentinel — the all-in-one toolkit of the cloud-native era.

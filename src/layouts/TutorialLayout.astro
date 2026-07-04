@@ -48,14 +48,25 @@ const altLangPath = getAlternateLangPath(Astro.url);
       const MANUAL_FLAG = 'lang-manual';
       const DETECTED_FLAG = 'lang-detected';
 
-      // 如果用户已手动切换过语言，不再自动重定向
-      if (sessionStorage.getItem(MANUAL_FLAG) === '1') return;
+      // 用户手动切换的语言偏好用 localStorage 持久化（跨标签页、跨会话保留）
+      const manualPref = localStorage.getItem(MANUAL_FLAG);
+      if (manualPref) {
+        // 已有手动偏好：若当前页面语言与偏好不符，纠正到偏好语言
+        const currentPath = window.location.pathname;
+        const isEnglish = currentPath.startsWith('/en/') || currentPath === '/en';
+        if (manualPref === 'en' && !isEnglish) {
+          window.location.replace('/en' + currentPath);
+        } else if (manualPref === 'zh' && isEnglish) {
+          window.location.replace(currentPath.replace(/^\/en/, '') || '/');
+        }
+        return;
+      }
 
       const currentPath = window.location.pathname;
       const isEnglish = currentPath.startsWith('/en/') || currentPath === '/en';
       const hasDetected = sessionStorage.getItem(DETECTED_FLAG) === '1';
 
-      // 只在首次访问时检测
+      // 自动检测仅在首个标签页的首次访问时执行
       if (hasDetected) return;
       sessionStorage.setItem(DETECTED_FLAG, '1');
 
@@ -131,10 +142,14 @@ const altLangPath = getAlternateLangPath(Astro.url);
       overlay.classList.remove('show');
     });
 
-    // 语言切换：标记为手动切换，之后不再自动重定向
+    // 语言切换：将用户选择的语言偏好持久化到 localStorage
     const langToggle = document.getElementById('lang-toggle');
     langToggle.addEventListener('click', () => {
-      sessionStorage.setItem('lang-manual', '1');
+      // 目标语言 = 当前语言的反向
+      const currentPath = window.location.pathname;
+      const isEnglish = currentPath.startsWith('/en/') || currentPath === '/en';
+      const targetLang = isEnglish ? 'zh' : 'en';
+      localStorage.setItem('lang-manual', targetLang);
       const altPath = langToggle.getAttribute('data-alt-lang-path');
       if (altPath) {
         window.location.href = altPath;
